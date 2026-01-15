@@ -1552,7 +1552,6 @@ elif page == "Breweries":
             
             with col_config2:
                 status = st.selectbox("Status*", ["Active", "Inactive", "Under Construction", "Maintenance"], key="new_brewery_status")
-                license_number = st.text_input("License Number", key="new_brewery_license")
                 established_date = st.date_input("Established Date", datetime.now().date(), key="new_brewery_established")
             
             with col_config3:
@@ -1579,8 +1578,7 @@ elif page == "Breweries":
                         "default_batch_size": default_batch_size,
                         "annual_capacity_hl": annual_capacity,
                         "status": status,
-                        "license_number": license_number,
-                        "established_date": established_date,
+"established_date": established_date,
                         "has_lab": 1 if has_lab else 0,
                         "description": description
                     }
@@ -1668,7 +1666,7 @@ elif page == "Breweries":
                             eq_count = int(equipment_counts.get(brewery.get("id_brewery"), equipment_counts.get(str(brewery.get("id_brewery")), 0)))
                         except Exception:
                             eq_count = 0
-                        st.write(f"📜 License: {brewery.get('license_number', 'N/A')}  |  ⚙️ Equipment: {eq_count}")
+                        st.write(f"⚙️ Equipment: {eq_count}")
                     
                     with col_info3:
                         st.write("**Features**")
