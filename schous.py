@@ -1522,7 +1522,25 @@ elif page == "Breweries":
                         st.write("**Production Info**")
                         st.write(f"📦 Default Batch: {brewery.get('default_batch_size', 0):.0f}L")
                         st.write(f"🏭 Annual Capacity: {brewery.get('annual_capacity_hl', 0):.0f} hL")
-                        st.write(f"📅 Established: {brewery.get('established_date', '').date() if pd.notna(brewery.get('established_date')) else 'N/A'}")
+                        est = brewery.get("established_date")
+                        est_str = "N/A"
+                        if est is not None and not (isinstance(est, float) and pd.isna(est)) and not pd.isna(est):
+                            try:
+                                est_dt = pd.to_datetime(est, errors="coerce")
+                                if pd.notna(est_dt):
+                                    est_str = est_dt.date().isoformat()
+                                else:
+                                    # if it's already a date-like object
+                                    if hasattr(est, "isoformat"):
+                                        est_str = est.isoformat()
+                                    else:
+                                        est_str = str(est)
+                            except Exception:
+                                if hasattr(est, "isoformat"):
+                                    est_str = est.isoformat()
+                                else:
+                                    est_str = str(est)
+                        st.write(f"📅 Established: {est_str}")
                         st.write(f"📜 License: {brewery.get('license_number', 'N/A')}")
                     
                     with col_info3:
