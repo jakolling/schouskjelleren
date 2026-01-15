@@ -67,9 +67,8 @@ def get_authenticator():
     return stauth.Authenticate(
         credentials=cfg["credentials"],
         cookie_name=cfg["cookie"]["name"],
-        key=cfg["cookie"]["key"],
-        cookie_expiry_days=int(cfg["cookie"].get("expiry_days", 30)),
-        preauthorized=[]
+        cookie_cookie_key=cfg["cookie"]["key"],
+        cookie_expiry_days=float(cfg["cookie"].get("expiry_days", 30)),
     )
 
 def require_login():
