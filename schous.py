@@ -264,6 +264,8 @@ def init_database():
                 id_ingredient BIGSERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 category TEXT,
+                supplier_id BIGINT,
+                supplier_name TEXT,
                 supplier TEXT,
                 origin TEXT,
                 unit TEXT,
@@ -430,6 +432,8 @@ def init_database():
                 id_ingredient INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 category TEXT,
+                supplier_id INTEGER,
+                supplier_name TEXT,
                 supplier TEXT,
                 origin TEXT,
                 unit TEXT,
@@ -592,6 +596,8 @@ def init_database():
             "manufacturer": "TEXT",
             "category": "TEXT",
             "supplier": "TEXT",
+            "supplier_id": "BIGINT",
+            "supplier_name": "TEXT",
             "origin": "TEXT",
             "unit": "TEXT",
             "stock": "DOUBLE PRECISION DEFAULT 0",
@@ -2759,11 +2765,68 @@ elif page == "Ingredients":
                     stock = st.number_input("Initial Stock*", min_value=0.0, value=0.0, step=0.1, key="new_ing_stock")
                 
                 with col_form2:
-                    unit_cost = st.number_input("Unit Cost*", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="new_ing_cost")
-                    low_stock_threshold = st.number_input("Low Stock Threshold*", min_value=0.0, value=10.0, step=0.1, key="new_ing_threshold")
-                    
+                    # Supplier relationship (prices are calculated from Purchases, incl. freight allocation)
+                    suppliers_df = data.get("suppliers", pd.DataFrame())
+                    supplier_options = suppliers_df["name"].dropna().astype(str).tolist() if not suppliers_df.empty else []
+
+                    selected_supplier = st.selectbox(
+                        "Supplier*",
+                        ["Select Supplier"] + supplier_options,
+                        key="new_ing_supplier",
+                    )
+
+                    if st.button("➕ Add new supplier", key="new_ing_add_supplier_btn", use_container_width=True):
+                        st.session_state["new_ing_show_add_supplier"] = True
+
+                    if st.session_state.get("new_ing_show_add_supplier"):
+                        st.markdown("**Add new supplier**")
+                        with st.form("new_ing_add_supplier_form", clear_on_submit=True):
+                            sup_name = st.text_input("Supplier Name*", key="new_ing_new_sup_name")
+                            email = st.text_input("Email", key="new_ing_new_sup_email")
+                            phone = st.text_input("Phone", key="new_ing_new_sup_phone")
+                            notes_sup = st.text_area("Notes", key="new_ing_new_sup_notes")
+                            submitted_sup = st.form_submit_button("Save supplier", type="primary", use_container_width=True)
+
+                        if submitted_sup:
+                            if not sup_name:
+                                st.error("Supplier name is required!")
+                            else:
+                                insert_data(
+                                    "suppliers",
+                                    {
+                                        "name": sup_name,
+                                        "email": email,
+                                        "phone": phone,
+                                        "notes": notes_sup,
+                                    },
+                                )
+                                st.session_state["new_ing_supplier"] = str(sup_name)
+                                st.session_state["new_ing_show_add_supplier"] = False
+                                data = get_all_data()
+                                st.success(f"✅ Supplier '{sup_name}' added!")
+                                st.rerun()
+
+                        if st.button("Cancel", key="new_ing_cancel_add_supplier", use_container_width=True):
+                            st.session_state["new_ing_show_add_supplier"] = False
+                            st.rerun()
+
+                    low_stock_threshold = st.number_input(
+                        "Low Stock Threshold*",
+                        min_value=0.0,
+                        value=10.0,
+                        step=0.1,
+                        key="new_ing_threshold",
+                    )
+
                     # Campos adicionais
-                    alpha_acid = st.number_input("Alpha Acid % (for hops)", min_value=0.0, max_value=100.0, value=0.0, step=0.1, key="new_ing_alpha")
+                    alpha_acid = st.number_input(
+                        "Alpha Acid % (for hops)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=0.0,
+                        step=0.1,
+                        key="new_ing_alpha",
+                    )
                     lot_number = st.text_input("Lot/Batch Number", key="new_ing_lot")
                     expiry_date = st.date_input("Expiry Date (optional)", key="new_ing_expiry")
                 
@@ -2771,23 +2834,43 @@ elif page == "Ingredients":
                 
                 submitted = st.form_submit_button("➕ Add Ingredient", type="primary", use_container_width=True)
                 if submitted:
-                    if not ing_name or unit_cost <= 0:
-                        st.error("Ingredient name and unit cost are required!")
+                    if not ing_name or (selected_supplier == "Select Supplier"):
+                        st.error("Ingredient name and supplier are required!")
                     else:
+                        # Resolve supplier_id from suppliers table (best effort)
+                        suppliers_df2 = data.get("suppliers", pd.DataFrame())
+                        sid = None
+                        if not suppliers_df2.empty and selected_supplier and selected_supplier != "Select Supplier":
+                            id_col = "id_supplier" if "id_supplier" in suppliers_df2.columns else ("id" if "id" in suppliers_df2.columns else None)
+                            if id_col:
+                                try:
+                                    sid = int(
+                                        suppliers_df2.loc[
+                                            suppliers_df2["name"].astype(str) == str(selected_supplier),
+                                            id_col,
+                                        ].iloc[0]
+                                    )
+                                except Exception:
+                                    sid = None
+
                         new_ingredient = {
                             "name": ing_name,
                             "manufacturer": manufacturer,
                             "category": category,
                             "unit": unit,
                             "stock": stock,
-                            "unit_cost": unit_cost,
+                            # Prices/costs are calculated from Purchases (incl. freight allocation)
+                            "unit_cost": 0.0,
                             "low_stock_threshold": low_stock_threshold,
                             "alpha_acid": alpha_acid if category == "Hops" else 0.0,
                             "lot_number": lot_number,
                             "expiry_date": expiry_date if expiry_date else None,
-                            "notes": notes
+                            "supplier_id": sid,
+                            "supplier_name": None if selected_supplier == "Select Supplier" else str(selected_supplier),
+                            "supplier": None if selected_supplier == "Select Supplier" else str(selected_supplier),
+                            "notes": notes,
                         }
-                        
+
                         insert_data("ingredients", new_ingredient)
                         data = get_all_data()
                         st.success(f"✅ Ingredient '{ing_name}' added successfully!")
@@ -2833,13 +2916,26 @@ elif page == "Ingredients":
                                                   min_value=0.0, step=0.1, key="edit_ing_stock")
                     
                     with col_edit2:
-                        new_unit_cost = st.number_input("Unit Cost", 
-                                                      value=float(ing_data.get("unit_cost", 0)), 
-                                                      min_value=0.0, step=0.01, format="%.2f", key="edit_ing_cost")
-                        new_threshold = st.number_input("Low Stock Threshold", 
-                                                      value=float(ing_data.get("low_stock_threshold", 10)), 
-                                                      min_value=0.0, step=0.1, key="edit_ing_threshold")
-                        
+                        # Unit cost is calculated from Purchases (incl. freight allocation)
+                        current_cost = float(ing_data.get("unit_cost", 0) or 0)
+                        st.metric("Current Unit Cost (calculated)", f"${current_cost:,.4f}")
+
+                        # Supplier relationship
+                        suppliers_df = data.get("suppliers", pd.DataFrame())
+                        supplier_options = suppliers_df["name"].dropna().astype(str).tolist() if not suppliers_df.empty else []
+                        current_supplier = str(ing_data.get("supplier_name") or ing_data.get("supplier") or "")
+                        sup_choices = ["Select Supplier"] + supplier_options
+                        sup_index = sup_choices.index(current_supplier) if current_supplier in sup_choices else 0
+                        new_supplier = st.selectbox("Supplier", sup_choices, index=sup_index, key="edit_ing_supplier")
+
+                        new_threshold = st.number_input(
+                            "Low Stock Threshold",
+                            value=float(ing_data.get("low_stock_threshold", 10) or 0),
+                            min_value=0.0,
+                            step=0.1,
+                            key="edit_ing_threshold",
+                        )
+
                         # Campos específicos para lúpulo
                         if new_category == "Hops":
                             new_alpha = st.number_input("Alpha Acid %", 
@@ -2863,13 +2959,31 @@ elif page == "Ingredients":
                     with col_btn1:
                         if st.button("💾 Save Changes", use_container_width=True, key="save_ing_btn"):
                             # Atualizar dados
+                            # Resolve supplier_id (best effort)
+                            suppliers_df_edit = data.get("suppliers", pd.DataFrame())
+                            new_supplier_id = None
+                            if not suppliers_df_edit.empty and new_supplier and new_supplier != "Select Supplier":
+                                id_col = "id_supplier" if "id_supplier" in suppliers_df_edit.columns else ("id" if "id" in suppliers_df_edit.columns else None)
+                                if id_col:
+                                    try:
+                                        new_supplier_id = int(
+                                            suppliers_df_edit.loc[
+                                                suppliers_df_edit["name"].astype(str) == str(new_supplier),
+                                                id_col,
+                                            ].iloc[0]
+                                        )
+                                    except Exception:
+                                        new_supplier_id = None
+
                             updates = {
                                 "name": new_name,
                                 "manufacturer": new_manufacturer,
                                 "category": new_category,
                                 "unit": new_unit,
                                 "stock": new_stock,
-                                "unit_cost": new_unit_cost,
+                                "supplier_id": new_supplier_id,
+                                "supplier_name": None if new_supplier == "Select Supplier" else str(new_supplier),
+                                "supplier": None if new_supplier == "Select Supplier" else str(new_supplier),
                                 "low_stock_threshold": new_threshold,
                                 "alpha_acid": new_alpha,
                                 "lot_number": new_lot,
@@ -3200,7 +3314,49 @@ elif page == "Purchases":
         if ingredients_df.empty:
             st.warning("⚠️ No ingredients available. Please add ingredients first.")
         else:
-            ingredient_options = sorted(ingredients_df["name"].dropna().astype(str).tolist())
+            # Filter ingredients by supplier relationship
+            eligible_df = ingredients_df.copy()
+
+            if supplier and supplier != "Select Supplier" and not suppliers_df.empty:
+                # Try to resolve supplier id from suppliers table
+                id_col = "id_supplier" if "id_supplier" in suppliers_df.columns else ("id" if "id" in suppliers_df.columns else None)
+                supplier_id = None
+                if id_col:
+                    try:
+                        supplier_id = int(
+                            suppliers_df.loc[suppliers_df["name"].astype(str) == str(supplier), id_col].iloc[0]
+                        )
+                    except Exception:
+                        supplier_id = None
+
+                # Backward-compatible matching: supplier_id OR supplier_name OR legacy supplier text
+                mask = pd.Series([False] * len(eligible_df), index=eligible_df.index)
+
+                if supplier_id is not None and "supplier_id" in eligible_df.columns:
+                    try:
+                        mask = mask | (eligible_df["supplier_id"].astype(object) == supplier_id)
+                        mask = mask | (eligible_df["supplier_id"].astype(str) == str(supplier_id))
+                    except Exception:
+                        pass
+
+                if "supplier_name" in eligible_df.columns:
+                    try:
+                        mask = mask | (eligible_df["supplier_name"].astype(str).str.lower() == str(supplier).lower())
+                    except Exception:
+                        pass
+
+                if "supplier" in eligible_df.columns:
+                    try:
+                        mask = mask | (eligible_df["supplier"].astype(str).str.lower() == str(supplier).lower())
+                    except Exception:
+                        pass
+
+                eligible_df = eligible_df[mask]
+
+            if supplier and supplier != "Select Supplier" and eligible_df.empty:
+                st.warning("⚠️ This supplier has no linked ingredients yet. Add ingredients and link them to this supplier first.")
+
+            ingredient_options = sorted(eligible_df["name"].dropna().astype(str).tolist())
 
             # Keep a local working table in session state
             if "po_items_df" not in st.session_state:
