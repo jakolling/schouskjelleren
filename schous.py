@@ -1416,7 +1416,7 @@ if st.session_state.delete_confirmation["type"] in ["ingredient", "supplier", "b
 # Navegação
 # -----------------------------
 page = st.sidebar.radio("Navigation", [
-    "Dashboard", "Breweries", "Ingredients", "Purchases", "Suppliers", 
+    "Dashboard", "Breweries", "Ingredients", "Purchases", 
     "Recipes", "Production Orders", "Calendar"
 ], key="page")
 st.sidebar.markdown("---")
@@ -3092,10 +3092,9 @@ elif page == "Purchases":
     st.title("🛒 Purchases & Inventory Management")
     
     # Tabs para Purchases
-    tab_new, tab_history, tab_suppliers, tab_reports = st.tabs([
+    tab_new, tab_history, tab_reports = st.tabs([
         "🛍️ New Purchase",
         "📜 Purchase History",
-        "🏭 Suppliers",
         "📊 Reports & Analytics"
     ])
     
@@ -3119,16 +3118,65 @@ elif page == "Purchases":
                 key="po_type",
             )
         with col_h2:
-            if not suppliers_df.empty:
-                supplier_options = suppliers_df["name"].dropna().astype(str).tolist()
-                supplier = st.selectbox(
-                    "Supplier*",
-                    ["Select Supplier"] + supplier_options,
-                    key="po_supplier",
-                )
-            else:
-                supplier = st.text_input("Supplier*", key="po_supplier_text")
+            supplier_options = (
+                suppliers_df["name"].dropna().astype(str).tolist() if not suppliers_df.empty else []
+            )
+
+            supplier = st.selectbox(
+                "Supplier*",
+                ["Select Supplier"] + supplier_options,
+                key="po_supplier",
+            )
+
+            # Supplier management happens through Purchases
+            if st.button("➕ Add new supplier", key="po_add_supplier_btn", use_container_width=True):
+                st.session_state["po_show_add_supplier"] = True
+
+            if st.session_state.get("po_show_add_supplier"):
+                st.markdown("**Add new supplier**")
+                with st.form("po_add_supplier_form", clear_on_submit=True):
+                    sup_name = st.text_input("Supplier Name*", key="po_new_sup_name")
+                    contact_name = st.text_input("Contact Person", key="po_new_sup_contact")
+                    email = st.text_input("Email", key="po_new_sup_email")
+                    phone = st.text_input("Phone", key="po_new_sup_phone")
+                    notes = st.text_area("Notes", key="po_new_sup_notes")
+                    submitted = st.form_submit_button("Save supplier", type="primary", use_container_width=True)
+
+                if submitted:
+                    if not sup_name:
+                        st.error("Supplier name is required!")
+                    else:
+                        # If supplier already exists, just select it
+                        if suppliers_df is not None and not suppliers_df.empty and (suppliers_df["name"].astype(str).str.lower() == str(sup_name).lower()).any():
+                            # Pick the canonical stored name
+                            canonical = suppliers_df.loc[
+                                suppliers_df["name"].astype(str).str.lower() == str(sup_name).lower(),
+                                "name",
+                            ].iloc[0]
+                            st.session_state["po_supplier"] = str(canonical)
+                        else:
+                            insert_data(
+                                "suppliers",
+                                {
+                                    "name": sup_name,
+                                    "contact_name": contact_name,
+                                    "email": email,
+                                    "phone": phone,
+                                    "notes": notes,
+                                },
+                            )
+                            st.session_state["po_supplier"] = str(sup_name)
+
+                        st.session_state["po_show_add_supplier"] = False
+                        data = get_all_data()
+                        st.success(f"✅ Supplier '{sup_name}' added!")
+                        st.rerun()
+
+                if st.button("Cancel", key="po_cancel_add_supplier", use_container_width=True):
+                    st.session_state["po_show_add_supplier"] = False
+                    st.rerun()
         with col_h3:
+
             order_number = st.text_input("Order / Purchase Number", key="po_order_number")
 
         col_h4, col_h5 = st.columns(2)
@@ -3466,158 +3514,7 @@ elif page == "Purchases":
             st.info("No purchase history available yet. Record your first purchase in the 'New Purchase' tab.")
         
         st.markdown("</div>", unsafe_allow_html=True)
-    
-    with tab_suppliers:
-        st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-        st.subheader("🏭 Supplier Management")
-        
-        # Add/Edit Fornecedor
-        col_sup1, col_sup2 = st.columns(2)
-        
-        with col_sup1:
-            sup_action = st.radio(
-                "Action",
-                ["Add New Supplier", "View/Edit Suppliers"],
-                horizontal=True,
-                key="supplier_action"
-            )
-        
-        if sup_action == "Add New Supplier":
-            with st.form("add_supplier_form", clear_on_submit=True):
-                st.markdown("---")
-                st.subheader("➕ Add New Supplier")
-                
-                col_sup_form1, col_sup_form2 = st.columns(2)
-                
-                with col_sup_form1:
-                    sup_name = st.text_input("Supplier Name*", key="new_sup_name")
-                    contact_name = st.text_input("Contact Person", key="new_sup_contact")
-                    email = st.text_input("Email", key="new_sup_email")
-                    phone = st.text_input("Phone", key="new_sup_phone")
-                
-                with col_sup_form2:
-                    address = st.text_input("Address", key="new_sup_address")
-                    city = st.text_input("City", key="new_sup_city")
-                    country = st.text_input("Country", value="Norway", key="new_sup_country")
-                    website = st.text_input("Website", key="new_sup_website")
-                
-                # Tipos de produtos fornecidos
-                product_types = st.multiselect(
-                    "Product Types Supplied",
-                    ["Grains", "Hops", "Yeast", "Equipment", "Packaging", "Chemicals", "Other"],
-                    key="new_sup_products"
-                )
-                
-                notes = st.text_area("Notes", key="new_sup_notes")
-                
-                submitted = st.form_submit_button("➕ Add Supplier", type="primary", use_container_width=True)
-                if submitted:
-                    if not sup_name:
-                        st.error("Supplier name is required!")
-                    else:
-                        new_supplier = {
-                            "name": sup_name,
-                            "contact_name": contact_name,
-                            "email": email,
-                            "phone": phone,
-                            "address": address,
-                            "city": city,
-                            "country": country,
-                            "website": website,
-                            "product_types": ", ".join(product_types),
-                            "notes": notes
-                        }
-                        
-                        insert_data("suppliers", new_supplier)
-                        data = get_all_data()
-                        st.success(f"✅ Supplier '{sup_name}' added successfully!")
-                        st.rerun()
-        
-        else:  # View/Edit Suppliers
-            st.markdown("---")
-            st.subheader("📋 Existing Suppliers")
-            
-            suppliers_df = data.get("suppliers", pd.DataFrame())
-            if not suppliers_df.empty:
-                # Filtro de busca
-                search_supplier = st.text_input("Search Supplier", key="search_supplier")
-                
-                # Aplicar filtro
-                filtered_suppliers = suppliers_df.copy()
-                if search_supplier:
-                    filtered_suppliers = filtered_suppliers[
-                        filtered_suppliers["name"].str.contains(search_supplier, case=False, na=False)
-                    ]
-                
-                if len(filtered_suppliers) > 0:
-                    # Mostrar em cards
-                    for _, supplier in filtered_suppliers.iterrows():
-                        with st.expander(f"🏭 {supplier['name']}", expanded=False):
-                            col_info1, col_info2 = st.columns(2)
-                            
-                            with col_info1:
-                                st.write("**Contact Information**")
-                                if supplier.get("contact_name"):
-                                    st.write(f"👤 {supplier['contact_name']}")
-                                if supplier.get("email"):
-                                    st.write(f"📧 {supplier['email']}")
-                                if supplier.get("phone"):
-                                    st.write(f"📞 {supplier['phone']}")
-                                if supplier.get("website"):
-                                    st.write(f"🌐 {supplier['website']}")
-                            
-                            with col_info2:
-                                st.write("**Location**")
-                                if supplier.get("address"):
-                                    st.write(f"📍 {supplier['address']}")
-                                if supplier.get("city"):
-                                    st.write(f"🏙️ {supplier['city']}")
-                                if supplier.get("country"):
-                                    st.write(f"🇳🇴 {supplier['country']}")
-                            
-                            # Estatísticas do fornecedor (se houver dados de compras)
-                            purchases_df = data.get("purchases", pd.DataFrame())
-                            if not purchases_df.empty:
-                                supplier_purchases = purchases_df[purchases_df["supplier"] == supplier["name"]]
-                                if len(supplier_purchases) > 0:
-                                    st.markdown("---")
-                                    st.write("**Purchase Statistics**")
-                                    
-                                    col_stat1, col_stat2, col_stat3 = st.columns(3)
-                                    with col_stat1:
-                                        total_orders = len(supplier_purchases)
-                                        st.metric("Total Orders", total_orders)
-                                    with col_stat2:
-                                        total_spent = supplier_purchases["total_cost"].sum()
-                                        st.metric("Total Spent", f"${total_spent:.2f}")
-                                    with col_stat3:
-                                        last_order = supplier_purchases["date"].max()
-                                        if pd.notna(last_order):
-                                            st.metric("Last Order", str(last_order.date()))
-                            
-                            # Botões de ação
-                            col_btn1, col_btn2, col_btn3 = st.columns(3)
-                            with col_btn1:
-                                if st.button("✏️ Edit", key=f"edit_sup_{supplier['id_supplier']}", use_container_width=True):
-                                    st.session_state['edit_supplier'] = supplier['id_supplier']
-                            with col_btn2:
-                                if st.button("📞 Contact", key=f"contact_sup_{supplier['id_supplier']}", use_container_width=True):
-                                    st.info(f"Contacting {supplier['name']}...")
-                            with col_btn3:
-                                if st.button("🗑️ Delete", key=f"delete_sup_{supplier['id_supplier']}", use_container_width=True, type="secondary"):
-                                    # Verificar se há compras associadas
-                                    if check_supplier_usage(supplier["name"]):
-                                        st.error(f"Cannot delete {supplier['name']} - has associated purchases!")
-                                    else:
-                                        st.session_state.delete_confirmation = {"type": "supplier", "id": supplier['id_supplier'], "name": supplier['name']}
-                                        st.rerun()
-                else:
-                    st.info("No suppliers found with the search criteria.")
-            else:
-                st.info("No suppliers registered yet. Add your first supplier above.")
-        
-        st.markdown("</div>", unsafe_allow_html=True)
-    
+
     with tab_reports:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📊 Purchase Reports & Analytics")
@@ -3922,56 +3819,6 @@ elif page == "Purchases":
             """)
         
         st.markdown("</div>", unsafe_allow_html=True)
-
-# -----------------------------
-# Suppliers Page (separada)
-# -----------------------------
-elif page == "Suppliers":
-    st.title("🏭 Suppliers Management")
-    
-    st.info("""
-    **Suppliers Management**  
-    You can manage suppliers in two ways:
-    
-    1. **Through the Purchases page** - Go to the 'Purchases' tab and select the 'Suppliers' sub-tab
-    2. **Directly here** - Use the options below
-    """)
-    
-    # Link rápido para a página Purchases
-    if st.button("🛒 Go to Purchases Page for Full Supplier Management", use_container_width=True):
-        page = "Purchases"
-        st.rerun()
-    
-    # Versão simplificada aqui
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.subheader("📋 Quick Supplier List")
-    
-    suppliers_df = data.get("suppliers", pd.DataFrame())
-    if not suppliers_df.empty:
-        # Mostrar lista simples
-        for _, supplier in suppliers_df.iterrows():
-            col1, col2, col3 = st.columns([3, 2, 1])
-            with col1:
-                st.write(f"**{supplier['name']}**")
-                if supplier.get('contact_name'):
-                    st.write(f"Contact: {supplier['contact_name']}")
-            with col2:
-                if supplier.get('email'):
-                    st.write(f"📧 {supplier['email']}")
-                if supplier.get('phone'):
-                    st.write(f"📞 {supplier['phone']}")
-            with col3:
-                # Contar pedidos deste fornecedor
-                purchases_df = data.get("purchases", pd.DataFrame())
-                if not purchases_df.empty:
-                    supplier_orders = len(purchases_df[purchases_df["supplier"] == supplier["name"]])
-                    st.write(f"**{supplier_orders}** orders")
-            
-            st.markdown("---")
-    else:
-        st.info("No suppliers registered yet. Add suppliers through the Purchases page.")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
 
 # -----------------------------
 # Recipes Page
