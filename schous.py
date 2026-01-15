@@ -785,12 +785,6 @@ page = st.sidebar.radio("Navigation", [
     "Recipes", "Production Orders", "Calendar"
 ])
 
-# Atualizar dados periodicamente
-if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
-    data = get_all_data()
-    st.rerun()
-
-
 st.sidebar.markdown("---")
 st.sidebar.info(f"👤 Role: {st.session_state.get('auth_role','viewer')}")
 
@@ -881,32 +875,34 @@ if page == "Dashboard":
         
         # Add novo evento
         with st.expander("➕ Add New Event"):
-            col_e1, col_e2 = st.columns(2)
-            with col_e1:
-                event_title = st.text_input("Event Title")
-                event_type = st.selectbox("Event Type", ["Brewing", "Transfer", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"])
-            with col_e2:
-                event_date = st.date_input("Event Date", today)
-                equipment = st.text_input("Equipment (Optional)")
+    with st.form("add_event_expander_form", clear_on_submit=True):
+                col_e1, col_e2 = st.columns(2)
+                with col_e1:
+                    event_title = st.text_input("Event Title")
+                    event_type = st.selectbox("Event Type", ["Brewing", "Transfer", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"])
+                with col_e2:
+                    event_date = st.date_input("Event Date", today)
+                    equipment = st.text_input("Equipment (Optional)")
             
-            event_notes = st.text_area("Notes")
+                event_notes = st.text_area("Notes")
             
-            if st.button("Add Event") and event_title:
-                new_event = {
-                    "title": event_title,
-                    "event_type": event_type,
-                    "start_date": event_date,
-                    "end_date": event_date,
-                    "equipment": equipment,
-                    "batch_id": "",
-                    "notes": event_notes,
-                    "created_by": "User"
-                }
+                submitted = st.form_submit_button("Add Event", type="primary", use_container_width=True)
+        if submitted and event_title:
+                    new_event = {
+                        "title": event_title,
+                        "event_type": event_type,
+                        "start_date": event_date,
+                        "end_date": event_date,
+                        "equipment": equipment,
+                        "batch_id": "",
+                        "notes": event_notes,
+                        "created_by": "User"
+                    }
                 
-                insert_data("calendar_events", new_event)
-                data = get_all_data()
-                st.success("Event added!")
-                st.rerun()
+                    insert_data("calendar_events", new_event)
+                    data = get_all_data()
+                    st.success("Event added!")
+                    st.rerun()
         
         st.markdown("</div>", unsafe_allow_html=True)
         
@@ -1083,63 +1079,64 @@ elif page == "Breweries":
         # Configurações
         st.markdown("---")
         st.subheader("⚙️ Brewery Configuration")
+        with st.form("add_brewery_form", clear_on_submit=True):
         
-        col_config1, col_config2, col_config3 = st.columns(3)
-        with col_config1:
-            default_batch_size = st.number_input(
-                "Default Batch Size (L)*",
-                min_value=10.0,
-                max_value=10000.0,
-                value=1000.0,
-                step=50.0,
-                key="new_brewery_batch"
-            )
-            annual_capacity = st.number_input(
-                "Annual Capacity (hL)",
-                min_value=1.0,
-                value=100.0,
-                step=10.0,
-                key="new_brewery_capacity"
-            )
+            col_config1, col_config2, col_config3 = st.columns(3)
+            with col_config1:
+                default_batch_size = st.number_input(
+                    "Default Batch Size (L)*",
+                    min_value=10.0,
+                    max_value=10000.0,
+                    value=1000.0,
+                    step=50.0,
+                    key="new_brewery_batch"
+                )
+                annual_capacity = st.number_input(
+                    "Annual Capacity (hL)",
+                    min_value=1.0,
+                    value=100.0,
+                    step=10.0,
+                    key="new_brewery_capacity"
+                )
         
-        with col_config2:
-            status = st.selectbox("Status*", ["Active", "Inactive", "Under Construction", "Maintenance"], key="new_brewery_status")
-            license_number = st.text_input("License Number", key="new_brewery_license")
-            established_date = st.date_input("Established Date", datetime.now().date(), key="new_brewery_established")
+            with col_config2:
+                status = st.selectbox("Status*", ["Active", "Inactive", "Under Construction", "Maintenance"], key="new_brewery_status")
+                license_number = st.text_input("License Number", key="new_brewery_license")
+                established_date = st.date_input("Established Date", datetime.now().date(), key="new_brewery_established")
         
-        with col_config3:
-            has_lab = st.checkbox("Quality Lab Available", key="new_brewery_lab")
+            with col_config3:
+                has_lab = st.checkbox("Quality Lab Available", key="new_brewery_lab")
         
-        description = st.text_area("Description / Notes", key="new_brewery_desc")
-        
-        if st.button("🏭 Add Brewery", type="primary", use_container_width=True, key="add_brewery_btn"):
-            if not brewery_name:
-                st.error("Brewery name is required!")
-            else:
-                new_brewery = {
-                    "name": brewery_name,
-                    "type": brewery_type,
-                    "address": address,
-                    "city": city,
-                    "state": state,
-                    "country": country,
-                    "postal_code": postal_code,
-                    "contact_person": contact_person,
-                    "contact_phone": contact_phone,
-                    "contact_email": contact_email,
-                    "default_batch_size": default_batch_size,
-                    "annual_capacity_hl": annual_capacity,
-                    "status": status,
-                    "license_number": license_number,
-                    "established_date": established_date,
-                    "has_lab": 1 if has_lab else 0,
-                    "description": description
-                }
-                
-                insert_data("breweries", new_brewery)
-                data = get_all_data()
-                st.success(f"✅ Brewery '{brewery_name}' added successfully!")
-                st.rerun()
+            description = st.text_area("Description / Notes", key="new_brewery_desc")
+            submitted = st.form_submit_button("🏭 Add Brewery", type="primary", use_container_width=True)
+            if submitted:
+                if not brewery_name:
+                    st.error("Brewery name is required!")
+                else:
+                    new_brewery = {
+                        "name": brewery_name,
+                        "type": brewery_type,
+                        "address": address,
+                        "city": city,
+                        "state": state,
+                        "country": country,
+                        "postal_code": postal_code,
+                        "contact_person": contact_person,
+                        "contact_phone": contact_phone,
+                        "contact_email": contact_email,
+                        "default_batch_size": default_batch_size,
+                        "annual_capacity_hl": annual_capacity,
+                        "status": status,
+                        "license_number": license_number,
+                        "established_date": established_date,
+                        "has_lab": 1 if has_lab else 0,
+                        "description": description
+                    }
+            
+                    insert_data("breweries", new_brewery)
+                    data = get_all_data()
+                    st.success(f"✅ Brewery '{brewery_name}' added successfully!")
+                    st.rerun()
         
         st.markdown("</div>", unsafe_allow_html=True)
         
@@ -2002,177 +1999,178 @@ elif page == "Ingredients":
     with tab_add:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("➕ Add/Edit Ingredients")
+            with st.form("add_ingredient_form", clear_on_submit=True):
         
-        action = st.radio(
-            "Select Action",
-            ["Add New Ingredient", "Edit Existing Ingredient"],
-            horizontal=True,
-            key="ing_action"
-        )
+                        action = st.radio(
+                "Select Action",
+                ["Add New Ingredient", "Edit Existing Ingredient"],
+                horizontal=True,
+                key="ing_action"
+                        )
         
-        if action == "Add New Ingredient":
-            col_form1, col_form2 = st.columns(2)
+                        if action == "Add New Ingredient":
+                col_form1, col_form2 = st.columns(2)
             
-            with col_form1:
-                ing_name = st.text_input("Ingredient Name*", key="new_ing_name")
-                manufacturer = st.text_input("Manufacturer", key="new_ing_manufacturer")
+                with col_form1:
+                    ing_name = st.text_input("Ingredient Name*", key="new_ing_name")
+                    manufacturer = st.text_input("Manufacturer", key="new_ing_manufacturer")
                 
-                category_options = [
-                    "Grain", "Malt Extract", "Hops", "Yeast", "Sugar", 
-                    "Water Treatment", "Spices", "Fruits", "Other"
-                ]
-                category = st.selectbox("Category*", category_options, key="new_ing_category")
+                    category_options = [
+                        "Grain", "Malt Extract", "Hops", "Yeast", "Sugar", 
+                        "Water Treatment", "Spices", "Fruits", "Other"
+                    ]
+                    category = st.selectbox("Category*", category_options, key="new_ing_category")
                 
-                unit_options = ["kg", "g", "lb", "oz", "L", "mL", "pkg", "unit"]
-                unit = st.selectbox("Unit*", unit_options, key="new_ing_unit")
+                    unit_options = ["kg", "g", "lb", "oz", "L", "mL", "pkg", "unit"]
+                    unit = st.selectbox("Unit*", unit_options, key="new_ing_unit")
                 
-                stock = st.number_input("Initial Stock*", min_value=0.0, value=0.0, step=0.1, key="new_ing_stock")
+                    stock = st.number_input("Initial Stock*", min_value=0.0, value=0.0, step=0.1, key="new_ing_stock")
             
-            with col_form2:
-                unit_cost = st.number_input("Unit Cost*", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="new_ing_cost")
-                low_stock_threshold = st.number_input("Low Stock Threshold*", min_value=0.0, value=10.0, step=0.1, key="new_ing_threshold")
+                with col_form2:
+                    unit_cost = st.number_input("Unit Cost*", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="new_ing_cost")
+                    low_stock_threshold = st.number_input("Low Stock Threshold*", min_value=0.0, value=10.0, step=0.1, key="new_ing_threshold")
                 
-                # Campos adicionais
-                alpha_acid = st.number_input("Alpha Acid % (for hops)", min_value=0.0, max_value=100.0, value=0.0, step=0.1, key="new_ing_alpha")
-                lot_number = st.text_input("Lot/Batch Number", key="new_ing_lot")
-                expiry_date = st.date_input("Expiry Date (optional)", key="new_ing_expiry")
+                    # Campos adicionais
+                    alpha_acid = st.number_input("Alpha Acid % (for hops)", min_value=0.0, max_value=100.0, value=0.0, step=0.1, key="new_ing_alpha")
+                    lot_number = st.text_input("Lot/Batch Number", key="new_ing_lot")
+                    expiry_date = st.date_input("Expiry Date (optional)", key="new_ing_expiry")
             
-            notes = st.text_area("Notes", key="new_ing_notes")
-            
-            if st.button("➕ Add Ingredient", type="primary", use_container_width=True, key="add_ing_btn"):
-                if not ing_name or unit_cost <= 0:
-                    st.error("Ingredient name and unit cost are required!")
-                else:
-                    new_ingredient = {
-                        "name": ing_name,
-                        "manufacturer": manufacturer,
-                        "category": category,
-                        "unit": unit,
-                        "stock": stock,
-                        "unit_cost": unit_cost,
-                        "low_stock_threshold": low_stock_threshold,
-                        "alpha_acid": alpha_acid if category == "Hops" else 0.0,
-                        "lot_number": lot_number,
-                        "expiry_date": expiry_date if expiry_date else None,
-                        "notes": notes
-                    }
-                    
-                    insert_data("ingredients", new_ingredient)
-                    data = get_all_data()
-                    st.success(f"✅ Ingredient '{ing_name}' added successfully!")
-                    st.rerun()
+                notes = st.text_area("Notes", key="new_ing_notes")
+                submitted = st.form_submit_button("➕ Add Ingredient", type="primary", use_container_width=True)
+                if submitted:
+                    if not ing_name or unit_cost <= 0:
+                        st.error("Ingredient name and unit cost are required!")
+                    else:
+                        new_ingredient = {
+                            "name": ing_name,
+                            "manufacturer": manufacturer,
+                            "category": category,
+                            "unit": unit,
+                            "stock": stock,
+                            "unit_cost": unit_cost,
+                            "low_stock_threshold": low_stock_threshold,
+                            "alpha_acid": alpha_acid if category == "Hops" else 0.0,
+                            "lot_number": lot_number,
+                            "expiry_date": expiry_date if expiry_date else None,
+                            "notes": notes
+                        }
+                
+                        insert_data("ingredients", new_ingredient)
+                        data = get_all_data()
+                        st.success(f"✅ Ingredient '{ing_name}' added successfully!")
+                        st.rerun()
         
-        else:  # Edit Existing Ingredient
-            ingredients_df = data.get("ingredients", pd.DataFrame())
-            if not ingredients_df.empty:
-                ingredient_options = ingredients_df["name"].tolist()
-                selected_ingredient = st.selectbox(
-                    "Select Ingredient to Edit",
-                    ingredient_options,
-                    key="edit_ing_select"
-                )
+                            else:  # Edit Existing Ingredient
+                    ingredients_df = data.get("ingredients", pd.DataFrame())
+                    if not ingredients_df.empty:
+                    ingredient_options = ingredients_df["name"].tolist()
+                    selected_ingredient = st.selectbox(
+                        "Select Ingredient to Edit",
+                        ingredient_options,
+                        key="edit_ing_select"
+                    )
+            
+                    if selected_ingredient:
+                        # Obter dados atuais
+                        ing_data = ingredients_df[ingredients_df["name"] == selected_ingredient].iloc[0]
                 
-                if selected_ingredient:
-                    # Obter dados atuais
-                    ing_data = ingredients_df[ingredients_df["name"] == selected_ingredient].iloc[0]
+                        col_edit1, col_edit2 = st.columns(2)
+                
+                        with col_edit1:
+                            new_name = st.text_input("Ingredient Name", value=ing_data["name"], key="edit_ing_name")
+                            new_manufacturer = st.text_input("Manufacturer", value=ing_data.get("manufacturer", ""), key="edit_ing_manufacturer")
                     
-                    col_edit1, col_edit2 = st.columns(2)
+                            category_options = [
+                                "Grain", "Malt Extract", "Hops", "Yeast", "Sugar", 
+                                "Water Treatment", "Spices", "Fruits", "Other"
+                            ]
+                            current_category = ing_data.get("category", "Grain")
+                            new_category = st.selectbox("Category", category_options, 
+                                                      index=category_options.index(current_category) if current_category in category_options else 0,
+                                                      key="edit_ing_category")
                     
-                    with col_edit1:
-                        new_name = st.text_input("Ingredient Name", value=ing_data["name"], key="edit_ing_name")
-                        new_manufacturer = st.text_input("Manufacturer", value=ing_data.get("manufacturer", ""), key="edit_ing_manufacturer")
-                        
-                        category_options = [
-                            "Grain", "Malt Extract", "Hops", "Yeast", "Sugar", 
-                            "Water Treatment", "Spices", "Fruits", "Other"
-                        ]
-                        current_category = ing_data.get("category", "Grain")
-                        new_category = st.selectbox("Category", category_options, 
-                                                  index=category_options.index(current_category) if current_category in category_options else 0,
-                                                  key="edit_ing_category")
-                        
-                        unit_options = ["kg", "g", "lb", "oz", "L", "mL", "pkg", "unit"]
-                        current_unit = ing_data.get("unit", "kg")
-                        new_unit = st.selectbox("Unit", unit_options, 
-                                              index=unit_options.index(current_unit) if current_unit in unit_options else 0,
-                                              key="edit_ing_unit")
-                        
-                        new_stock = st.number_input("Current Stock", 
-                                                  value=float(ing_data.get("stock", 0)), 
-                                                  min_value=0.0, step=0.1, key="edit_ing_stock")
+                            unit_options = ["kg", "g", "lb", "oz", "L", "mL", "pkg", "unit"]
+                            current_unit = ing_data.get("unit", "kg")
+                            new_unit = st.selectbox("Unit", unit_options, 
+                                                  index=unit_options.index(current_unit) if current_unit in unit_options else 0,
+                                                  key="edit_ing_unit")
                     
-                    with col_edit2:
-                        new_unit_cost = st.number_input("Unit Cost", 
-                                                      value=float(ing_data.get("unit_cost", 0)), 
-                                                      min_value=0.0, step=0.01, format="%.2f", key="edit_ing_cost")
-                        new_threshold = st.number_input("Low Stock Threshold", 
-                                                      value=float(ing_data.get("low_stock_threshold", 10)), 
-                                                      min_value=0.0, step=0.1, key="edit_ing_threshold")
-                        
-                        # Campos específicos para lúpulo
-                        if new_category == "Hops":
-                            new_alpha = st.number_input("Alpha Acid %", 
-                                                       value=float(ing_data.get("alpha_acid", 0)), 
-                                                       min_value=0.0, max_value=100.0, step=0.1, key="edit_ing_alpha")
-                        else:
-                            new_alpha = ing_data.get("alpha_acid", 0)
-                        
-                        new_lot = st.text_input("Lot/Batch Number", value=ing_data.get("lot_number", ""), key="edit_ing_lot")
-                        
-                        # Date de validade
-                        expiry = ing_data.get("expiry_date")
-                        if pd.notna(expiry):
-                            new_expiry = st.date_input("Expiry Date", value=pd.to_datetime(expiry).date(), key="edit_ing_expiry")
-                        else:
-                            new_expiry = st.date_input("Expiry Date (optional)", key="edit_ing_expiry_none")
+                            new_stock = st.number_input("Current Stock", 
+                                                      value=float(ing_data.get("stock", 0)), 
+                                                      min_value=0.0, step=0.1, key="edit_ing_stock")
+                
+                        with col_edit2:
+                            new_unit_cost = st.number_input("Unit Cost", 
+                                                          value=float(ing_data.get("unit_cost", 0)), 
+                                                          min_value=0.0, step=0.01, format="%.2f", key="edit_ing_cost")
+                            new_threshold = st.number_input("Low Stock Threshold", 
+                                                          value=float(ing_data.get("low_stock_threshold", 10)), 
+                                                          min_value=0.0, step=0.1, key="edit_ing_threshold")
                     
-                    new_notes = st.text_area("Notes", value=ing_data.get("notes", ""), key="edit_ing_notes")
-                    
-                    col_btn1, col_btn2, col_btn3 = st.columns(3)
-                    with col_btn1:
-                        if st.button("💾 Save Changes", use_container_width=True, key="save_ing_btn"):
-                            # Atualizar dados
-                            updates = {
-                                "name": new_name,
-                                "manufacturer": new_manufacturer,
-                                "category": new_category,
-                                "unit": new_unit,
-                                "stock": new_stock,
-                                "unit_cost": new_unit_cost,
-                                "low_stock_threshold": new_threshold,
-                                "alpha_acid": new_alpha,
-                                "lot_number": new_lot,
-                                "notes": new_notes
-                            }
-                            
-                            if 'new_expiry' in locals():
-                                updates["expiry_date"] = new_expiry if new_expiry else None
-                            
-                            update_data("ingredients", updates, "id = :id", {"id": ing_data["id"]})
-                            data = get_all_data()
-                            st.success(f"✅ Ingredient '{new_name}' updated successfully!")
-                            st.rerun()
-                    
-                    with col_btn2:
-                        if st.button("🗑️ Delete Ingredient", use_container_width=True, type="secondary", key="delete_ing_btn"):
-                            # Verificar se o ingrediente está em uso em receitas
-                            in_use = check_ingredient_usage(ing_data["id"])
-                            
-                            if in_use:
-                                st.error("Cannot delete ingredient that is used in recipes! Remove it from recipes first.")
+                            # Campos específicos para lúpulo
+                            if new_category == "Hops":
+                                new_alpha = st.number_input("Alpha Acid %", 
+                                                           value=float(ing_data.get("alpha_acid", 0)), 
+                                                           min_value=0.0, max_value=100.0, step=0.1, key="edit_ing_alpha")
                             else:
-                                st.session_state.delete_confirmation = {"type": "ingredient", "id": ing_data["id"], "name": selected_ingredient}
-                                st.rerun()
+                                new_alpha = ing_data.get("alpha_acid", 0)
                     
-                    with col_btn3:
-                        if st.button("🔄 Reset Stock", use_container_width=True, key="reset_stock_btn"):
-                            # Apenas resetar o estoque para 0
-                            update_data("ingredients", {"stock": 0}, "id = :id", {"id": ing_data["id"]})
-                            data = get_all_data()
-                            st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
-                            st.rerun()
-            else:
-                st.info("No ingredients available to edit.")
+                            new_lot = st.text_input("Lot/Batch Number", value=ing_data.get("lot_number", ""), key="edit_ing_lot")
+                    
+                            # Date de validade
+                            expiry = ing_data.get("expiry_date")
+                            if pd.notna(expiry):
+                                new_expiry = st.date_input("Expiry Date", value=pd.to_datetime(expiry).date(), key="edit_ing_expiry")
+                            else:
+                                new_expiry = st.date_input("Expiry Date (optional)", key="edit_ing_expiry_none")
+                
+                        new_notes = st.text_area("Notes", value=ing_data.get("notes", ""), key="edit_ing_notes")
+                
+                        col_btn1, col_btn2, col_btn3 = st.columns(3)
+                        with col_btn1:
+                            if st.button("💾 Save Changes", use_container_width=True, key="save_ing_btn"):
+                                # Atualizar dados
+                                updates = {
+                                    "name": new_name,
+                                    "manufacturer": new_manufacturer,
+                                    "category": new_category,
+                                    "unit": new_unit,
+                                    "stock": new_stock,
+                                    "unit_cost": new_unit_cost,
+                                    "low_stock_threshold": new_threshold,
+                                    "alpha_acid": new_alpha,
+                                    "lot_number": new_lot,
+                                    "notes": new_notes
+                                }
+                        
+                                if 'new_expiry' in locals():
+                                    updates["expiry_date"] = new_expiry if new_expiry else None
+                        
+                                update_data("ingredients", updates, "id = :id", {"id": ing_data["id"]})
+                                data = get_all_data()
+                                st.success(f"✅ Ingredient '{new_name}' updated successfully!")
+                                st.rerun()
+                
+                        with col_btn2:
+                            if st.button("🗑️ Delete Ingredient", use_container_width=True, type="secondary", key="delete_ing_btn"):
+                                # Verificar se o ingrediente está em uso em receitas
+                                in_use = check_ingredient_usage(ing_data["id"])
+                        
+                                if in_use:
+                                    st.error("Cannot delete ingredient that is used in recipes! Remove it from recipes first.")
+                                else:
+                                    st.session_state.delete_confirmation = {"type": "ingredient", "id": ing_data["id"], "name": selected_ingredient}
+                                    st.rerun()
+                
+                        with col_btn3:
+                            if st.button("🔄 Reset Stock", use_container_width=True, key="reset_stock_btn"):
+                                # Apenas resetar o estoque para 0
+                                update_data("ingredients", {"stock": 0}, "id = :id", {"id": ing_data["id"]})
+                                data = get_all_data()
+                                st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
+                                st.rerun()
+                    else:
+                    st.info("No ingredients available to edit.")
         
         st.markdown("</div>", unsafe_allow_html=True)
     
@@ -2371,144 +2369,146 @@ elif page == "Purchases":
     with tab_new:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("🛍️ Record New Purchase")
+        with st.form("record_purchase_form", clear_on_submit=True):
         
-        # Formulário de compra
-        col_pur1, col_pur2 = st.columns(2)
+            # Formulário de compra
+            col_pur1, col_pur2 = st.columns(2)
         
-        with col_pur1:
-            # Selecionar tipo de transação
-            transaction_type = st.selectbox(
-                "Transaction Type*",
-                ["Purchase", "Return", "Adjustment", "Sample", "Other"],
-                key="purchase_type"
-            )
-            
-            # Selecionar ingrediente
-            ingredients_df = data.get("ingredients", pd.DataFrame())
-            if not ingredients_df.empty:
-                ingredient_options = ingredients_df["name"].tolist()
-                selected_ingredient = st.selectbox(
-                    "Ingredient*",
-                    ingredient_options,
-                    key="purchase_ingredient"
+            with col_pur1:
+                # Selecionar tipo de transação
+                transaction_type = st.selectbox(
+                    "Transaction Type*",
+                    ["Purchase", "Return", "Adjustment", "Sample", "Other"],
+                    key="purchase_type"
                 )
+            
+                # Selecionar ingrediente
+                ingredients_df = data.get("ingredients", pd.DataFrame())
+                if not ingredients_df.empty:
+                    ingredient_options = ingredients_df["name"].tolist()
+                    selected_ingredient = st.selectbox(
+                        "Ingredient*",
+                        ingredient_options,
+                        key="purchase_ingredient"
+                    )
                 
-                # Mostrar informações atuais do ingrediente
+                    # Mostrar informações atuais do ingrediente
+                    if selected_ingredient:
+                        ing_info = ingredients_df[ingredients_df["name"] == selected_ingredient].iloc[0]
+                        st.info(f"""
+                        **Current Stock:** {ing_info['stock']} {ing_info['unit']}  
+                        **Low Stock Threshold:** {ing_info.get('low_stock_threshold', 'N/A')} {ing_info['unit']}  
+                        **Unit Cost:** ${ing_info['unit_cost']:.2f}
+                        """)
+                else:
+                    st.warning("⚠️ No ingredients available. Please add ingredients first.")
+                    selected_ingredient = None
+            
+                # Quantity e unidade
+                quantity = st.number_input("Quantity*", min_value=0.01, value=1.0, step=0.1, key="purchase_quantity")
+            
                 if selected_ingredient:
                     ing_info = ingredients_df[ingredients_df["name"] == selected_ingredient].iloc[0]
-                    st.info(f"""
-                    **Current Stock:** {ing_info['stock']} {ing_info['unit']}  
-                    **Low Stock Threshold:** {ing_info.get('low_stock_threshold', 'N/A')} {ing_info['unit']}  
-                    **Unit Cost:** ${ing_info['unit_cost']:.2f}
-                    """)
-            else:
-                st.warning("⚠️ No ingredients available. Please add ingredients first.")
-                selected_ingredient = None
-            
-            # Quantity e unidade
-            quantity = st.number_input("Quantity*", min_value=0.01, value=1.0, step=0.1, key="purchase_quantity")
-            
-            if selected_ingredient:
-                ing_info = ingredients_df[ingredients_df["name"] == selected_ingredient].iloc[0]
-                unit = st.text_input("Unit", value=ing_info['unit'], disabled=True, key="purchase_unit")
-            else:
-                unit = st.text_input("Unit*", key="purchase_unit_free")
+                    unit = st.text_input("Unit", value=ing_info['unit'], disabled=True, key="purchase_unit")
+                else:
+                    unit = st.text_input("Unit*", key="purchase_unit_free")
         
-        with col_pur2:
-            # Fornecedor
-            suppliers_df = data.get("suppliers", pd.DataFrame())
-            if not suppliers_df.empty:
-                supplier_options = suppliers_df["name"].tolist()
-                supplier = st.selectbox(
-                    "Supplier*",
-                    ["Select Supplier"] + supplier_options,
-                    key="purchase_supplier"
+            with col_pur2:
+                # Fornecedor
+                suppliers_df = data.get("suppliers", pd.DataFrame())
+                if not suppliers_df.empty:
+                    supplier_options = suppliers_df["name"].tolist()
+                    supplier = st.selectbox(
+                        "Supplier*",
+                        ["Select Supplier"] + supplier_options,
+                        key="purchase_supplier"
+                    )
+                else:
+                    supplier = st.text_input("Supplier*", key="purchase_supplier_text")
+            
+                # Informações de cost
+                unit_cost = st.number_input("Unit Cost*", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="purchase_unit_cost")
+            
+                # Calcular custo total automaticamente
+                total_cost = quantity * unit_cost
+                st.metric("Total Cost", f"${total_cost:.2f}")
+            
+                # Número do pedido
+                order_number = st.text_input("Order/Purchase Number", key="purchase_order")
+            
+                # Date
+                purchase_date = st.date_input("Purchase Date", datetime.now().date(), key="purchase_date")
+            
+                # É um pedido de estoque baixo?
+                is_low_stock_order = st.checkbox("Low Stock Replenishment", key="purchase_low_stock")
+        
+            # Campos adicionais
+            col_pur3, col_pur4 = st.columns(2)
+            with col_pur3:
+                manufacturer = st.text_input("Manufacturer (if different)", key="purchase_manufacturer")
+                package = st.selectbox(
+                    "Package Type",
+                    ["Sack", "Bag", "Box", "Drum", "Canister", "Bottle", "Other"],
+                    key="purchase_package"
                 )
-            else:
-                supplier = st.text_input("Supplier*", key="purchase_supplier_text")
-            
-            # Informações de cost
-            unit_cost = st.number_input("Unit Cost*", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="purchase_unit_cost")
-            
-            # Calcular custo total automaticamente
-            total_cost = quantity * unit_cost
-            st.metric("Total Cost", f"${total_cost:.2f}")
-            
-            # Número do pedido
-            order_number = st.text_input("Order/Purchase Number", key="purchase_order")
-            
-            # Date
-            purchase_date = st.date_input("Purchase Date", datetime.now().date(), key="purchase_date")
-            
-            # É um pedido de estoque baixo?
-            is_low_stock_order = st.checkbox("Low Stock Replenishment", key="purchase_low_stock")
+            with col_pur4:
+                lot_number = st.text_input("Lot/Batch Number", key="purchase_lot")
+                expiry_date = st.date_input("Expiry Date (optional)", key="purchase_expiry")
         
-        # Campos adicionais
-        col_pur3, col_pur4 = st.columns(2)
-        with col_pur3:
-            manufacturer = st.text_input("Manufacturer (if different)", key="purchase_manufacturer")
-            package = st.selectbox(
-                "Package Type",
-                ["Sack", "Bag", "Box", "Drum", "Canister", "Bottle", "Other"],
-                key="purchase_package"
-            )
-        with col_pur4:
-            lot_number = st.text_input("Lot/Batch Number", key="purchase_lot")
-            expiry_date = st.date_input("Expiry Date (optional)", key="purchase_expiry")
+            notes = st.text_area("Notes", placeholder="Any additional notes about this purchase...", key="purchase_notes")
         
-        notes = st.text_area("Notes", placeholder="Any additional notes about this purchase...", key="purchase_notes")
+            # Botão de ação
+            submitted = st.form_submit_button("💾 Record Purchase", type="primary", use_container_width=True)
+            if submitted:
+                if not selected_ingredient or unit_cost <= 0 or quantity <= 0:
+                    st.error("Please fill all required fields (Ingredient, Unit Cost, Quantity)")
+                else:
+                    # Criar registro de compra
+                    new_purchase = {
+                        "transaction_type": transaction_type,
+                        "ingredient": selected_ingredient,
+                        "manufacturer": manufacturer if manufacturer else ingredients_df[ingredients_df["name"] == selected_ingredient]["manufacturer"].iloc[0],
+                        "supplier": supplier,
+                        "quantity": quantity,
+                        "unit": unit,
+                        "total_cost": total_cost,
+                        "unit_cost": unit_cost,
+                        "order_number": order_number,
+                        "date": purchase_date,
+                        "notes": notes,
+                        "package": package,
+                        "lot_number": lot_number,
+                        "expiry_date": expiry_date if expiry_date else None,
+                        "is_low_stock_order": 1 if is_low_stock_order else 0,
+                        "recorded_by": "User"
+                    }
+            
+                    # Add à tabela de compras
+                    insert_data("purchases", new_purchase)
+            
+                    # Atualizar estoque
+                    if transaction_type == "Purchase":
+                        update_stock_from_purchase(selected_ingredient, quantity)
+            
+                    # Atualizar dados
+                    data = get_all_data()
+                    st.success(f"✅ Purchase recorded successfully! Order #{order_number if order_number else 'N/A'}")
+                    st.rerun()
         
-        # Botão de ação
-        if st.button("💾 Record Purchase", type="primary", use_container_width=True, key="record_purchase_btn"):
-            if not selected_ingredient or unit_cost <= 0 or quantity <= 0:
-                st.error("Please fill all required fields (Ingredient, Unit Cost, Quantity)")
-            else:
-                # Criar registro de compra
-                new_purchase = {
-                    "transaction_type": transaction_type,
-                    "ingredient": selected_ingredient,
-                    "manufacturer": manufacturer if manufacturer else ingredients_df[ingredients_df["name"] == selected_ingredient]["manufacturer"].iloc[0],
-                    "supplier": supplier,
-                    "quantity": quantity,
-                    "unit": unit,
-                    "total_cost": total_cost,
-                    "unit_cost": unit_cost,
-                    "order_number": order_number,
-                    "date": purchase_date,
-                    "notes": notes,
-                    "package": package,
-                    "lot_number": lot_number,
-                    "expiry_date": expiry_date if expiry_date else None,
-                    "is_low_stock_order": 1 if is_low_stock_order else 0,
-                    "recorded_by": "User"
-                }
-                
-                # Add à tabela de compras
-                insert_data("purchases", new_purchase)
-                
-                # Atualizar estoque
-                if transaction_type == "Purchase":
-                    update_stock_from_purchase(selected_ingredient, quantity)
-                
-                # Atualizar dados
-                data = get_all_data()
-                st.success(f"✅ Purchase recorded successfully! Order #{order_number if order_number else 'N/A'}")
-                st.rerun()
+                # Ações rápidas
+                st.markdown("---")
+                st.subheader("⚡ Quick Actions")
         
-        # Ações rápidas
-        st.markdown("---")
-        st.subheader("⚡ Quick Actions")
-        
-        col_q1, col_q2, col_q3 = st.columns(3)
-        with col_q1:
-            if st.button("📋 Create Purchase Order", use_container_width=True, key="quick_po"):
-                st.info("Purchase order template will be generated")
-        with col_q2:
-            if st.button("🔄 Stock Adjustment", use_container_width=True, key="quick_adjust"):
-                st.info("Redirecting to stock adjustment")
-        with col_q3:
-            if st.button("📦 Low Stock Report", use_container_width=True, key="quick_report"):
-                st.info("Generating low stock report")
+                col_q1, col_q2, col_q3 = st.columns(3)
+                with col_q1:
+                if st.button("📋 Create Purchase Order", use_container_width=True, key="quick_po"):
+                    st.info("Purchase order template will be generated")
+                with col_q2:
+                if st.button("🔄 Stock Adjustment", use_container_width=True, key="quick_adjust"):
+                    st.info("Redirecting to stock adjustment")
+                with col_q3:
+                if st.button("📦 Low Stock Report", use_container_width=True, key="quick_report"):
+                    st.info("Generating low stock report")
         
         st.markdown("</div>", unsafe_allow_html=True)
     
@@ -2702,134 +2702,135 @@ elif page == "Purchases":
         if sup_action == "Add New Supplier":
             st.markdown("---")
             st.subheader("➕ Add New Supplier")
+            with st.form("add_supplier_form", clear_on_submit=True):
             
-            col_sup_form1, col_sup_form2 = st.columns(2)
+                col_sup_form1, col_sup_form2 = st.columns(2)
             
-            with col_sup_form1:
-                sup_name = st.text_input("Supplier Name*", key="new_sup_name")
-                contact_name = st.text_input("Contact Person", key="new_sup_contact")
-                email = st.text_input("Email", key="new_sup_email")
-                phone = st.text_input("Phone", key="new_sup_phone")
+                with col_sup_form1:
+                    sup_name = st.text_input("Supplier Name*", key="new_sup_name")
+                    contact_name = st.text_input("Contact Person", key="new_sup_contact")
+                    email = st.text_input("Email", key="new_sup_email")
+                    phone = st.text_input("Phone", key="new_sup_phone")
             
-            with col_sup_form2:
-                address = st.text_input("Address", key="new_sup_address")
-                city = st.text_input("City", key="new_sup_city")
-                country = st.text_input("Country", value="Norway", key="new_sup_country")
-                website = st.text_input("Website", key="new_sup_website")
+                with col_sup_form2:
+                    address = st.text_input("Address", key="new_sup_address")
+                    city = st.text_input("City", key="new_sup_city")
+                    country = st.text_input("Country", value="Norway", key="new_sup_country")
+                    website = st.text_input("Website", key="new_sup_website")
             
-            # Tipos de produtos fornecidos
-            product_types = st.multiselect(
-                "Product Types Supplied",
-                ["Grains", "Hops", "Yeast", "Equipment", "Packaging", "Chemicals", "Other"],
-                key="new_sup_products"
-            )
+                # Tipos de produtos fornecidos
+                product_types = st.multiselect(
+                    "Product Types Supplied",
+                    ["Grains", "Hops", "Yeast", "Equipment", "Packaging", "Chemicals", "Other"],
+                    key="new_sup_products"
+                )
             
-            notes = st.text_area("Notes", key="new_sup_notes")
-            
-            if st.button("➕ Add Supplier", type="primary", use_container_width=True, key="add_sup_btn"):
-                if not sup_name:
-                    st.error("Supplier name is required!")
-                else:
-                    new_supplier = {
-                        "name": sup_name,
-                        "contact_name": contact_name,
-                        "email": email,
-                        "phone": phone,
-                        "address": address,
-                        "city": city,
-                        "country": country,
-                        "website": website,
-                        "product_types": ", ".join(product_types),
-                        "notes": notes
-                    }
-                    
-                    insert_data("suppliers", new_supplier)
-                    data = get_all_data()
-                    st.success(f"✅ Supplier '{sup_name}' added successfully!")
-                    st.rerun()
+                notes = st.text_area("Notes", key="new_sup_notes")
+                submitted = st.form_submit_button("➕ Add Supplier", type="primary", use_container_width=True)
+                if submitted:
+                    if not sup_name:
+                        st.error("Supplier name is required!")
+                    else:
+                        new_supplier = {
+                            "name": sup_name,
+                            "contact_name": contact_name,
+                            "email": email,
+                            "phone": phone,
+                            "address": address,
+                            "city": city,
+                            "country": country,
+                            "website": website,
+                            "product_types": ", ".join(product_types),
+                            "notes": notes
+                        }
+                
+                        insert_data("suppliers", new_supplier)
+                        data = get_all_data()
+                        st.success(f"✅ Supplier '{sup_name}' added successfully!")
+                        st.rerun()
         
-        else:  # View/Edit Suppliers
-            st.markdown("---")
-            st.subheader("📋 Existing Suppliers")
+                            else:  # View/Edit Suppliers
+                    st.markdown("---")
+                    st.subheader("📋 Existing Suppliers")
             
-            suppliers_df = data.get("suppliers", pd.DataFrame())
-            if not suppliers_df.empty:
-                # Filtro de busca
-                search_supplier = st.text_input("Search Supplier", key="search_supplier")
-                
-                # Aplicar filtro
-                filtered_suppliers = suppliers_df.copy()
-                if search_supplier:
-                    filtered_suppliers = filtered_suppliers[
-                        filtered_suppliers["name"].str.contains(search_supplier, case=False, na=False)
-                    ]
-                
-                if len(filtered_suppliers) > 0:
-                    # Mostrar em cards
-                    for _, supplier in filtered_suppliers.iterrows():
-                        with st.expander(f"🏭 {supplier['name']}", expanded=False):
-                            col_info1, col_info2 = st.columns(2)
-                            
-                            with col_info1:
-                                st.write("**Contact Information**")
-                                if supplier.get("contact_name"):
-                                    st.write(f"👤 {supplier['contact_name']}")
-                                if supplier.get("email"):
-                                    st.write(f"📧 {supplier['email']}")
-                                if supplier.get("phone"):
-                                    st.write(f"📞 {supplier['phone']}")
-                                if supplier.get("website"):
-                                    st.write(f"🌐 {supplier['website']}")
-                            
-                            with col_info2:
-                                st.write("**Location**")
-                                if supplier.get("address"):
-                                    st.write(f"📍 {supplier['address']}")
-                                if supplier.get("city"):
-                                    st.write(f"🏙️ {supplier['city']}")
-                                if supplier.get("country"):
-                                    st.write(f"🇳🇴 {supplier['country']}")
-                            
-                            # Estatísticas do fornecedor (se houver dados de compras)
-                            purchases_df = data.get("purchases", pd.DataFrame())
-                            if not purchases_df.empty:
-                                supplier_purchases = purchases_df[purchases_df["supplier"] == supplier["name"]]
-                                if len(supplier_purchases) > 0:
-                                    st.markdown("---")
-                                    st.write("**Purchase Statistics**")
-                                    
-                                    col_stat1, col_stat2, col_stat3 = st.columns(3)
-                                    with col_stat1:
-                                        total_orders = len(supplier_purchases)
-                                        st.metric("Total Orders", total_orders)
-                                    with col_stat2:
-                                        total_spent = supplier_purchases["total_cost"].sum()
-                                        st.metric("Total Spent", f"${total_spent:.2f}")
-                                    with col_stat3:
-                                        last_order = supplier_purchases["date"].max()
-                                        if pd.notna(last_order):
-                                            st.metric("Last Order", str(last_order.date()))
-                            
-                            # Botões de ação
-                            col_btn1, col_btn2, col_btn3 = st.columns(3)
-                            with col_btn1:
-                                if st.button("✏️ Edit", key=f"edit_sup_{supplier['id_supplier']}", use_container_width=True):
-                                    st.session_state['edit_supplier'] = supplier['id_supplier']
-                            with col_btn2:
-                                if st.button("📞 Contact", key=f"contact_sup_{supplier['id_supplier']}", use_container_width=True):
-                                    st.info(f"Contacting {supplier['name']}...")
-                            with col_btn3:
-                                if st.button("🗑️ Delete", key=f"delete_sup_{supplier['id_supplier']}", use_container_width=True, type="secondary"):
-                                    # Verificar se há compras associadas
-                                    if check_supplier_usage(supplier["name"]):
-                                        st.error(f"Cannot delete {supplier['name']} - has associated purchases!")
-                                    else:
-                                        st.session_state.delete_confirmation = {"type": "supplier", "id": supplier['id_supplier'], "name": supplier['name']}
-                                        st.rerun()
-                else:
-                    st.info("No suppliers found with the search criteria.")
-            else:
-                st.info("No suppliers registered yet. Add your first supplier above.")
+                    suppliers_df = data.get("suppliers", pd.DataFrame())
+                    if not suppliers_df.empty:
+                    # Filtro de busca
+                    search_supplier = st.text_input("Search Supplier", key="search_supplier")
+            
+                    # Aplicar filtro
+                    filtered_suppliers = suppliers_df.copy()
+                    if search_supplier:
+                        filtered_suppliers = filtered_suppliers[
+                            filtered_suppliers["name"].str.contains(search_supplier, case=False, na=False)
+                        ]
+            
+                    if len(filtered_suppliers) > 0:
+                        # Mostrar em cards
+                        for _, supplier in filtered_suppliers.iterrows():
+                            with st.expander(f"🏭 {supplier['name']}", expanded=False):
+                                col_info1, col_info2 = st.columns(2)
+                        
+                                with col_info1:
+                                    st.write("**Contact Information**")
+                                    if supplier.get("contact_name"):
+                                        st.write(f"👤 {supplier['contact_name']}")
+                                    if supplier.get("email"):
+                                        st.write(f"📧 {supplier['email']}")
+                                    if supplier.get("phone"):
+                                        st.write(f"📞 {supplier['phone']}")
+                                    if supplier.get("website"):
+                                        st.write(f"🌐 {supplier['website']}")
+                        
+                                with col_info2:
+                                    st.write("**Location**")
+                                    if supplier.get("address"):
+                                        st.write(f"📍 {supplier['address']}")
+                                    if supplier.get("city"):
+                                        st.write(f"🏙️ {supplier['city']}")
+                                    if supplier.get("country"):
+                                        st.write(f"🇳🇴 {supplier['country']}")
+                        
+                                # Estatísticas do fornecedor (se houver dados de compras)
+                                purchases_df = data.get("purchases", pd.DataFrame())
+                                if not purchases_df.empty:
+                                    supplier_purchases = purchases_df[purchases_df["supplier"] == supplier["name"]]
+                                    if len(supplier_purchases) > 0:
+                                        st.markdown("---")
+                                        st.write("**Purchase Statistics**")
+                                
+                                        col_stat1, col_stat2, col_stat3 = st.columns(3)
+                                        with col_stat1:
+                                            total_orders = len(supplier_purchases)
+                                            st.metric("Total Orders", total_orders)
+                                        with col_stat2:
+                                            total_spent = supplier_purchases["total_cost"].sum()
+                                            st.metric("Total Spent", f"${total_spent:.2f}")
+                                        with col_stat3:
+                                            last_order = supplier_purchases["date"].max()
+                                            if pd.notna(last_order):
+                                                st.metric("Last Order", str(last_order.date()))
+                        
+                                # Botões de ação
+                                col_btn1, col_btn2, col_btn3 = st.columns(3)
+                                with col_btn1:
+                                    if st.button("✏️ Edit", key=f"edit_sup_{supplier['id_supplier']}", use_container_width=True):
+                                        st.session_state['edit_supplier'] = supplier['id_supplier']
+                                with col_btn2:
+                                    if st.button("📞 Contact", key=f"contact_sup_{supplier['id_supplier']}", use_container_width=True):
+                                        st.info(f"Contacting {supplier['name']}...")
+                                with col_btn3:
+                                    if st.button("🗑️ Delete", key=f"delete_sup_{supplier['id_supplier']}", use_container_width=True, type="secondary"):
+                                        # Verificar se há compras associadas
+                                        if check_supplier_usage(supplier["name"]):
+                                            st.error(f"Cannot delete {supplier['name']} - has associated purchases!")
+                                        else:
+                                            st.session_state.delete_confirmation = {"type": "supplier", "id": supplier['id_supplier'], "name": supplier['name']}
+                                            st.rerun()
+                    else:
+                        st.info("No suppliers found with the search criteria.")
+                    else:
+                    st.info("No suppliers registered yet. Add your first supplier above.")
         
         st.markdown("</div>", unsafe_allow_html=True)
     
@@ -3195,525 +3196,527 @@ elif page == "Recipes":
     
     with tab_view:
         st.subheader("📖 Recipe Library")
+                            with st.form("create_batch_form", clear_on_submit=True):
         
-        if not recipes_df.empty:
-            # Filtros
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                recipe_search = st.text_input("Search Recipes", key="recipe_search")
-            with col2:
-                style_filter = st.selectbox(
-                    "Filter by Style",
-                    ["All Styles"] + sorted(recipes_df['style'].dropna().unique().tolist()),
-                    key="style_filter"
-                )
-            with col3:
-                brewery_filter = st.selectbox(
-                    "Filter by Brewery",
-                    ["All Breweries"] + sorted(recipes_df['brewery_name'].dropna().unique().tolist()) if 'brewery_name' in recipes_df.columns else ["All Breweries"],
-                    key="brewery_filter_recipe"
-                )
+                                        if not recipes_df.empty:
+                                            # Filtros
+                                            col1, col2, col3 = st.columns(3)
+                                            with col1:
+                                                recipe_search = st.text_input("Search Recipes", key="recipe_search")
+                                            with col2:
+                                                style_filter = st.selectbox(
+                                                    "Filter by Style",
+                                                    ["All Styles"] + sorted(recipes_df['style'].dropna().unique().tolist()),
+                                                    key="style_filter"
+                                                )
+                                            with col3:
+                                                brewery_filter = st.selectbox(
+                                                    "Filter by Brewery",
+                                                    ["All Breweries"] + sorted(recipes_df['brewery_name'].dropna().unique().tolist()) if 'brewery_name' in recipes_df.columns else ["All Breweries"],
+                                                    key="brewery_filter_recipe"
+                                                )
             
-            # Aplicar filtros
-            filtered_recipes = recipes_df.copy()
-            if recipe_search:
-                filtered_recipes = filtered_recipes[
-                    filtered_recipes['name'].str.contains(recipe_search, case=False, na=False) |
-                    filtered_recipes['style'].str.contains(recipe_search, case=False, na=False)
-                ]
-            if style_filter != "All Styles":
-                filtered_recipes = filtered_recipes[filtered_recipes['style'] == style_filter]
-            if brewery_filter != "All Breweries" and 'brewery_name' in filtered_recipes.columns:
-                filtered_recipes = filtered_recipes[filtered_recipes['brewery_name'] == brewery_filter]
+                                            # Aplicar filtros
+                                            filtered_recipes = recipes_df.copy()
+                                            if recipe_search:
+                                                filtered_recipes = filtered_recipes[
+                                                    filtered_recipes['name'].str.contains(recipe_search, case=False, na=False) |
+                                                    filtered_recipes['style'].str.contains(recipe_search, case=False, na=False)
+                                                ]
+                                            if style_filter != "All Styles":
+                                                filtered_recipes = filtered_recipes[filtered_recipes['style'] == style_filter]
+                                            if brewery_filter != "All Breweries" and 'brewery_name' in filtered_recipes.columns:
+                                                filtered_recipes = filtered_recipes[filtered_recipes['brewery_name'] == brewery_filter]
             
-            # Mostrar receitas
-            if not filtered_recipes.empty:
-                for idx, recipe in filtered_recipes.iterrows():
-                    with st.expander(f"🍺 {recipe['name']} - {recipe.get('style', 'N/A')}", expanded=False):
-                        col_left, col_right = st.columns([2, 1])
+                                            # Mostrar receitas
+                                            if not filtered_recipes.empty:
+                                                for idx, recipe in filtered_recipes.iterrows():
+                                                    with st.expander(f"🍺 {recipe['name']} - {recipe.get('style', 'N/A')}", expanded=False):
+                                                        col_left, col_right = st.columns([2, 1])
                         
-                        with col_left:
-                            # Informações básicas
-                            st.write(f"**Batch Size:** {recipe.get('batch_volume', 'N/A')}L")
-                            st.write(f"**Efficiency:** {recipe.get('efficiency', 'N/A')}%")
-                            st.write(f"**Target Brewery:** {recipe.get('brewery_name', 'N/A')}")
+                                                        with col_left:
+                                # Informações básicas
+                                st.write(f"**Batch Size:** {recipe.get('batch_volume', 'N/A')}L")
+                                st.write(f"**Efficiency:** {recipe.get('efficiency', 'N/A')}%")
+                                st.write(f"**Target Brewery:** {recipe.get('brewery_name', 'N/A')}")
                             
-                            # Estatísticas da cerveja
-                            if all(k in recipe for k in ['og', 'fg', 'ibus', 'ebc']):
-                                st.write("**Beer Stats:**")
-                                col_stats1, col_stats2 = st.columns(2)
-                                with col_stats1:
-                                    st.write(f"OG: {recipe['og']}°P")
-                                    st.write(f"FG: {recipe['fg']}°P")
-                                with col_stats2:
-                                    st.write(f"IBU: {recipe['ibus']}")
-                                    st.write(f"Color: {recipe['ebc']} EBC")
+                                # Estatísticas da cerveja
+                                if all(k in recipe for k in ['og', 'fg', 'ibus', 'ebc']):
+                                    st.write("**Beer Stats:**")
+                                    col_stats1, col_stats2 = st.columns(2)
+                                    with col_stats1:
+                                        st.write(f"OG: {recipe['og']}°P")
+                                        st.write(f"FG: {recipe['fg']}°P")
+                                    with col_stats2:
+                                        st.write(f"IBU: {recipe['ibus']}")
+                                        st.write(f"Color: {recipe['ebc']} EBC")
                                 
-                                # Calcular ABV
-                                if recipe['og'] and recipe['fg']:
-                                    abv = (recipe['og'] - recipe['fg']) * 0.524
-                                    st.write(f"**ABV:** {abv:.1f}%")
+                                    # Calcular ABV
+                                    if recipe['og'] and recipe['fg']:
+                                        abv = (recipe['og'] - recipe['fg']) * 0.524
+                                        st.write(f"**ABV:** {abv:.1f}%")
                             
-                            # Descrição
-                            if recipe.get('description'):
-                                st.write("**Description:**")
-                                st.write(recipe['description'])
+                                # Descrição
+                                if recipe.get('description'):
+                                    st.write("**Description:**")
+                                    st.write(recipe['description'])
                         
-                        with col_right:
-                            # Ações
-                            st.write("**Actions:**")
-                            if st.button("📋 Create Batch", key=f"brew_{recipe['id_receipt']}", use_container_width=True):
-                                st.session_state['recipe_to_brew'] = recipe['id_receipt']
-                                st.rerun()
+                                                        with col_right:
+                                # Ações
+                                st.write("**Actions:**")
+                                submitted = st.form_submit_button("📋 Create Batch", type="primary", use_container_width=True)
+                                if submitted:
+                                    st.session_state['recipe_to_brew'] = recipe['id_receipt']
+                                    st.rerun()
                             
-                            if st.button("📝 Edit", key=f"edit_{recipe['id_receipt']}", use_container_width=True):
-                                st.session_state['edit_recipe'] = recipe['id_receipt']
+                                    if st.button("📝 Edit", key=f"edit_{recipe['id_receipt']}", use_container_width=True):
+                                    st.session_state['edit_recipe'] = recipe['id_receipt']
                             
-                            if st.button("🗑️ Delete", key=f"delete_{recipe['id_receipt']}", use_container_width=True):
-                                st.session_state.delete_confirmation = {"type": "recipe", "id": recipe['id_receipt'], "name": recipe['name']}
-                                st.rerun()
+                                    if st.button("🗑️ Delete", key=f"delete_{recipe['id_receipt']}", use_container_width=True):
+                                    st.session_state.delete_confirmation = {"type": "recipe", "id": recipe['id_receipt'], "name": recipe['name']}
+                                    st.rerun()
                         
-                        # Ingredients
-                        st.write("**Ingredients:**")
-                        recipe_items_df = data.get("recipe_items", pd.DataFrame())
-                        if not recipe_items_df.empty:
-                            recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == recipe['id_receipt']]
-                            if not recipe_items.empty:
-                                ingredients_df = data.get("ingredients", pd.DataFrame())
-                                for _, item in recipe_items.iterrows():
-                                    # Obter nome do ingrediente
-                                    ingredient_name = "Unknown"
-                                    if not ingredients_df.empty:
-                                        ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
-                                        if not ing.empty:
-                                            ingredient_name = ing.iloc[0]['name']
-                                    
-                                    st.write(f"- {ingredient_name}: {item['quantity']} units")
-                            else:
-                                st.write("No ingredients defined")
-        else:
-            st.info("No recipes available. Create your first recipe!")
+                                                            # Ingredients
+                                                            st.write("**Ingredients:**")
+                                                            recipe_items_df = data.get("recipe_items", pd.DataFrame())
+                                                            if not recipe_items_df.empty:
+                                    recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == recipe['id_receipt']]
+                                    if not recipe_items.empty:
+                                    ingredients_df = data.get("ingredients", pd.DataFrame())
+                                    for _, item in recipe_items.iterrows():
+                                        # Obter nome do ingrediente
+                                        ingredient_name = "Unknown"
+                                        if not ingredients_df.empty:
+                                            ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
+                                            if not ing.empty:
+                                                ingredient_name = ing.iloc[0]['name']
+                                
+                                        st.write(f"- {ingredient_name}: {item['quantity']} units")
+                                    else:
+                                    st.write("No ingredients defined")
+                                            else:
+                                                st.info("No recipes available. Create your first recipe!")
     
-    with tab_create:
-        st.subheader("➕ Create New Recipe")
+                                        with tab_create:
+                                            st.subheader("➕ Create New Recipe")
         
-        # Formulário em duas colunas
-        col_left, col_right = st.columns(2)
+                                            # Formulário em duas colunas
+                                            col_left, col_right = st.columns(2)
         
-        with col_left:
-            recipe_name = st.text_input("Recipe Name*", key="new_recipe_name")
-            recipe_style = st.selectbox(
-                "Beer Style*",
-                ["American Pale Ale", "IPA", "Stout", "Porter", "Lager", "Pilsner", 
-                 "Wheat Beer", "Sour", "Belgian Ale", "Other"],
-                key="new_recipe_style"
-            )
+                                            with col_left:
+                                                recipe_name = st.text_input("Recipe Name*", key="new_recipe_name")
+                                                recipe_style = st.selectbox(
+                                                    "Beer Style*",
+                                                    ["American Pale Ale", "IPA", "Stout", "Porter", "Lager", "Pilsner", 
+                                                     "Wheat Beer", "Sour", "Belgian Ale", "Other"],
+                                                    key="new_recipe_style"
+                                                )
             
-            # Selecionar cervejaria
-            breweries_df = data.get("breweries", pd.DataFrame())
-            if not breweries_df.empty:
-                brewery_options = {row['id_brewery']: row['name'] for _, row in breweries_df.iterrows()}
-                selected_brewery = st.selectbox(
-                    "Target Brewery*",
-                    options=list(brewery_options.keys()),
-                    format_func=lambda x: brewery_options[x],
-                    key="new_recipe_brewery"
-                )
-                brewery_name = brewery_options[selected_brewery]
-            else:
-                selected_brewery = 1
-                brewery_name = "Main Brewery"
-                st.warning("No breweries found. Using default.")
+                                                # Selecionar cervejaria
+                                                breweries_df = data.get("breweries", pd.DataFrame())
+                                                if not breweries_df.empty:
+                                                    brewery_options = {row['id_brewery']: row['name'] for _, row in breweries_df.iterrows()}
+                                                    selected_brewery = st.selectbox(
+                                                        "Target Brewery*",
+                                                        options=list(brewery_options.keys()),
+                                                        format_func=lambda x: brewery_options[x],
+                                                        key="new_recipe_brewery"
+                                                    )
+                                                    brewery_name = brewery_options[selected_brewery]
+                                                else:
+                                                    selected_brewery = 1
+                                                    brewery_name = "Main Brewery"
+                                                    st.warning("No breweries found. Using default.")
             
-            batch_volume = st.number_input("Batch Volume (L)*", min_value=1.0, value=20.0, step=0.5, key="new_batch_volume")
-            efficiency = st.slider("Brewing Efficiency (%)", 50, 100, 75, key="new_efficiency")
+                                                batch_volume = st.number_input("Batch Volume (L)*", min_value=1.0, value=20.0, step=0.5, key="new_batch_volume")
+                                                efficiency = st.slider("Brewing Efficiency (%)", 50, 100, 75, key="new_efficiency")
         
-        with col_right:
-            # Parâmetros da cerveja
-            st.write("**Beer Parameters:**")
-            og = st.number_input("Original Gravity (°P)*", min_value=1.0, max_value=30.0, value=12.0, step=0.1, key="new_og")
-            fg = st.number_input("Final Gravity (°P)*", min_value=0.0, max_value=20.0, value=3.0, step=0.1, key="new_fg")
+                                            with col_right:
+                                                # Parâmetros da cerveja
+                                                st.write("**Beer Parameters:**")
+                                                og = st.number_input("Original Gravity (°P)*", min_value=1.0, max_value=30.0, value=12.0, step=0.1, key="new_og")
+                                                fg = st.number_input("Final Gravity (°P)*", min_value=0.0, max_value=20.0, value=3.0, step=0.1, key="new_fg")
             
-            # Calcular ABV automaticamente
-            if og and fg:
-                abv = (og - fg) * 0.524
-                st.info(f"**Estimated ABV:** {abv:.1f}%")
+                                                # Calcular ABV automaticamente
+                                                if og and fg:
+                                                    abv = (og - fg) * 0.524
+                                                    st.info(f"**Estimated ABV:** {abv:.1f}%")
             
-            col_params1, col_params2 = st.columns(2)
-            with col_params1:
-                ibus = st.number_input("IBUs", min_value=0, value=30, step=1, key="new_ibus")
-            with col_params2:
-                ebc = st.number_input("Color (EBC)", min_value=0, value=20, step=1, key="new_ebc")
+                                                col_params1, col_params2 = st.columns(2)
+                                                with col_params1:
+                                                    ibus = st.number_input("IBUs", min_value=0, value=30, step=1, key="new_ibus")
+                                                with col_params2:
+                                                    ebc = st.number_input("Color (EBC)", min_value=0, value=20, step=1, key="new_ebc")
         
-        # Descrição
-        description = st.text_area("Recipe Description", 
-                                 placeholder="Describe the beer style, flavor profile, brewing notes...",
-                                 height=100,
-                                 key="new_description")
+                                            # Descrição
+                                            description = st.text_area("Recipe Description", 
+                                     placeholder="Describe the beer style, flavor profile, brewing notes...",
+                                     height=100,
+                                     key="new_description")
         
-        # Seção de ingredientes
-        st.markdown("---")
-        st.subheader("🍻 Recipe Ingredients")
+                                            # Seção de ingredientes
+                                            st.markdown("---")
+                                            st.subheader("🍻 Recipe Ingredients")
         
-        ingredients_df = data.get("ingredients", pd.DataFrame())
-        if not ingredients_df.empty:
-            # Controle dinâmico de ingredientes
-            if 'recipe_ingredient_count' not in st.session_state:
-                st.session_state.recipe_ingredient_count = 1
+                                            ingredients_df = data.get("ingredients", pd.DataFrame())
+                                            if not ingredients_df.empty:
+                                                # Controle dinâmico de ingredientes
+                                                if 'recipe_ingredient_count' not in st.session_state:
+                                                    st.session_state.recipe_ingredient_count = 1
             
-            ingredient_list = []
+                                                ingredient_list = []
             
-            for i in range(st.session_state.recipe_ingredient_count):
-                st.write(f"**Ingredient {i+1}**")
-                col_ing1, col_ing2, col_ing3, col_ing4 = st.columns([3, 2, 2, 1])
+                                                for i in range(st.session_state.recipe_ingredient_count):
+                                                    st.write(f"**Ingredient {i+1}**")
+                                                    col_ing1, col_ing2, col_ing3, col_ing4 = st.columns([3, 2, 2, 1])
                 
-                with col_ing1:
-                    # Agrupar ingredientes por categoria
-                    ingredient_categories = sorted(ingredients_df['category'].dropna().unique())
-                    selected_category = st.selectbox(
-                        "Category",
-                        ["All"] + ingredient_categories,
-                        key=f"ing_cat_{i}"
-                    )
+                                                    with col_ing1:
+                                                        # Agrupar ingredientes por categoria
+                                                        ingredient_categories = sorted(ingredients_df['category'].dropna().unique())
+                                                        selected_category = st.selectbox(
+                                                            "Category",
+                                                            ["All"] + ingredient_categories,
+                                                            key=f"ing_cat_{i}"
+                                                        )
                     
-                    # Filtrar ingredientes por categoria
-                    if selected_category == "All":
-                        available_ingredients = ingredients_df['name'].tolist()
-                    else:
-                        available_ingredients = ingredients_df[ingredients_df['category'] == selected_category]['name'].tolist()
+                                                        # Filtrar ingredientes por categoria
+                                                        if selected_category == "All":
+                                                            available_ingredients = ingredients_df['name'].tolist()
+                                                        else:
+                                                            available_ingredients = ingredients_df[ingredients_df['category'] == selected_category]['name'].tolist()
                     
-                    selected_ingredient = st.selectbox(
-                        "Ingredient",
-                        [""] + available_ingredients,
-                        key=f"ing_{i}"
-                    )
+                                                        selected_ingredient = st.selectbox(
+                                                            "Ingredient",
+                                                            [""] + available_ingredients,
+                                                            key=f"ing_{i}"
+                                                        )
                 
-                with col_ing2:
-                    if selected_ingredient:
-                        # Obter unidade do ingrediente
-                        ing_info = ingredients_df[ingredients_df['name'] == selected_ingredient].iloc[0]
-                        unit = ing_info['unit']
-                        quantity = st.number_input(
-                            f"Amount ({unit})",
-                            min_value=0.0,
-                            value=0.0,
-                            step=0.1,
-                            key=f"qty_{i}"
-                        )
-                    else:
-                        quantity = 0.0
-                        unit = ""
+                                                    with col_ing2:
+                                                        if selected_ingredient:
+                                                            # Obter unidade do ingrediente
+                                                            ing_info = ingredients_df[ingredients_df['name'] == selected_ingredient].iloc[0]
+                                                            unit = ing_info['unit']
+                                                            quantity = st.number_input(
+                                    f"Amount ({unit})",
+                                    min_value=0.0,
+                                    value=0.0,
+                                    step=0.1,
+                                    key=f"qty_{i}"
+                                                            )
+                                                        else:
+                                                            quantity = 0.0
+                                                            unit = ""
                 
-                with col_ing3:
-                    if selected_ingredient and quantity > 0:
-                        # Mostrar custo estimado
-                        unit_cost = ing_info.get('unit_cost', 0)
-                        total_cost = unit_cost * quantity
-                        st.write(f"**Cost:** ${total_cost:.2f}")
+                                                    with col_ing3:
+                                                        if selected_ingredient and quantity > 0:
+                                                            # Mostrar custo estimado
+                                                            unit_cost = ing_info.get('unit_cost', 0)
+                                                            total_cost = unit_cost * quantity
+                                                            st.write(f"**Cost:** ${total_cost:.2f}")
                         
-                        # Verificar estoque
-                        stock = ing_info.get('stock', 0)
-                        if quantity > stock:
-                            st.error(f"⚠️ Low stock: {stock} {unit}")
-                        else:
-                            st.success("✓ In stock")
+                                                            # Verificar estoque
+                                                            stock = ing_info.get('stock', 0)
+                                                            if quantity > stock:
+                                    st.error(f"⚠️ Low stock: {stock} {unit}")
+                                                            else:
+                                    st.success("✓ In stock")
                 
-                with col_ing4:
-                    # Botão para remover ingrediente
-                    if i > 0:  # No remover o primeiro
-                        if st.button("🗑️", key=f"remove_{i}"):
-                            st.session_state.recipe_ingredient_count -= 1
-                            st.rerun()
+                                                    with col_ing4:
+                                                        # Botão para remover ingrediente
+                                                        if i > 0:  # No remover o primeiro
+                                                            if st.button("🗑️", key=f"remove_{i}"):
+                                    st.session_state.recipe_ingredient_count -= 1
+                                    st.rerun()
                 
-                if selected_ingredient and quantity > 0:
-                    ingredient_list.append({
-                        'id_ingredient': ing_info['id'],
-                        'name': selected_ingredient,
-                        'quantity': quantity,
-                        'unit': unit,
-                        'unit_cost': unit_cost,
-                        'total_cost': total_cost
-                    })
+                                                    if selected_ingredient and quantity > 0:
+                                                        ingredient_list.append({
+                                                            'id_ingredient': ing_info['id'],
+                                                            'name': selected_ingredient,
+                                                            'quantity': quantity,
+                                                            'unit': unit,
+                                                            'unit_cost': unit_cost,
+                                                            'total_cost': total_cost
+                                                        })
             
-            # Botão para adicionar mais ingredientes
-            if st.button("➕ Add Another Ingredient", key="add_another_ing"):
-                st.session_state.recipe_ingredient_count += 1
-                st.rerun()
+                                                # Botão para adicionar mais ingredientes
+                                                if st.button("➕ Add Another Ingredient", key="add_another_ing"):
+                                                    st.session_state.recipe_ingredient_count += 1
+                                                    st.rerun()
             
-            # Summary dos ingredientes
-            if ingredient_list:
-                st.markdown("---")
-                st.subheader("📋 Ingredients Summary")
+                                                # Summary dos ingredientes
+                                                if ingredient_list:
+                                                    st.markdown("---")
+                                                    st.subheader("📋 Ingredients Summary")
                 
-                total_cost = sum(item['total_cost'] for item in ingredient_list)
-                total_ingredients = len(ingredient_list)
+                                                    total_cost = sum(item['total_cost'] for item in ingredient_list)
+                                                    total_ingredients = len(ingredient_list)
                 
-                col_sum1, col_sum2, col_sum3 = st.columns(3)
-                with col_sum1:
-                    st.metric("Total Ingredients", total_ingredients)
-                with col_sum2:
-                    st.metric("Total Recipe Cost", f"${total_cost:.2f}")
-                with col_sum3:
-                    cost_per_liter = total_cost / batch_volume if batch_volume > 0 else 0
-                    st.metric("Cost per Liter", f"${cost_per_liter:.2f}")
+                                                    col_sum1, col_sum2, col_sum3 = st.columns(3)
+                                                    with col_sum1:
+                                                        st.metric("Total Ingredients", total_ingredients)
+                                                    with col_sum2:
+                                                        st.metric("Total Recipe Cost", f"${total_cost:.2f}")
+                                                    with col_sum3:
+                                                        cost_per_liter = total_cost / batch_volume if batch_volume > 0 else 0
+                                                        st.metric("Cost per Liter", f"${cost_per_liter:.2f}")
                 
-                # Tabela de resumo
-                summary_df = pd.DataFrame([
-                    {
-                        'Ingredient': item['name'],
-                        'Amount': f"{item['quantity']} {item['unit']}",
-                        'Unit Cost': f"${item['unit_cost']:.2f}",
-                        'Total Cost': f"${item['total_cost']:.2f}"
-                    }
-                    for item in ingredient_list
-                ])
-                st.dataframe(summary_df, use_container_width=True)
-        else:
-            st.warning("No ingredients available. Please add ingredients first in the Ingredients page.")
-            ingredient_list = []
+                                                    # Tabela de resumo
+                                                    summary_df = pd.DataFrame([
+                                                        {
+                                                            'Ingredient': item['name'],
+                                                            'Amount': f"{item['quantity']} {item['unit']}",
+                                                            'Unit Cost': f"${item['unit_cost']:.2f}",
+                                                            'Total Cost': f"${item['total_cost']:.2f}"
+                                                        }
+                                                        for item in ingredient_list
+                                                    ])
+                                                    st.dataframe(summary_df, use_container_width=True)
+                                            else:
+                                                st.warning("No ingredients available. Please add ingredients first in the Ingredients page.")
+                                                ingredient_list = []
         
-        # Botão para criar receita
-        if st.button("📋 Create Recipe", type="primary", use_container_width=True, key="create_recipe_final"):
-            if not recipe_name:
-                st.error("Recipe name is required!")
-            elif not ingredient_list:
-                st.error("Please add at least one ingredient!")
-            elif fg >= og:
-                st.error("Final Gravity must be lower than Original Gravity!")
-            else:
-                # Criar registro da receita
-                new_recipe = {
-                    'name': recipe_name,
-                    'style': recipe_style,
-                    'batch_volume': batch_volume,
-                    'efficiency': efficiency,
-                    'brewery_id': selected_brewery,
-                    'brewery_name': brewery_name,
-                    'og': og,
-                    'fg': fg,
-                    'ibus': ibus,
-                    'ebc': ebc,
-                    'abv': (og - fg) * 0.524,
-                    'description': description
-                }
+                                            # Botão para criar receita
+                                            if st.button("📋 Create Recipe", type="primary", use_container_width=True, key="create_recipe_final"):
+                                                if not recipe_name:
+                                                    st.error("Recipe name is required!")
+                                                elif not ingredient_list:
+                                                    st.error("Please add at least one ingredient!")
+                                                elif fg >= og:
+                                                    st.error("Final Gravity must be lower than Original Gravity!")
+                                                else:
+                                                    # Criar registro da receita
+                                                    new_recipe = {
+                                                        'name': recipe_name,
+                                                        'style': recipe_style,
+                                                        'batch_volume': batch_volume,
+                                                        'efficiency': efficiency,
+                                                        'brewery_id': selected_brewery,
+                                                        'brewery_name': brewery_name,
+                                                        'og': og,
+                                                        'fg': fg,
+                                                        'ibus': ibus,
+                                                        'ebc': ebc,
+                                                        'abv': (og - fg) * 0.524,
+                                                        'description': description
+                                                    }
                 
-                # Inserir receita
-                recipe_id = insert_data("recipes", new_recipe)
+                                                    # Inserir receita
+                                                    recipe_id = insert_data("recipes", new_recipe)
                 
-                # Add ingredientes à tabela recipe_items
-                for item in ingredient_list:
-                    new_recipe_item = {
-                        'id_receipt': recipe_id,
-                        'id_ingredient': item['id_ingredient'],
-                        'quantity': item['quantity']
-                    }
+                                                    # Add ingredientes à tabela recipe_items
+                                                    for item in ingredient_list:
+                                                        new_recipe_item = {
+                                                            'id_receipt': recipe_id,
+                                                            'id_ingredient': item['id_ingredient'],
+                                                            'quantity': item['quantity']
+                                                        }
                     
-                    insert_data("recipe_items", new_recipe_item)
+                                                        insert_data("recipe_items", new_recipe_item)
                 
-                # Clear estado
-                st.session_state.recipe_ingredient_count = 1
+                                                    # Clear estado
+                                                    st.session_state.recipe_ingredient_count = 1
                 
-                # Atualizar dados
-                data = get_all_data()
-                st.success(f"✅ Recipe '{recipe_name}' created successfully!")
-                st.rerun()
+                                                    # Atualizar dados
+                                                    data = get_all_data()
+                                                    st.success(f"✅ Recipe '{recipe_name}' created successfully!")
+                                                    st.rerun()
     
-    with tab_import:
-        st.subheader("📤 Import Recipes")
+                                        with tab_import:
+                                            st.subheader("📤 Import Recipes")
         
-        st.info("""
-        **Import recipes from Excel or CSV files**
+                                            st.info("""
+                                            **Import recipes from Excel or CSV files**
         
-        Supported formats:
-        - Excel files (.xlsx, .xls) with recipe sheets
-        - CSV files with recipe data
-        - BeerXML files (coming soon)
-        """)
+                                            Supported formats:
+                                            - Excel files (.xlsx, .xls) with recipe sheets
+                                            - CSV files with recipe data
+                                            - BeerXML files (coming soon)
+                                            """)
         
-        uploaded_recipe_file = st.file_uploader(
-            "Choose recipe file",
-            type=['xlsx', 'xls', 'csv'],
-            key="recipe_upload"
-        )
+                                            uploaded_recipe_file = st.file_uploader(
+                                                "Choose recipe file",
+                                                type=['xlsx', 'xls', 'csv'],
+                                                key="recipe_upload"
+                                            )
         
-        if uploaded_recipe_file:
-            try:
-                if uploaded_recipe_file.name.endswith('.csv'):
-                    recipe_df = pd.read_csv(uploaded_recipe_file)
-                else:
-                    # Para Excel, tentar ler a primeira sheet
-                    recipe_df = pd.read_excel(uploaded_recipe_file)
+                                            if uploaded_recipe_file:
+                                                try:
+                                                    if uploaded_recipe_file.name.endswith('.csv'):
+                                                        recipe_df = pd.read_csv(uploaded_recipe_file)
+                                                    else:
+                                                        # Para Excel, tentar ler a primeira sheet
+                                                        recipe_df = pd.read_excel(uploaded_recipe_file)
                 
-                st.success(f"Successfully loaded {len(recipe_df)} recipes")
+                                                    st.success(f"Successfully loaded {len(recipe_df)} recipes")
                 
-                # Pré-visualização
-                st.write("**Preview of imported recipes:**")
-                st.dataframe(recipe_df.head(), use_container_width=True)
+                                                    # Pré-visualização
+                                                    st.write("**Preview of imported recipes:**")
+                                                    st.dataframe(recipe_df.head(), use_container_width=True)
                 
-                # Mapeamento de colunas
-                st.write("**Column Mapping**")
-                st.write("Map your file columns to the required recipe fields:")
+                                                    # Mapeamento de colunas
+                                                    st.write("**Column Mapping**")
+                                                    st.write("Map your file columns to the required recipe fields:")
                 
-                required_fields = ['name', 'style', 'batch_volume', 'og', 'fg']
-                file_columns = recipe_df.columns.tolist()
+                                                    required_fields = ['name', 'style', 'batch_volume', 'og', 'fg']
+                                                    file_columns = recipe_df.columns.tolist()
                 
-                column_mapping = {}
-                for field in required_fields:
-                    column_mapping[field] = st.selectbox(
-                        f"Select column for '{field}'",
-                        [""] + file_columns,
-                        key=f"map_{field}"
-                    )
+                                                    column_mapping = {}
+                                                    for field in required_fields:
+                                                        column_mapping[field] = st.selectbox(
+                                                            f"Select column for '{field}'",
+                                                            [""] + file_columns,
+                                                            key=f"map_{field}"
+                                                        )
                 
-                # Botão de importação
-                if st.button("Import Recipes", type="primary", key="import_recipes_btn"):
-                    if all(column_mapping.values()):
-                        # Processar importação
-                        imported_count = 0
+                                                    # Botão de importação
+                                                    if st.button("Import Recipes", type="primary", key="import_recipes_btn"):
+                                                        if all(column_mapping.values()):
+                                                            # Processar importação
+                                                            imported_count = 0
                         
-                        for _, row in recipe_df.iterrows():
-                            # Criar registro da receita
-                            recipe_data = {
-                                'name': row[column_mapping['name']],
-                                'style': row[column_mapping['style']],
-                                'batch_volume': float(row[column_mapping['batch_volume']]),
-                                'og': float(row[column_mapping['og']]),
-                                'fg': float(row[column_mapping['fg']])
-                            }
+                                                            for _, row in recipe_df.iterrows():
+                                    # Criar registro da receita
+                                    recipe_data = {
+                                    'name': row[column_mapping['name']],
+                                    'style': row[column_mapping['style']],
+                                    'batch_volume': float(row[column_mapping['batch_volume']]),
+                                    'og': float(row[column_mapping['og']]),
+                                    'fg': float(row[column_mapping['fg']])
+                                    }
                             
-                            # Add campos opcionais se disponíveis
-                            optional_fields = ['ibus', 'ebc', 'description', 'efficiency']
-                            for field in optional_fields:
-                                if field in file_columns:
-                                    recipe_data[field] = row[field]
+                                    # Add campos opcionais se disponíveis
+                                    optional_fields = ['ibus', 'ebc', 'description', 'efficiency']
+                                    for field in optional_fields:
+                                    if field in file_columns:
+                                        recipe_data[field] = row[field]
                             
-                            # Inserir receita
-                            insert_data("recipes", recipe_data)
-                            imported_count += 1
+                                    # Inserir receita
+                                    insert_data("recipes", recipe_data)
+                                    imported_count += 1
                         
-                        data = get_all_data()
-                        st.success(f"✅ Successfully imported {imported_count} recipes!")
-                        st.rerun()
-                    else:
-                        st.error("Please map all required fields!")
-            except Exception as e:
-                st.error(f"Error loading file: {e}")
+                                                            data = get_all_data()
+                                                            st.success(f"✅ Successfully imported {imported_count} recipes!")
+                                                            st.rerun()
+                                                        else:
+                                                            st.error("Please map all required fields!")
+                                                except Exception as e:
+                                                    st.error(f"Error loading file: {e}")
     
-    with tab_analyze:
-        st.subheader("📊 Recipe Analysis")
+                                        with tab_analyze:
+                                            st.subheader("📊 Recipe Analysis")
         
-        if not recipes_df.empty:
-            # Estatísticas gerais
-            col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
-            with col_stats1:
-                total_recipes = len(recipes_df)
-                st.metric("Total Recipes", total_recipes)
-            with col_stats2:
-                unique_styles = recipes_df['style'].nunique()
-                st.metric("Unique Styles", unique_styles)
-            with col_stats3:
-                avg_batch_size = recipes_df['batch_volume'].mean()
-                st.metric("Avg Batch Size", f"{avg_batch_size:.1f}L")
-            with col_stats4:
-                avg_abv = ((recipes_df['og'] - recipes_df['fg']) * 0.524).mean()
-                st.metric("Avg ABV", f"{avg_abv:.1f}%")
+                                            if not recipes_df.empty:
+                                                # Estatísticas gerais
+                                                col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
+                                                with col_stats1:
+                                                    total_recipes = len(recipes_df)
+                                                    st.metric("Total Recipes", total_recipes)
+                                                with col_stats2:
+                                                    unique_styles = recipes_df['style'].nunique()
+                                                    st.metric("Unique Styles", unique_styles)
+                                                with col_stats3:
+                                                    avg_batch_size = recipes_df['batch_volume'].mean()
+                                                    st.metric("Avg Batch Size", f"{avg_batch_size:.1f}L")
+                                                with col_stats4:
+                                                    avg_abv = ((recipes_df['og'] - recipes_df['fg']) * 0.524).mean()
+                                                    st.metric("Avg ABV", f"{avg_abv:.1f}%")
             
-            # Gráfico de distribuição por estilo
-            st.markdown("---")
-            st.write("**Distribution by Beer Style**")
+                                                # Gráfico de distribuição por estilo
+                                                st.markdown("---")
+                                                st.write("**Distribution by Beer Style**")
             
-            style_dist = recipes_df['style'].value_counts()
-            fig_style = go.Figure(data=[
-                go.Bar(
-                    x=style_dist.index,
-                    y=style_dist.values,
-                    marker_color='#4caf50'
-                )
-            ])
-            fig_style.update_layout(
-                title="Recipes by Beer Style",
-                xaxis_title="Beer Style",
-                yaxis_title="Number of Recipes",
-                height=400
-            )
-            st.plotly_chart(fig_style, use_container_width=True)
+                                                style_dist = recipes_df['style'].value_counts()
+                                                fig_style = go.Figure(data=[
+                                                    go.Bar(
+                                                        x=style_dist.index,
+                                                        y=style_dist.values,
+                                                        marker_color='#4caf50'
+                                                    )
+                                                ])
+                                                fig_style.update_layout(
+                                                    title="Recipes by Beer Style",
+                                                    xaxis_title="Beer Style",
+                                                    yaxis_title="Number of Recipes",
+                                                    height=400
+                                                )
+                                                st.plotly_chart(fig_style, use_container_width=True)
             
-            # Análise de parâmetros
-            st.markdown("---")
-            st.write("**Beer Parameters Analysis**")
+                                                # Análise de parâmetros
+                                                st.markdown("---")
+                                                st.write("**Beer Parameters Analysis**")
             
-            col_param1, col_param2 = st.columns(2)
-            with col_param1:
-                # Scatter plot OG vs FG
-                fig_og_fg = go.Figure(data=[
-                    go.Scatter(
-                        x=recipes_df['og'],
-                        y=recipes_df['fg'],
-                        mode='markers',
-                        marker=dict(size=10, color=recipes_df['ibus'], colorscale='Viridis'),
-                        text=recipes_df['name'],
-                        hovertemplate='<b>%{text}</b><br>OG: %{x}°P<br>FG: %{y}°P<extra></extra>'
-                    )
-                ])
-                fig_og_fg.update_layout(
-                    title="OG vs FG Scatter Plot",
-                    xaxis_title="Original Gravity (°P)",
-                    yaxis_title="Final Gravity (°P)",
-                    height=400
-                )
-                st.plotly_chart(fig_og_fg, use_container_width=True)
+                                                col_param1, col_param2 = st.columns(2)
+                                                with col_param1:
+                                                    # Scatter plot OG vs FG
+                                                    fig_og_fg = go.Figure(data=[
+                                                        go.Scatter(
+                                                            x=recipes_df['og'],
+                                                            y=recipes_df['fg'],
+                                                            mode='markers',
+                                                            marker=dict(size=10, color=recipes_df['ibus'], colorscale='Viridis'),
+                                                            text=recipes_df['name'],
+                                                            hovertemplate='<b>%{text}</b><br>OG: %{x}°P<br>FG: %{y}°P<extra></extra>'
+                                                        )
+                                                    ])
+                                                    fig_og_fg.update_layout(
+                                                        title="OG vs FG Scatter Plot",
+                                                        xaxis_title="Original Gravity (°P)",
+                                                        yaxis_title="Final Gravity (°P)",
+                                                        height=400
+                                                    )
+                                                    st.plotly_chart(fig_og_fg, use_container_width=True)
             
-            with col_param2:
-                # Histograma de ABV
-                abv_values = (recipes_df['og'] - recipes_df['fg']) * 0.524
-                fig_abv = go.Figure(data=[
-                    go.Histogram(
-                        x=abv_values,
-                        nbinsx=20,
-                        marker_color='#2196f3'
-                    )
-                ])
-                fig_abv.update_layout(
-                    title="ABV Distribution",
-                    xaxis_title="ABV (%)",
-                    yaxis_title="Number of Recipes",
-                    height=400
-                )
-                st.plotly_chart(fig_abv, use_container_width=True)
+                                                with col_param2:
+                                                    # Histograma de ABV
+                                                    abv_values = (recipes_df['og'] - recipes_df['fg']) * 0.524
+                                                    fig_abv = go.Figure(data=[
+                                                        go.Histogram(
+                                                            x=abv_values,
+                                                            nbinsx=20,
+                                                            marker_color='#2196f3'
+                                                        )
+                                                    ])
+                                                    fig_abv.update_layout(
+                                                        title="ABV Distribution",
+                                                        xaxis_title="ABV (%)",
+                                                        yaxis_title="Number of Recipes",
+                                                        height=400
+                                                    )
+                                                    st.plotly_chart(fig_abv, use_container_width=True)
             
-            # Tabela de custos (se houver ingredientes)
-            recipe_items_df = data.get("recipe_items", pd.DataFrame())
-            if not recipe_items_df.empty:
-                st.markdown("---")
-                st.write("**Recipe Cost Analysis**")
+                                                # Tabela de custos (se houver ingredientes)
+                                                recipe_items_df = data.get("recipe_items", pd.DataFrame())
+                                                if not recipe_items_df.empty:
+                                                    st.markdown("---")
+                                                    st.write("**Recipe Cost Analysis**")
                 
-                # Calcular custos estimados para cada receita
-                recipe_costs = []
-                for _, recipe in recipes_df.iterrows():
-                    recipe_id = recipe['id_receipt']
-                    recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == recipe_id]
+                                                    # Calcular custos estimados para cada receita
+                                                    recipe_costs = []
+                                                    for _, recipe in recipes_df.iterrows():
+                                                        recipe_id = recipe['id_receipt']
+                                                        recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == recipe_id]
                     
-                    total_cost = 0
-                    for _, item in recipe_items.iterrows():
-                        ingredients_df = data.get("ingredients", pd.DataFrame())
-                        if not ingredients_df.empty:
-                            ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
-                            if not ing.empty:
-                                unit_cost = ing.iloc[0].get('unit_cost', 0)
-                                total_cost += unit_cost * item['quantity']
+                                                        total_cost = 0
+                                                        for _, item in recipe_items.iterrows():
+                                                            ingredients_df = data.get("ingredients", pd.DataFrame())
+                                                            if not ingredients_df.empty:
+                                    ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
+                                    if not ing.empty:
+                                    unit_cost = ing.iloc[0].get('unit_cost', 0)
+                                    total_cost += unit_cost * item['quantity']
                     
-                    recipe_costs.append({
-                        'Recipe': recipe['name'],
-                        'Batch Volume (L)': recipe['batch_volume'],
-                        'Total Cost': total_cost,
-                        'Cost per Liter': total_cost / recipe['batch_volume'] if recipe['batch_volume'] > 0 else 0
-                    })
+                                                        recipe_costs.append({
+                                                            'Recipe': recipe['name'],
+                                                            'Batch Volume (L)': recipe['batch_volume'],
+                                                            'Total Cost': total_cost,
+                                                            'Cost per Liter': total_cost / recipe['batch_volume'] if recipe['batch_volume'] > 0 else 0
+                                                        })
                 
-                if recipe_costs:
-                    cost_df = pd.DataFrame(recipe_costs)
-                    st.dataframe(cost_df.sort_values('Cost per Liter', ascending=False), use_container_width=True)
-        else:
-            st.info("No recipes available for analysis. Create some recipes first!")
+                                                    if recipe_costs:
+                                                        cost_df = pd.DataFrame(recipe_costs)
+                                                        st.dataframe(cost_df.sort_values('Cost per Liter', ascending=False), use_container_width=True)
+                                            else:
+                                                st.info("No recipes available for analysis. Create some recipes first!")
     
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -4403,106 +4406,107 @@ elif page == "Calendar":
     with tab_events:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📋 Events Management")
+            with st.form("add_event_form", clear_on_submit=True):
         
-        # Add novo evento
-        with st.expander("➕ Add New Event", expanded=False):
-            col_e1, col_e2 = st.columns(2)
-            with col_e1:
-                event_title = st.text_input("Event Title", key="new_event_title")
-                event_type = st.selectbox("Event Type", ["Brewing", "Transfer", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"], key="new_event_type")
-                event_date = st.date_input("Event Date", datetime.now().date(), key="new_event_date")
+                        # Add novo evento
+                        with st.expander("➕ Add New Event", expanded=False):
+                col_e1, col_e2 = st.columns(2)
+                with col_e1:
+                    event_title = st.text_input("Event Title", key="new_event_title")
+                    event_type = st.selectbox("Event Type", ["Brewing", "Transfer", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"], key="new_event_type")
+                    event_date = st.date_input("Event Date", datetime.now().date(), key="new_event_date")
             
-            with col_e2:
-                equipment_df = data.get("equipment", pd.DataFrame())
-                if not equipment_df.empty:
-                    equipment_options = equipment_df["name"].tolist()
-                    equipment = st.multiselect("Equipment", equipment_options, key="new_event_equipment")
-                else:
-                    equipment = st.text_input("Equipment", key="new_event_eq_text")
+                with col_e2:
+                    equipment_df = data.get("equipment", pd.DataFrame())
+                    if not equipment_df.empty:
+                        equipment_options = equipment_df["name"].tolist()
+                        equipment = st.multiselect("Equipment", equipment_options, key="new_event_equipment")
+                    else:
+                        equipment = st.text_input("Equipment", key="new_event_eq_text")
                 
-                orders_df = data.get("production_orders", pd.DataFrame())
-                if not orders_df.empty:
-                    order_options = orders_df["id_order"].tolist()
-                    batch_id = st.selectbox("Related Production Order", ["None"] + [f"Order #{oid}" for oid in order_options], key="new_event_batch")
-                else:
-                    batch_id = st.text_input("Batch ID", key="new_event_batch_text")
+                    orders_df = data.get("production_orders", pd.DataFrame())
+                    if not orders_df.empty:
+                        order_options = orders_df["id_order"].tolist()
+                        batch_id = st.selectbox("Related Production Order", ["None"] + [f"Order #{oid}" for oid in order_options], key="new_event_batch")
+                    else:
+                        batch_id = st.text_input("Batch ID", key="new_event_batch_text")
             
-            event_notes = st.text_area("Notes", key="new_event_notes")
-            
-            if st.button("Add Event", key="add_event_btn"):
-                if event_title:
-                    new_event = {
-                        "title": event_title,
-                        "event_type": event_type,
-                        "start_date": event_date,
-                        "end_date": event_date,
-                        "equipment": ", ".join(equipment) if isinstance(equipment, list) else equipment,
-                        "batch_id": batch_id if batch_id != "None" else "",
-                        "notes": event_notes,
-                        "created_by": "User"
-                    }
-                    
-                    insert_data("calendar_events", new_event)
-                    data = get_all_data()
-                    st.success("✅ Event added successfully!")
-                    st.rerun()
-                else:
-                    st.error("Event title is required!")
+                event_notes = st.text_area("Notes", key="new_event_notes")
+                submitted = st.form_submit_button("Add Event", type="primary", use_container_width=True)
+                if submitted:
+                    if event_title:
+                        new_event = {
+                            "title": event_title,
+                            "event_type": event_type,
+                            "start_date": event_date,
+                            "end_date": event_date,
+                            "equipment": ", ".join(equipment) if isinstance(equipment, list) else equipment,
+                            "batch_id": batch_id if batch_id != "None" else "",
+                            "notes": event_notes,
+                            "created_by": "User"
+                        }
+                
+                        insert_data("calendar_events", new_event)
+                        data = get_all_data()
+                        st.success("✅ Event added successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Event title is required!")
         
-        # Lista de eventos
-        st.markdown("---")
-        st.subheader("Upcoming Events")
+                            # Lista de eventos
+                            st.markdown("---")
+                            st.subheader("Upcoming Events")
         
-        events_df = data.get("calendar_events", pd.DataFrame())
-        if not events_df.empty:
-            events_df = events_df.copy()
-            events_df["start_date"] = pd.to_datetime(events_df["start_date"])
+                            events_df = data.get("calendar_events", pd.DataFrame())
+                            if not events_df.empty:
+                    events_df = events_df.copy()
+                    events_df["start_date"] = pd.to_datetime(events_df["start_date"])
             
-            # Filtrar eventos futuros
-            upcoming_events = events_df[events_df["start_date"] >= pd.Timestamp(datetime.now().date())].sort_values("start_date")
+                    # Filtrar eventos futuros
+                    upcoming_events = events_df[events_df["start_date"] >= pd.Timestamp(datetime.now().date())].sort_values("start_date")
             
-            if len(upcoming_events) > 0:
-                for _, event in upcoming_events.iterrows():
-                    col_ev1, col_ev2, col_ev3 = st.columns([3, 2, 1])
+                    if len(upcoming_events) > 0:
+                    for _, event in upcoming_events.iterrows():
+                        col_ev1, col_ev2, col_ev3 = st.columns([3, 2, 1])
+                
+                        with col_ev1:
+                            st.write(f"**{event['title']}**")
+                            if event["notes"]:
+                                st.caption(event["notes"][:100] + "..." if len(event["notes"]) > 100 else event["notes"])
                     
-                    with col_ev1:
-                        st.write(f"**{event['title']}**")
-                        if event["notes"]:
-                            st.caption(event["notes"][:100] + "..." if len(event["notes"]) > 100 else event["notes"])
-                        
-                        if event["equipment"]:
-                            st.caption(f"Equipment: {event['equipment']}")
+                            if event["equipment"]:
+                                st.caption(f"Equipment: {event['equipment']}")
+                
+                        with col_ev2:
+                            event_date = event["start_date"].date()
+                            days_until = (event_date - datetime.now().date()).days
                     
-                    with col_ev2:
-                        event_date = event["start_date"].date()
-                        days_until = (event_date - datetime.now().date()).days
-                        
-                        if days_until == 0:
-                            st.write("**Today**")
-                        elif days_until == 1:
-                            st.write("**Tomorrow**")
-                        else:
-                            st.write(f"In **{days_until} days**")
-                        
-                        st.write(f"_{event['event_type']}_")
+                            if days_until == 0:
+                                st.write("**Today**")
+                            elif days_until == 1:
+                                st.write("**Tomorrow**")
+                            else:
+                                st.write(f"In **{days_until} days**")
                     
-                    with col_ev3:
-                        col_btn1, col_btn2 = st.columns(2)
-                        with col_btn1:
-                            if st.button("✏️", key=f"edit_ev_{event['id_event']}"):
-                                st.session_state['edit_event'] = event['id_event']
-                        with col_btn2:
-                            if st.button("🗑️", key=f"delete_ev_{event['id_event']}"):
-                                delete_data("calendar_events", "id_event = :id_event", {"id_event": event['id_event']})
-                                data = get_all_data()
-                                st.success("Event deleted!")
-                                st.rerun()
-                    
-                    st.markdown("---")
-            else:
-                st.info("No upcoming events scheduled.")
-        else:
-            st.info("No events in calendar. Add your first event above!")
+                            st.write(f"_{event['event_type']}_")
+                
+                        with col_ev3:
+                            col_btn1, col_btn2 = st.columns(2)
+                            with col_btn1:
+                                if st.button("✏️", key=f"edit_ev_{event['id_event']}"):
+                                    st.session_state['edit_event'] = event['id_event']
+                            with col_btn2:
+                                if st.button("🗑️", key=f"delete_ev_{event['id_event']}"):
+                                    delete_data("calendar_events", "id_event = :id_event", {"id_event": event['id_event']})
+                                    data = get_all_data()
+                                    st.success("Event deleted!")
+                                    st.rerun()
+                
+                        st.markdown("---")
+                    else:
+                    st.info("No upcoming events scheduled.")
+                            else:
+                    st.info("No events in calendar. Add your first event above!")
         
         st.markdown("</div>", unsafe_allow_html=True)
     
