@@ -264,7 +264,7 @@ def init_database():
                 ddl_to_run = _translate_sqlite_to_postgres(ddl)
             conn.execute(sql_text(ddl_to_run))
 
-def query_to_df(query: str, params: dict | None = None) -> pd.DateFrame:
+def query_to_df(query: str, params: dict | None = None) -> pd.DataFrame:
     """Executa SELECT e retorna DateFrame."""
     engine = get_engine()
     with engine.connect() as conn:
@@ -278,7 +278,7 @@ def execute_query(query: str, params: dict | None = None):
         result = conn.execute(sql_text(query), params or {})
         return result.rowcount
 
-def get_table_data(table_name: str) -> pd.DateFrame:
+def get_table_data(table_name: str) -> pd.DataFrame:
     return query_to_df(f"SELECT * FROM {table_name}")
 
 def insert_data(table_name: str, data_dict: dict):
@@ -687,7 +687,7 @@ def get_alerts():
     alerts = []
     
     # Verificar estoque baixo
-    ingredients_df = data.get('ingredients', pd.DateFrame())
+    ingredients_df = data.get('ingredients', pd.DataFrame())
     if not ingredients_df.empty:
         if "low_stock_threshold" in ingredients_df.columns:
             low_stock = ingredients_df[ingredients_df["stock"] < ingredients_df["low_stock_threshold"]]
@@ -703,7 +703,7 @@ def get_alerts():
             })
     
     # Verificar equipamentos com limpeza vencida
-    equipment_df = data.get('equipment', pd.DateFrame())
+    equipment_df = data.get('equipment', pd.DataFrame())
     if not equipment_df.empty and "cleaning_due" in equipment_df.columns:
         try:
             equipment_copy = equipment_df.copy()
@@ -720,7 +720,7 @@ def get_alerts():
             pass
     
     # Verificar ordens agendadas para hoje
-    orders_df = data.get('production_orders', pd.DateFrame())
+    orders_df = data.get('production_orders', pd.DataFrame())
     if not orders_df.empty:
         today = datetime.now().date()
         scheduled_today = orders_df[
@@ -903,8 +903,8 @@ if page == "Dashboard":
                         st.write(f"**{day}**")
                         
                         # Verificar eventos
-                        events_today = pd.DateFrame()
-                        events_df = data.get("calendar_events", pd.DateFrame())
+                        events_today = pd.DataFrame()
+                        events_df = data.get("calendar_events", pd.DataFrame())
                         if not events_df.empty:
                             events_df = events_df.copy()
                             if "start_date" in events_df.columns:
@@ -957,7 +957,7 @@ if page == "Dashboard":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📋 Upcoming Activities")
         
-        events_df = data.get("calendar_events", pd.DateFrame())
+        events_df = data.get("calendar_events", pd.DataFrame())
         if not events_df.empty:
             events_df = events_df.copy()
             if "start_date" in events_df.columns:
@@ -1020,7 +1020,7 @@ if page == "Dashboard":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📦 Critical Stock")
         
-        ingredients_df = data.get("ingredients", pd.DateFrame())
+        ingredients_df = data.get("ingredients", pd.DataFrame())
         if not ingredients_df.empty:
             if "low_stock_threshold" in ingredients_df.columns:
                 critical_stock = ingredients_df[ingredients_df["stock"] < ingredients_df["low_stock_threshold"]]
@@ -1053,7 +1053,7 @@ if page == "Dashboard":
     st.markdown("<div class='section-box'>", unsafe_allow_html=True)
     st.subheader("🏭 Active Production")
     
-    orders_df = data.get("production_orders", pd.DateFrame())
+    orders_df = data.get("production_orders", pd.DataFrame())
     if not orders_df.empty:
         active_orders = orders_df[orders_df["status"].isin(["Fermenting", "Conditioning", "Packaging", "Brewing"])]
         
@@ -1190,7 +1190,7 @@ elif page == "Breweries":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📋 Existing Breweries")
         
-        breweries_df = data.get("breweries", pd.DateFrame())
+        breweries_df = data.get("breweries", pd.DataFrame())
         if not breweries_df.empty:
             # Filtros
             col_filter1, col_filter2, col_filter3 = st.columns(3)
@@ -1481,7 +1481,7 @@ elif page == "Breweries":
         
         col_eq1, col_eq2 = st.columns(2)
         with col_eq1:
-            breweries_df = data.get("breweries", pd.DateFrame())
+            breweries_df = data.get("breweries", pd.DataFrame())
             if not breweries_df.empty:
                 brewery_options = breweries_df["name"].tolist()
                 selected_brewery = st.selectbox(
@@ -1602,7 +1602,7 @@ elif page == "Breweries":
             st.markdown("---")
             st.subheader("📋 Existing Equipment")
             
-            equipment_df = data.get("equipment", pd.DateFrame())
+            equipment_df = data.get("equipment", pd.DataFrame())
             if not equipment_df.empty:
                 # Filtros
                 col_eq_filter1, col_eq_filter2, col_eq_filter3 = st.columns(3)
@@ -1716,8 +1716,8 @@ elif page == "Breweries":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📊 Breweries & Equipment Overview")
         
-        breweries_df = data.get("breweries", pd.DateFrame())
-        equipment_df = data.get("equipment", pd.DateFrame())
+        breweries_df = data.get("breweries", pd.DataFrame())
+        equipment_df = data.get("equipment", pd.DataFrame())
         
         if not breweries_df.empty:
             # Estatísticas
@@ -1763,7 +1763,7 @@ elif page == "Breweries":
                         "Serving Tanks": len(brewery_eq[brewery_eq["type"] == "Serving Tank"])
                     })
                 
-                eq_df = pd.DateFrame(equipment_by_brewery)
+                eq_df = pd.DataFrame(equipment_by_brewery)
                 
                 fig = go.Figure()
                 
@@ -1809,7 +1809,7 @@ elif page == "Breweries":
                         "Active Tanks": len(brewery_eq[(brewery_eq["type"].str.contains("Tank", na=False)) & (brewery_eq["status"] == "In Use")])
                     })
                 
-                capacity_df = pd.DateFrame(capacity_data)
+                capacity_df = pd.DataFrame(capacity_data)
                 st.dataframe(capacity_df, use_container_width=True)
             else:
                 st.info("Add equipment to see distribution charts")
@@ -1876,7 +1876,7 @@ elif page == "Ingredients":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📦 Current Ingredient Stock")
         
-        ingredients_df = data.get("ingredients", pd.DateFrame())
+        ingredients_df = data.get("ingredients", pd.DataFrame())
         if not ingredients_df.empty:
             # Filtros
             col_filter1, col_filter2, col_filter3 = st.columns(3)
@@ -2106,7 +2106,7 @@ elif page == "Ingredients":
                     st.rerun()
         
         else:  # Edit Existing Ingredient
-            ingredients_df = data.get("ingredients", pd.DateFrame())
+            ingredients_df = data.get("ingredients", pd.DataFrame())
             if not ingredients_df.empty:
                 ingredient_options = ingredients_df["name"].tolist()
                 selected_ingredient = st.selectbox(
@@ -2223,7 +2223,7 @@ elif page == "Ingredients":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📊 Categories & Analytics")
         
-        ingredients_df = data.get("ingredients", pd.DateFrame())
+        ingredients_df = data.get("ingredients", pd.DataFrame())
         if not ingredients_df.empty:
             # Análise por categoria
             category_analysis = ingredients_df.groupby("category").agg({
@@ -2319,7 +2319,7 @@ elif page == "Ingredients":
         st.subheader("📜 Stock Movement History")
         
         # Mostrar as compras relacionadas
-        purchases_df = data.get("purchases", pd.DateFrame())
+        purchases_df = data.get("purchases", pd.DataFrame())
         if not purchases_df.empty:
             # Filtrar apenas compras
             purchase_history = purchases_df[purchases_df["transaction_type"] == "Purchase"].copy()
@@ -2427,7 +2427,7 @@ elif page == "Purchases":
             )
             
             # Selecionar ingrediente
-            ingredients_df = data.get("ingredients", pd.DateFrame())
+            ingredients_df = data.get("ingredients", pd.DataFrame())
             if not ingredients_df.empty:
                 ingredient_options = ingredients_df["name"].tolist()
                 selected_ingredient = st.selectbox(
@@ -2459,7 +2459,7 @@ elif page == "Purchases":
         
         with col_pur2:
             # Fornecedor
-            suppliers_df = data.get("suppliers", pd.DateFrame())
+            suppliers_df = data.get("suppliers", pd.DataFrame())
             if not suppliers_df.empty:
                 supplier_options = suppliers_df["name"].tolist()
                 supplier = st.selectbox(
@@ -2559,7 +2559,7 @@ elif page == "Purchases":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📜 Purchase History")
         
-        purchases_df = data.get("purchases", pd.DateFrame())
+        purchases_df = data.get("purchases", pd.DataFrame())
         if not purchases_df.empty:
             # Filtros avançados
             col_hist1, col_hist2, col_hist3 = st.columns(3)
@@ -2795,7 +2795,7 @@ elif page == "Purchases":
             st.markdown("---")
             st.subheader("📋 Existing Suppliers")
             
-            suppliers_df = data.get("suppliers", pd.DateFrame())
+            suppliers_df = data.get("suppliers", pd.DataFrame())
             if not suppliers_df.empty:
                 # Filtro de busca
                 search_supplier = st.text_input("Search Supplier", key="search_supplier")
@@ -2834,7 +2834,7 @@ elif page == "Purchases":
                                     st.write(f"🇳🇴 {supplier['country']}")
                             
                             # Estatísticas do fornecedor (se houver dados de compras)
-                            purchases_df = data.get("purchases", pd.DateFrame())
+                            purchases_df = data.get("purchases", pd.DataFrame())
                             if not purchases_df.empty:
                                 supplier_purchases = purchases_df[purchases_df["supplier"] == supplier["name"]]
                                 if len(supplier_purchases) > 0:
@@ -2880,7 +2880,7 @@ elif page == "Purchases":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📊 Purchase Reports & Analytics")
         
-        purchases_df = data.get("purchases", pd.DateFrame())
+        purchases_df = data.get("purchases", pd.DataFrame())
         if not purchases_df.empty:
             # Reports disponíveis
             report_type = st.selectbox(
@@ -3035,7 +3035,7 @@ elif page == "Purchases":
                 st.markdown("### ⚠️ Low Stock Alert Report")
                 
                 # Combinar dados de ingredientes e compras
-                ingredients_df = data.get("ingredients", pd.DateFrame())
+                ingredients_df = data.get("ingredients", pd.DataFrame())
                 if not ingredients_df.empty:
                     low_stock_items = []
                     
@@ -3059,7 +3059,7 @@ elif page == "Purchases":
                             })
                     
                     if len(low_stock_items) > 0:
-                        low_stock_df = pd.DateFrame(low_stock_items)
+                        low_stock_df = pd.DataFrame(low_stock_items)
                         
                         # Colorir por status
                         def color_status(val):
@@ -3095,7 +3095,7 @@ elif page == "Purchases":
                 """)
                 
                 # Análise simples
-                ingredients_df = data.get("ingredients", pd.DateFrame())
+                ingredients_df = data.get("ingredients", pd.DataFrame())
                 if not ingredients_df.empty and not purchases_df.empty:
                     forecast_data = []
                     
@@ -3127,7 +3127,7 @@ elif page == "Purchases":
                                 })
                     
                     if len(forecast_data) > 0:
-                        forecast_df = pd.DateFrame(forecast_data)
+                        forecast_df = pd.DataFrame(forecast_data)
                         st.dataframe(
                             forecast_df.sort_values("Days Until Empty"),
                             use_container_width=True
@@ -3177,7 +3177,7 @@ elif page == "Suppliers":
     st.markdown("<div class='section-box'>", unsafe_allow_html=True)
     st.subheader("📋 Quick Supplier List")
     
-    suppliers_df = data.get("suppliers", pd.DateFrame())
+    suppliers_df = data.get("suppliers", pd.DataFrame())
     if not suppliers_df.empty:
         # Mostrar lista simples
         for _, supplier in suppliers_df.iterrows():
@@ -3193,7 +3193,7 @@ elif page == "Suppliers":
                     st.write(f"📞 {supplier['phone']}")
             with col3:
                 # Contar pedidos deste fornecedor
-                purchases_df = data.get("purchases", pd.DateFrame())
+                purchases_df = data.get("purchases", pd.DataFrame())
                 if not purchases_df.empty:
                     supplier_orders = len(purchases_df[purchases_df["supplier"] == supplier["name"]])
                     st.write(f"**{supplier_orders}** orders")
@@ -3214,7 +3214,7 @@ elif page == "Recipes":
     st.subheader("🍺 Recipe Datebase")
     
     # Verificar se temos dados de receitas
-    recipes_df = data.get("recipes", pd.DateFrame())
+    recipes_df = data.get("recipes", pd.DataFrame())
     if recipes_df.empty:
         st.info("""
         ## 📋 No Recipes Found
@@ -3318,11 +3318,11 @@ elif page == "Recipes":
                         
                         # Ingredients
                         st.write("**Ingredients:**")
-                        recipe_items_df = data.get("recipe_items", pd.DateFrame())
+                        recipe_items_df = data.get("recipe_items", pd.DataFrame())
                         if not recipe_items_df.empty:
                             recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == recipe['id_receipt']]
                             if not recipe_items.empty:
-                                ingredients_df = data.get("ingredients", pd.DateFrame())
+                                ingredients_df = data.get("ingredients", pd.DataFrame())
                                 for _, item in recipe_items.iterrows():
                                     # Obter nome do ingrediente
                                     ingredient_name = "Unknown"
@@ -3353,7 +3353,7 @@ elif page == "Recipes":
             )
             
             # Selecionar cervejaria
-            breweries_df = data.get("breweries", pd.DateFrame())
+            breweries_df = data.get("breweries", pd.DataFrame())
             if not breweries_df.empty:
                 brewery_options = {row['id_brewery']: row['name'] for _, row in breweries_df.iterrows()}
                 selected_brewery = st.selectbox(
@@ -3398,7 +3398,7 @@ elif page == "Recipes":
         st.markdown("---")
         st.subheader("🍻 Recipe Ingredients")
         
-        ingredients_df = data.get("ingredients", pd.DateFrame())
+        ingredients_df = data.get("ingredients", pd.DataFrame())
         if not ingredients_df.empty:
             # Controle dinâmico de ingredientes
             if 'recipe_ingredient_count' not in st.session_state:
@@ -3501,7 +3501,7 @@ elif page == "Recipes":
                     st.metric("Cost per Liter", f"${cost_per_liter:.2f}")
                 
                 # Tabela de resumo
-                summary_df = pd.DateFrame([
+                summary_df = pd.DataFrame([
                     {
                         'Ingredient': item['name'],
                         'Amount': f"{item['quantity']} {item['unit']}",
@@ -3725,7 +3725,7 @@ elif page == "Recipes":
                 st.plotly_chart(fig_abv, use_container_width=True)
             
             # Tabela de custos (se houver ingredientes)
-            recipe_items_df = data.get("recipe_items", pd.DateFrame())
+            recipe_items_df = data.get("recipe_items", pd.DataFrame())
             if not recipe_items_df.empty:
                 st.markdown("---")
                 st.write("**Recipe Cost Analysis**")
@@ -3738,7 +3738,7 @@ elif page == "Recipes":
                     
                     total_cost = 0
                     for _, item in recipe_items.iterrows():
-                        ingredients_df = data.get("ingredients", pd.DateFrame())
+                        ingredients_df = data.get("ingredients", pd.DataFrame())
                         if not ingredients_df.empty:
                             ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
                             if not ing.empty:
@@ -3753,7 +3753,7 @@ elif page == "Recipes":
                     })
                 
                 if recipe_costs:
-                    cost_df = pd.DateFrame(recipe_costs)
+                    cost_df = pd.DataFrame(recipe_costs)
                     st.dataframe(cost_df.sort_values('Cost per Liter', ascending=False), use_container_width=True)
         else:
             st.info("No recipes available for analysis. Create some recipes first!")
@@ -3781,12 +3781,12 @@ elif page == "Production Orders":
         st.subheader("📋 Plan New Production Batch")
         
         # Verificar requisitos
-        recipes_df = data.get("recipes", pd.DateFrame())
+        recipes_df = data.get("recipes", pd.DataFrame())
         if recipes_df.empty:
             st.error("No recipes available. Please create recipes first!")
             st.stop()
         
-        breweries_df = data.get("breweries", pd.DateFrame())
+        breweries_df = data.get("breweries", pd.DataFrame())
         if breweries_df.empty:
             st.error("No breweries available. Please add breweries first!")
             st.stop()
@@ -3868,7 +3868,7 @@ elif page == "Production Orders":
         st.subheader("🧪 Ingredient Availability Check")
         
         if selected_recipe_id:
-            recipe_items_df = data.get("recipe_items", pd.DateFrame())
+            recipe_items_df = data.get("recipe_items", pd.DataFrame())
             if not recipe_items_df.empty:
                 recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == selected_recipe_id]
                 
@@ -3883,7 +3883,7 @@ elif page == "Production Orders":
                         required_qty = item['quantity'] * scale_factor
                         
                         # Encontrar ingrediente
-                        ingredients_df = data.get("ingredients", pd.DateFrame())
+                        ingredients_df = data.get("ingredients", pd.DataFrame())
                         if not ingredients_df.empty:
                             ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
                             if not ing.empty:
@@ -3972,7 +3972,7 @@ elif page == "Production Orders":
     with tab_active:
         st.subheader("🏭 Active Production Batches")
         
-        orders_df = data.get("production_orders", pd.DateFrame())
+        orders_df = data.get("production_orders", pd.DataFrame())
         if not orders_df.empty:
             # Filtrar ordens ativas
             active_statuses = ['Brewing', 'Fermenting', 'Conditioning', 'Packaging', 'Transferring']
@@ -3989,7 +3989,7 @@ elif page == "Production Orders":
                         key="active_status_filter"
                     )
                 with col_filter2:
-                    breweries_df = data.get("breweries", pd.DateFrame())
+                    breweries_df = data.get("breweries", pd.DataFrame())
                     if not breweries_df.empty:
                         brewery_filter = st.multiselect(
                             "Filter by Brewery",
@@ -4103,7 +4103,7 @@ elif page == "Production Orders":
     with tab_history:
         st.subheader("📜 Production History")
         
-        orders_df = data.get("production_orders", pd.DateFrame())
+        orders_df = data.get("production_orders", pd.DataFrame())
         if not orders_df.empty:
             # Filtrar ordens concluídas
             completed_orders = orders_df[orders_df["status"] == 'Completed']
@@ -4217,7 +4217,7 @@ elif page == "Production Orders":
             )
         
         # Obter ordens agendadas para o mês
-        orders_df = data.get("production_orders", pd.DateFrame())
+        orders_df = data.get("production_orders", pd.DataFrame())
         if not orders_df.empty:
             scheduled_orders = orders_df[
                 (orders_df['status'].isin(['Planned', 'Scheduled'])) &
@@ -4311,11 +4311,11 @@ elif page == "Production Orders":
                                 update_data("production_orders", updates, "id_order = :id_order", {"id_order": order['id_order']})
                                 
                                 # Deduzir ingredientes do estoque
-                                recipe_items_df = data.get("recipe_items", pd.DateFrame())
+                                recipe_items_df = data.get("recipe_items", pd.DataFrame())
                                 if not recipe_items_df.empty:
                                     recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == order['id_receipt']]
                                     for _, item in recipe_items.iterrows():
-                                        ingredients_df = data.get("ingredients", pd.DateFrame())
+                                        ingredients_df = data.get("ingredients", pd.DataFrame())
                                         if not ingredients_df.empty:
                                             ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
                                             if not ing.empty:
@@ -4386,8 +4386,8 @@ elif page == "Calendar":
                         st.write(f"**{day}**")
                         
                         # Events do calendário
-                        calendar_events = pd.DateFrame()
-                        events_df = data.get("calendar_events", pd.DateFrame())
+                        calendar_events = pd.DataFrame()
+                        events_df = data.get("calendar_events", pd.DataFrame())
                         if not events_df.empty:
                             events_df = events_df.copy()
                             if "start_date" in events_df.columns:
@@ -4395,8 +4395,8 @@ elif page == "Calendar":
                                 calendar_events = events_df[events_df["start_date"] == current_date]
                         
                         # Ordens de produção
-                        production_events = pd.DateFrame()
-                        orders_df = data.get("production_orders", pd.DateFrame())
+                        production_events = pd.DataFrame()
+                        orders_df = data.get("production_orders", pd.DataFrame())
                         if not orders_df.empty:
                             orders_df = orders_df.copy()
                             if "start_date" in orders_df.columns:
@@ -4456,14 +4456,14 @@ elif page == "Calendar":
                 event_date = st.date_input("Event Date", datetime.now().date(), key="new_event_date")
             
             with col_e2:
-                equipment_df = data.get("equipment", pd.DateFrame())
+                equipment_df = data.get("equipment", pd.DataFrame())
                 if not equipment_df.empty:
                     equipment_options = equipment_df["name"].tolist()
                     equipment = st.multiselect("Equipment", equipment_options, key="new_event_equipment")
                 else:
                     equipment = st.text_input("Equipment", key="new_event_eq_text")
                 
-                orders_df = data.get("production_orders", pd.DateFrame())
+                orders_df = data.get("production_orders", pd.DataFrame())
                 if not orders_df.empty:
                     order_options = orders_df["id_order"].tolist()
                     batch_id = st.selectbox("Related Production Order", ["None"] + [f"Order #{oid}" for oid in order_options], key="new_event_batch")
@@ -4496,7 +4496,7 @@ elif page == "Calendar":
         st.markdown("---")
         st.subheader("Upcoming Events")
         
-        events_df = data.get("calendar_events", pd.DateFrame())
+        events_df = data.get("calendar_events", pd.DataFrame())
         if not events_df.empty:
             events_df = events_df.copy()
             events_df["start_date"] = pd.to_datetime(events_df["start_date"])
@@ -4566,7 +4566,7 @@ elif page == "Calendar":
         st.markdown("---")
         st.subheader("🧹 Cleaning Tasks")
         
-        equipment_df = data.get("equipment", pd.DateFrame())
+        equipment_df = data.get("equipment", pd.DataFrame())
         if not equipment_df.empty:
             # Filtros para tarefas de limpeza
             col_clean1, col_clean2 = st.columns(2)
@@ -4577,7 +4577,7 @@ elif page == "Calendar":
                     key="cleaning_status"
                 )
             with col_clean2:
-                breweries_df = data.get("breweries", pd.DateFrame())
+                breweries_df = data.get("breweries", pd.DataFrame())
                 if not breweries_df.empty:
                     cleaning_brewery = st.selectbox(
                         "Filter by Brewery",
@@ -4695,7 +4695,7 @@ elif page == "Calendar":
                         
                         # Obter nome da cervejaria
                         brewery_name = ""
-                        breweries_df = data.get("breweries", pd.DateFrame())
+                        breweries_df = data.get("breweries", pd.DataFrame())
                         if not breweries_df.empty and eq["brewery_id"] in breweries_df["id_brewery"].values:
                             brewery_name = breweries_df[breweries_df["id_brewery"] == eq["brewery_id"]]["name"].iloc[0]
                         st.write(f"Brewery: {brewery_name}")
