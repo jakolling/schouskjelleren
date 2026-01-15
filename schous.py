@@ -31,6 +31,42 @@ def render_status_badge(status: str | None) -> str:
         s = "N/A"
     s_low = s.lower()
 
+
+def _to_python_scalar(value):
+    """Convert numpy/pandas scalar types to plain Python types (psycopg2 can't adapt numpy.*)."""
+    if value is None:
+        return None
+    try:
+        # Treat NaN/NaT as None
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    # numpy scalar types
+    try:
+        if isinstance(value, (np.integer,)):
+            return int(value)
+        if isinstance(value, (np.floating,)):
+            return float(value)
+        if isinstance(value, (np.bool_,)):
+            return bool(value)
+        if isinstance(value, (np.datetime64,)):
+            v = pd.to_datetime(value, errors="coerce")
+            return None if pd.isna(v) else v.to_pydatetime()
+    except Exception:
+        pass
+
+    # pandas Timestamp
+    try:
+        if isinstance(value, pd.Timestamp):
+            return value.to_pydatetime()
+    except Exception:
+        pass
+
+    # datetime/date are fine; strings/floats/ints fine
+    return value
+
     # Map common statuses to CSS classes
     if s_low in {"active", "enabled", "open", "in stock", "available"}:
         cls = "badge-green"
