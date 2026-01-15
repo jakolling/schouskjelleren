@@ -2178,12 +2178,23 @@ elif page == "Breweries":
                                 
                                 st.progress(occupancy_pct / 100)
                                 
-                                col_btn1, col_btn2 = st.columns(2)
-                                with col_btn1:
+                                col_edit, col_dup, col_transfer = st.columns(3)
+                                with col_edit:
                                     if st.button("📝 Edit", key=f"edit_eq_{eq['id_equipment']}", use_container_width=True):
                                         st.session_state['edit_equipment'] = eq['id_equipment']
                                         st.rerun()
-                                with col_btn2:
+                                with col_dup:
+                                    if st.button("📄 Duplicate", key=f"dup_eq_{eq['id_equipment']}", use_container_width=True):
+                                        require_admin_action()
+                                        dup = eq.to_dict()
+                                        dup.pop('id_equipment', None)
+                                        dup.pop('created_date', None)
+                                        dup['name'] = "Copy of " + str(eq['name'])
+                                        insert_data('equipment', dup)
+                                        data = get_all_data()
+                                        st.success(f"✅ Duplicated equipment as '{dup['name']}'.")
+                                        st.rerun()
+                                with col_transfer:
                                     if st.button("🔄 Transfer", key=f"transfer_eq_{eq['id_equipment']}", use_container_width=True):
                                         st.session_state['transfer_source'] = eq['name']
                     
