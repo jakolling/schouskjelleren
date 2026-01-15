@@ -350,31 +350,6 @@ def init_database():
             if dialect in {"postgresql", "postgres"}:
                 ddl_to_run = _translate_sqlite_to_postgres(ddl)
             conn.execute(sql_text(ddl_to_run))
-
-
-    # Align schema with UI (adds missing columns automatically)
-    _ensure_columns(
-        "breweries",
-        {
-            "type": "TEXT",
-            "address": "TEXT",
-            "city": "TEXT",
-            "state": "TEXT",
-            "country": "TEXT",
-            "postal_code": "TEXT",
-            "contact_person": "TEXT",
-            "contact_phone": "TEXT",
-            "contact_email": "TEXT",
-            "default_batch_size": "DOUBLE PRECISION",
-            "annual_capacity_hl": "DOUBLE PRECISION",
-            "status": "TEXT",
-            "license_number": "TEXT",
-            "established_date": "DATE",
-            "has_lab": "INTEGER DEFAULT 0",
-            "description": "TEXT",
-        },
-    )
-
 def query_to_df(query: str, params: dict | None = None) -> pd.DataFrame:
     """Executa SELECT e retorna DateFrame."""
     engine = get_engine()
