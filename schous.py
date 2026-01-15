@@ -1597,6 +1597,14 @@ elif page == "Breweries":
         st.subheader("📋 Existing Breweries")
         
         breweries_df = data.get("breweries", pd.DataFrame())
+        equipment_df_for_counts = data.get("equipment", pd.DataFrame())
+        equipment_counts = {}
+        if not equipment_df_for_counts.empty and "brewery_id" in equipment_df_for_counts.columns:
+            try:
+                equipment_counts = equipment_df_for_counts.groupby("brewery_id").size().to_dict()
+            except Exception:
+                equipment_counts = {}
+
         if not breweries_df.empty:
             # Filtros
             col_filter1, col_filter2, col_filter3 = st.columns(3)
@@ -1655,7 +1663,12 @@ elif page == "Breweries":
                                 else:
                                     est_str = str(est)
                         st.write(f"📅 Established: {est_str}")
-                        st.write(f"📜 License: {brewery.get('license_number', 'N/A')}")
+                        eq_count = 0
+                        try:
+                            eq_count = int(equipment_counts.get(brewery.get("id_brewery"), equipment_counts.get(str(brewery.get("id_brewery")), 0)))
+                        except Exception:
+                            eq_count = 0
+                        st.write(f"📜 License: {brewery.get('license_number', 'N/A')}  |  ⚙️ Equipment: {eq_count}")
                     
                     with col_info3:
                         st.write("**Features**")
@@ -1665,21 +1678,16 @@ elif page == "Breweries":
                         st.write("**Status**")
                         st.markdown(render_status_badge(brewery['status']), unsafe_allow_html=True)
                     
-                    # Botões
-                    col_btn1, col_btn2, col_btn3 = st.columns(3)
-                    with col_btn1:
-                        if st.button(f"View Equipment", key=f"view_eq_{brewery['id_brewery']}", use_container_width=True):
-                            st.session_state['selected_brewery'] = brewery['id_brewery']
-                            st.session_state['page'] = 'Breweries'
-                            st.session_state['breweries_tab'] = '⚙️ Equipment'
-                            st.rerun()
-                    with col_btn2:
-                        if st.button(f"Edit", key=f"edit_{brewery['id_brewery']}", use_container_width=True):
+                    # Buttons
+                    col_edit, col_delete = st.columns(2)
+                    with col_edit:
+                        if st.button("Edit", key=f"edit_{brewery['id_brewery']}", use_container_width=True):
                             st.session_state['edit_brewery'] = brewery['id_brewery']
-                    with col_btn3:
-                        if st.button(f"🗑️ Delete", key=f"del_{brewery['id_brewery']}", use_container_width=True, type="secondary"):
+                    with col_delete:
+                        if st.button("🗑️ Delete", key=f"del_{brewery['id_brewery']}", use_container_width=True, type="secondary"):
                             st.session_state.delete_confirmation = {"type": "brewery", "id": brewery['id_brewery'], "name": brewery['name']}
                             st.rerun()
+
                     
                     if brewery.get('description'):
                         st.markdown("---")
