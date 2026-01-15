@@ -643,45 +643,6 @@ if st.sidebar.button("📥 Export to Excel (XLSX)", use_container_width=True):
 
 # Reset database
 st.sidebar.markdown("---")
-st.sidebar.subheader("⚠️ Maintenance")
-
-if st.sidebar.button("🗑️ Clear Todos os Dados", type="secondary", use_container_width=True):
-    if st.sidebar.checkbox("Confirmar limpeza total do banco de dados"):
-        tables = [
-            'ingredients', 'purchases', 'suppliers', 'recipes', 'recipe_items',
-            'breweries', 'equipment', 'production_orders', 'calendar_events', 'team_members'
-        ]
-        for table in tables:
-            execute_query(f"DELETE FROM {table}")
-        st.sidebar.error("Datebase limpo!")
-        data = get_all_data()
-        st.rerun()
-
-# -----------------------------
-# FUNÇÕES AUXILIARES
-# -----------------------------
-def render_status_badge(status):
-    status_class = {
-        "Empty": "status-empty",
-        "In Use": "status-in-use",
-        "Cleaning": "status-cleaning",
-        "Maintenance": "status-maintenance",
-        "Ready": "status-ready",
-        "Active": "status-active",
-        "Inactive": "status-inactive",
-        "Operational": "status-empty",
-        "Scheduled": "status-ready",
-        "Planned": "status-inactive",
-        "Brewing": "status-in-use",
-        "Fermenting": "status-in-use",
-        "Conditioning": "status-in-use",
-        "Packaging": "status-in-use",
-        "Completed": "status-empty",
-        "On Hold": "status-cleaning",
-        "Cancelled": "status-maintenance"
-    }.get(status, "status-empty")
-    
-    return f'<span class="status-badge {status_class}">{status}</span>'
 
 def get_alerts():
     alerts = []
