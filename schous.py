@@ -1147,8 +1147,7 @@ if st.session_state.delete_confirmation["type"] in ["ingredient", "supplier", "b
 page = st.sidebar.radio("Navigation", [
     "Dashboard", "Breweries", "Ingredients", "Purchases", "Suppliers", 
     "Recipes", "Production Orders", "Calendar"
-])
-
+], key="page")
 st.sidebar.markdown("---")
 st.sidebar.info(f"👤 Role: {st.session_state.get('auth_role','viewer')}")
 
@@ -1407,13 +1406,9 @@ if page == "Dashboard":
 elif page == "Breweries":
     st.title("🏭 Breweries & Equipment Management")
     
-    tab_breweries, tab_equipment, tab_overview = st.tabs([
-        "📍 Breweries", 
-        "⚙️ Equipment", 
-        "📊 Overview"
-    ])
-    
-    with tab_breweries:
+    brew_tabs = ["📍 Breweries", "⚙️ Equipment", "📊 Overview"]
+    selected_brew_tab = st.radio("", brew_tabs, horizontal=True, key="breweries_tab")
+    if selected_brew_tab == "📍 Breweries":
         # Add Nova Beerria
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("➕ Add New Brewery / Production Location")
@@ -1580,6 +1575,9 @@ elif page == "Breweries":
                     with col_btn1:
                         if st.button(f"View Equipment", key=f"view_eq_{brewery['id_brewery']}", use_container_width=True):
                             st.session_state['selected_brewery'] = brewery['id_brewery']
+                            st.session_state['page'] = 'Breweries'
+                            st.session_state['breweries_tab'] = '⚙️ Equipment'
+                            st.rerun()
                     with col_btn2:
                         if st.button(f"Edit", key=f"edit_{brewery['id_brewery']}", use_container_width=True):
                             st.session_state['edit_brewery'] = brewery['id_brewery']
@@ -1596,8 +1594,7 @@ elif page == "Breweries":
             st.info("No breweries registered yet.")
         
         st.markdown("</div>", unsafe_allow_html=True)
-    
-    with tab_equipment:
+    if selected_brew_tab == "⚙️ Equipment":
         # Modo de edição de equipamento
         if st.session_state.get('edit_equipment'):
             edit_eq_id = st.session_state['edit_equipment']
@@ -2045,8 +2042,7 @@ elif page == "Breweries":
                 st.info("No equipment registered yet.")
         
         st.markdown("</div>", unsafe_allow_html=True)
-    
-    with tab_overview:
+    if selected_brew_tab == "📊 Overview":
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📊 Breweries & Equipment Overview")
         
