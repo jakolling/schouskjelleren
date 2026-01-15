@@ -9465,3 +9465,4 @@ elif page == "Calendar":
 st.sidebar.markdown("---")
 st.sidebar.caption("Brewery Manager v2.0 • Multiusuário (Postgres/SQLite)")
 
+
