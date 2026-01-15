@@ -92,6 +92,29 @@ def get_database_url() -> str:
     return f"sqlite:///{DEFAULT_SQLITE_FILE}"
 
 @st.cache_resource
+
+    # Ensure breweries schema matches the UI fields (safe to run repeatedly)
+    _ensure_columns(
+        "breweries",
+        {
+            "type": "TEXT",
+            "address": "TEXT",
+            "city": "TEXT",
+            "state": "TEXT",
+            "country": "TEXT",
+            "postal_code": "TEXT",
+            "contact_person": "TEXT",
+            "contact_phone": "TEXT",
+            "contact_email": "TEXT",
+            "default_batch_size": "DOUBLE PRECISION",
+            "annual_capacity_hl": "DOUBLE PRECISION",
+            "license_number": "TEXT",
+            "established_date": "DATE",
+            "has_lab": "INTEGER DEFAULT 0",
+            "description": "TEXT",
+        },
+    )
+
 def get_engine() -> Engine:
     """Engine compartilhado (pool de conexões) para suportar múltiplos usuários."""
     db_url = get_database_url()
@@ -125,14 +148,63 @@ def _translate_sqlite_to_postgres(ddl: str) -> str:
     ddl_pg = re.sub(r",\s*\)", "\n)", ddl_pg)
     return ddl_pg
 
+
+def _ensure_columns(table_name: str, columns_sql: dict[str, str]) -> None:
+    """Add missing columns to an existing table (best-effort, safe for fresh deploys).
+    columns_sql: {column_name: SQL_TYPE or 'SQL_TYPE DEFAULT ...'}
+    """
+    engine = get_engine()
+    dialect = engine.dialect.name.lower()
+
+    existing: set[str] = set()
+    try:
+        with engine.connect() as conn:
+            if dialect in {"postgresql", "postgres"}:
+                rows = conn.execute(
+                    sql_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() AND table_name = :t"
+                    ),
+                    {"t": table_name},
+                ).fetchall()
+                existing = {r[0] for r in rows}
+            else:
+                rows = conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()
+                # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+                existing = {r[1] for r in rows}
+    except Exception:
+        return
+
+    missing = [c for c in columns_sql.keys() if c not in existing]
+    if not missing:
+        return
+
+    with engine.begin() as conn:
+        for col in missing:
+            col_def = columns_sql[col]
+            conn.execute(sql_text(f"ALTER TABLE {table_name} ADD COLUMN {col} {col_def}"))
+
+
 def init_database():
     """Cria as tabelas se não existirem (funciona em Postgres e em SQLite)."""
     engine = get_engine()
     dialect = engine.dialect.name.lower()
 
     # Reaproveita o DDL original (SQLite) e traduz para Postgres quando necessário
-    ddl_blocks = [
+    ddl_blocks_sqlite = [
         """CREATE TABLE IF NOT EXISTS ingredients (
+
+    # Postgres-compatible DDL (avoid AUTOINCREMENT)
+    ddl_blocks_pg = []
+    for ddl in ddl_blocks_sqlite:
+        d = ddl
+        d = d.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+        d = d.replace("TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
+        d = d.replace("REAL", "DOUBLE PRECISION")
+        ddl_blocks_pg.append(d)
+
+    dialect = engine.dialect.name.lower()
+    ddl_blocks = ddl_blocks_pg if dialect in {"postgresql", "postgres"} else ddl_blocks_sqlite
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             manufacturer TEXT,
@@ -195,10 +267,25 @@ def init_database():
         """CREATE TABLE IF NOT EXISTS breweries (
             id_brewery INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            type TEXT,
+            address TEXT,
+            city TEXT,
+            state TEXT,
+            country TEXT,
+            postal_code TEXT,
+            contact_person TEXT,
+            contact_phone TEXT,
+            contact_email TEXT,
+            default_batch_size REAL,
+            annual_capacity_hl REAL,
+            status TEXT DEFAULT 'Active',
+            license_number TEXT,
+            established_date DATE,
+            has_lab INTEGER DEFAULT 0,
+            description TEXT,
             location TEXT,
             capacity REAL,
             unit TEXT,
-            status TEXT DEFAULT 'Active',
             notes TEXT,
             created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""",
@@ -264,6 +351,30 @@ def init_database():
                 ddl_to_run = _translate_sqlite_to_postgres(ddl)
             conn.execute(sql_text(ddl_to_run))
 
+
+    # Align schema with UI (adds missing columns automatically)
+    _ensure_columns(
+        "breweries",
+        {
+            "type": "TEXT",
+            "address": "TEXT",
+            "city": "TEXT",
+            "state": "TEXT",
+            "country": "TEXT",
+            "postal_code": "TEXT",
+            "contact_person": "TEXT",
+            "contact_phone": "TEXT",
+            "contact_email": "TEXT",
+            "default_batch_size": "DOUBLE PRECISION",
+            "annual_capacity_hl": "DOUBLE PRECISION",
+            "status": "TEXT",
+            "license_number": "TEXT",
+            "established_date": "DATE",
+            "has_lab": "INTEGER DEFAULT 0",
+            "description": "TEXT",
+        },
+    )
+
 def query_to_df(query: str, params: dict | None = None) -> pd.DataFrame:
     """Executa SELECT e retorna DateFrame."""
     engine = get_engine()
@@ -294,57 +405,64 @@ def _singularize_table_name(table_name: str) -> str:
     return name
 
 def insert_data(table_name: str, data_dict: dict):
-    """Insere dados e retorna o id (quando possível)."""
+    """Insert a row into a table.
+    - Filters out keys that are not real columns (prevents 'undefined column' errors).
+    - For Postgres, uses RETURNING to get the inserted PK when possible.
+    """
     require_admin_action()
-    cols = list(data_dict.keys())
-    col_sql = ", ".join(cols)
-    val_sql = ", ".join([f":{c}" for c in cols])
-
     engine = get_engine()
     dialect = engine.dialect.name.lower()
 
+    # Fetch actual columns from DB
+    actual_cols: list[str] = []
+    try:
+        with engine.connect() as conn:
+            if dialect in {"postgresql", "postgres"}:
+                rows = conn.execute(
+                    sql_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() AND table_name = :t"
+                    ),
+                    {"t": table_name},
+                ).fetchall()
+                actual_cols = [r[0] for r in rows]
+            else:
+                rows = conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()
+                actual_cols = [r[1] for r in rows]
+    except Exception:
+        actual_cols = list(data_dict.keys())
+
+    # Keep only keys that exist as columns
+    filtered = {k: v for k, v in data_dict.items() if k in set(actual_cols)}
+
+    if not filtered:
+        raise ValueError(f"No valid columns to insert into '{table_name}'. Check schema vs UI fields.")
+
+    cols = ", ".join(filtered.keys())
+    placeholders = ", ".join([f":{k}" for k in filtered.keys()])
+
+    # Determine PK column for RETURNING
+    singular = _singularize_table_name(table_name)
+    pk_candidates = ["id", f"id_{singular}"]
+    pk_col = pk_candidates[0]
+    for cand in pk_candidates:
+        if cand in set(actual_cols):
+            pk_col = cand
+            break
+
     if dialect in {"postgresql", "postgres"}:
-        # Retornar a PK quando a tabela tiver um id/ id_* conhecido
-        # Tentamos detectar uma PK padrão
-        singular = _singularize_table_name(table_name)
-        pk_candidates = ["id", f"id_{singular}"]
-        pk_col = None
-        # Look up actual columns so RETURNING never references a non-existent column
-        try:
-            with engine.connect() as _c:
-                rows = _c.execute(sql_text(
-                    "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = :t"
-                ), {"t": table_name}).fetchall()
-            actual_cols = {r[0] for r in rows}
-        except Exception:
-            actual_cols = set()
-
-        # Heuristic: if caller provided the PK column, use it; else try common PK names
-        if "id" in cols and (not actual_cols or "id" in actual_cols):
-            pk_col = "id"
-        else:
-            for cand in pk_candidates:
-                if not actual_cols or cand in actual_cols:
-                    pk_col = cand
-                    break
-
-        returning = f" RETURNING {pk_col}" if pk_col else ""
-        sql = f"INSERT INTO {table_name} ({col_sql}) VALUES ({val_sql}){returning}"
+        sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders}) RETURNING {pk_col}"
         with engine.begin() as conn:
-            res = conn.execute(sql_text(sql), data_dict)
-            if pk_col:
-                row = res.fetchone()
-                return row[0] if row else None
-            return None
+            res = conn.execute(sql_text(sql), filtered)
+            row = res.fetchone()
+            return row[0] if row else None
     else:
-        # SQLite: usar lastrowid via SELECT last_insert_rowid()
-        sql = f"INSERT INTO {table_name} ({col_sql}) VALUES ({val_sql})"
+        sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
         with engine.begin() as conn:
-            conn.execute(sql_text(sql), data_dict)
-            # last_insert_rowid() só funciona no SQLite
+            res = conn.execute(sql_text(sql), filtered)
+            # SQLite may provide lastrowid
             try:
-                rid = conn.execute(sql_text("SELECT last_insert_rowid()")).scalar()
-                return rid
+                return res.lastrowid
             except Exception:
                 return None
 
