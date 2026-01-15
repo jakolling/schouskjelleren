@@ -166,6 +166,46 @@ def get_engine() -> Engine:
     # pool_pre_ping evita conexões “mortas”
     return create_engine(db_url, pool_pre_ping=True)
 
+
+# -----------------------------
+# PERFORMANCE HELPERS
+# -----------------------------
+
+def _get_db_version() -> int:
+    return int(st.session_state.get("db_version", 0) or 0)
+
+def bump_db_version() -> None:
+    st.session_state["db_version"] = _get_db_version() + 1
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_table_columns_cached(table_name: str, dialect: str) -> list[str]:
+    """Cache table columns to avoid repeated information_schema/PRAGMA hits."""
+    engine = get_engine()
+    cols: list[str] = []
+    try:
+        with engine.connect() as conn:
+            if dialect in {"postgresql", "postgres"}:
+                rows = conn.execute(
+                    sql_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() AND table_name = :t"
+                    ),
+                    {"t": table_name},
+                ).fetchall()
+                cols = [r[0] for r in rows]
+            else:
+                rows = conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()
+                cols = [r[1] for r in rows]
+    except Exception:
+        cols = []
+    return cols
+
+def get_table_columns(table_name: str) -> list[str]:
+    engine = get_engine()
+    dialect = engine.dialect.name.lower()
+    cols = _get_table_columns_cached(table_name, dialect)
+    return cols if cols else []
+
 def is_admin() -> bool:
     return st.session_state.get("auth_role") == "admin"
 
@@ -787,7 +827,11 @@ def execute_query(query: str, params: dict | None = None):
     engine = get_engine()
     with engine.begin() as conn:
         result = conn.execute(sql_text(query), params or {})
-        return result.rowcount
+    # cache-bust for reads
+    bump_db_version()
+    return result.rowcount
+
+
 
 def get_table_data(table_name: str) -> pd.DataFrame:
     return query_to_df(f"SELECT * FROM {table_name}")
@@ -812,23 +856,9 @@ def insert_data(table_name: str, data_dict: dict):
     require_admin_action()
     engine = get_engine()
     dialect = engine.dialect.name.lower()
-
-    # Fetch actual columns from DB
-    actual_cols: list[str] = []
+    # Fetch actual columns (cached)
     try:
-        with engine.connect() as conn:
-            if dialect in {"postgresql", "postgres"}:
-                rows = conn.execute(
-                    sql_text(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = current_schema() AND table_name = :t"
-                    ),
-                    {"t": table_name},
-                ).fetchall()
-                actual_cols = [r[0] for r in rows]
-            else:
-                rows = conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()
-                actual_cols = [r[1] for r in rows]
+        actual_cols = get_table_columns_cached(table_name)
     except Exception:
         actual_cols = list(data_dict.keys())
 
@@ -856,6 +886,7 @@ def insert_data(table_name: str, data_dict: dict):
             with engine.begin() as conn:
                 res = conn.execute(sql_text(sql), filtered)
                 row = res.fetchone()
+                bump_db_version()
                 return row[0] if row else None
         except Exception as e:
             # retry without RETURNING (some schemas/PKs may differ)
@@ -863,6 +894,7 @@ def insert_data(table_name: str, data_dict: dict):
             try:
                 with engine.begin() as conn:
                     conn.execute(sql_text(sql2), filtered)
+                    bump_db_version()
                 return None
             except Exception as e2:
                 # Friendly, safe error message for admins (Streamlit redacts the original)
@@ -896,9 +928,11 @@ def insert_data(table_name: str, data_dict: dict):
             res = conn.execute(sql_text(sql), filtered)
             # SQLite may provide lastrowid
             try:
-                return res.lastrowid
+                rid = res.lastrowid
             except Exception:
-                return None
+                rid = None
+            bump_db_version()
+            return rid
 
 def update_data(table_name: str, data_dict: dict, where_clause: str, where_params: dict):
     """Update rows (admin only). Filters unknown columns and coerces numpy/pandas scalars."""
@@ -907,21 +941,9 @@ def update_data(table_name: str, data_dict: dict, where_clause: str, where_param
     where_params = where_params or {}
 
     engine = get_engine()
-
-    # Fetch actual columns from DB to avoid "UndefinedColumn" errors
-    dialect = engine.url.get_backend_name() if engine and engine.url else ""
-    actual_cols = []
-    try:
-        if dialect in {"postgresql", "postgres"}:
-            q = """SELECT column_name FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = :t"""
-            with engine.begin() as conn:
-                actual_cols = [r[0] for r in conn.execute(sql_text(q), {"t": table_name}).fetchall()]
-        else:
-            with engine.begin() as conn:
-                actual_cols = [r[1] for r in conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()]
-    except Exception:
-        actual_cols = list(data_dict.keys())
+    # Fetch actual columns (cached) to avoid "UndefinedColumn" errors
+    dialect = engine.dialect.name.lower()
+    actual_cols = get_table_columns_cached(table_name, dialect) or list(data_dict.keys())
 
     # Keep only columns that exist
     filtered_updates = {k: _to_python_scalar(v) for k, v in data_dict.items() if k in set(actual_cols)}
@@ -937,7 +959,8 @@ def update_data(table_name: str, data_dict: dict, where_clause: str, where_param
     try:
         with engine.begin() as conn:
             res = conn.execute(sql_text(sql), params)
-            return res.rowcount
+            bump_db_version()
+        return res.rowcount
     except Exception as e:
         # If Postgres says a column doesn't exist, auto-add it as TEXT and retry once.
         orig = getattr(e, "orig", None)
@@ -950,7 +973,8 @@ def update_data(table_name: str, data_dict: dict, where_clause: str, where_param
                 _ensure_columns(table_name, {missing_col: "TEXT"})
                 with engine.begin() as conn:
                     res = conn.execute(sql_text(sql), params)
-                    return res.rowcount
+                    bump_db_version()
+            return res.rowcount
 
         # Show a safe error message (Streamlit otherwise redacts)
         st.error(f"Database error: {type(orig).__name__ if orig is not None else type(e).__name__}: {msg}")
@@ -963,12 +987,11 @@ def delete_data(table_name: str, where_clause: str, where_params: dict):
     engine = get_engine()
     with engine.begin() as conn:
         res = conn.execute(sql_text(sql), where_params or {})
-        return res.rowcount
+    bump_db_version()
+    return res.rowcount
 
-def get_all_data():
-    """Carrega todos os dados do banco em um dicionário de DateFrames.
-    Sem cache: quando o usuário abre o app (em qualquer lugar), ele vê o banco atualizado.
-    """
+def _get_all_data_uncached() -> dict[str, pd.DataFrame]:
+    """Loads all tables from DB (no cache)."""
     table_names = [
         'ingredients',
         # legacy (kept for backwards compatibility)
@@ -978,10 +1001,23 @@ def get_all_data():
         'suppliers', 'recipes', 'recipe_items',
         'breweries', 'equipment', 'production_orders', 'calendar_events', 'team_members'
     ]
-    data = {}
+    data: dict[str, pd.DataFrame] = {}
     for table in table_names:
         data[table] = get_table_data(table)
     return data
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _get_all_data_cached(db_version: int) -> dict[str, pd.DataFrame]:
+    # db_version is only used to bust cache when writes happen
+    return _get_all_data_uncached()
+
+def get_all_data() -> dict[str, pd.DataFrame]:
+    """Cached all-tables snapshot.
+
+    This keeps the UI snappy when switching tabs / selectboxes, while still updating
+    quickly after writes (we bump db_version on every successful write).
+    """
+    return _get_all_data_cached(_get_db_version())
 
 # -----------------------------
 # FUNÇÕES DE MIGRAÇÃO E BACKUP
@@ -1091,6 +1127,162 @@ def update_stock_and_cost_from_purchase(ingredient_name: str, quantity: float, e
     except Exception:
         # never block purchase flow
         return update_stock_from_purchase(ingredient_name, quantity)
+
+
+
+def save_purchase_order_fast(
+    transaction_type: str,
+    supplier: str,
+    order_number: str,
+    po_date: date,
+    freight_total: float,
+    notes: str,
+    recorded_by: str,
+    preview_rows: list[dict],
+) -> int:
+    """Persist a purchase order + items in a single transaction (much faster).
+
+    - Inserts header and all items with executemany
+    - Updates ingredient stock and (for purchases) unit_cost by weighted average
+    """
+    require_admin_action()
+    engine = get_engine()
+    dialect = engine.dialect.name.lower()
+
+    header = {
+        "transaction_type": transaction_type,
+        "supplier": supplier,
+        "order_number": order_number,
+        "date": po_date,
+        "freight_total": float(freight_total) if transaction_type == "Purchase" else 0.0,
+        "notes": notes,
+        "recorded_by": recorded_by,
+    }
+
+    with engine.begin() as conn:
+        if dialect in {"postgresql", "postgres"}:
+            res = conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO purchase_orders (transaction_type, supplier, order_number, date, freight_total, notes, recorded_by)
+                    VALUES (:transaction_type, :supplier, :order_number, :date, :freight_total, :notes, :recorded_by)
+                    RETURNING id_purchase_order
+                    """
+                ),
+                header,
+            )
+            po_id = int(res.scalar_one())
+        else:
+            res = conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO purchase_orders (transaction_type, supplier, order_number, date, freight_total, notes, recorded_by)
+                    VALUES (:transaction_type, :supplier, :order_number, :date, :freight_total, :notes, :recorded_by)
+                    """
+                ),
+                header,
+            )
+            po_id = int(getattr(res, "lastrowid", 0) or 0)
+
+        items_payload = []
+        for row in preview_rows:
+            items_payload.append(
+                {
+                    "purchase_order_id": po_id,
+                    "ingredient": str(row["Ingredient"]),
+                    "quantity": float(row["Quantity"]),
+                    "unit": str(row.get("Unit", "") or ""),
+                    "unit_price": float(row["Unit Price"]),
+                    "freight_per_unit": float(row["Freight / Unit"]),
+                    "effective_unit_cost": float(row["Effective Unit Cost"]),
+                    "total_cost": float(row["Line Total"]),
+                }
+            )
+
+        if items_payload:
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO purchase_order_items (
+                        purchase_order_id, ingredient, quantity, unit,
+                        unit_price, freight_per_unit, effective_unit_cost, total_cost
+                    ) VALUES (
+                        :purchase_order_id, :ingredient, :quantity, :unit,
+                        :unit_price, :freight_per_unit, :effective_unit_cost, :total_cost
+                    )
+                    """
+                ),
+                items_payload,
+            )
+
+        # --- Stock / cost updates ---
+        # group by ingredient (in case user repeated an item)
+        agg = {}
+        for it in items_payload:
+            name = it["ingredient"]
+            a = agg.setdefault(name, {"qty": 0.0, "cost_total": 0.0})
+            a["qty"] += float(it["quantity"])
+            a["cost_total"] += float(it["quantity"]) * float(it["effective_unit_cost"])
+
+        names = list(agg.keys())
+        if names:
+            # fetch current stock/cost in a single query
+            params = {f"n{i}": n for i, n in enumerate(names)}
+            in_clause = ", ".join([f":n{i}" for i in range(len(names))])
+            cur_rows = conn.execute(
+                sql_text(
+                    f"SELECT name, COALESCE(stock,0) AS stock, COALESCE(unit_cost,0) AS unit_cost FROM ingredients WHERE name IN ({in_clause})"
+                ),
+                params,
+            ).fetchall()
+            cur_map = {r[0]: (float(r[1] or 0), float(r[2] or 0)) for r in cur_rows}
+
+            updates = []
+            for name in names:
+                cur_stock, cur_cost = cur_map.get(name, (0.0, 0.0))
+                add_qty = float(agg[name]["qty"])
+
+                if transaction_type == "Purchase":
+                    add_cost_total = float(agg[name]["cost_total"])
+                    new_stock = cur_stock + add_qty
+                    if new_stock > 0:
+                        new_cost = ((cur_stock * cur_cost) + add_cost_total) / new_stock
+                    else:
+                        new_cost = (add_cost_total / add_qty) if add_qty > 0 else cur_cost
+                    updates.append({"n": name, "q": add_qty, "c": float(new_cost)})
+                else:
+                    # Non-purchase transactions reduce stock
+                    updates.append({"n": name, "q": -add_qty, "c": cur_cost})
+
+            if updates:
+                if transaction_type == "Purchase":
+                    conn.execute(
+                        sql_text(
+                            """
+                            UPDATE ingredients
+                               SET stock = COALESCE(stock,0) + :q,
+                                   unit_cost = :c,
+                                   last_updated = CURRENT_TIMESTAMP
+                             WHERE name = :n
+                            """
+                        ),
+                        updates,
+                    )
+                else:
+                    conn.execute(
+                        sql_text(
+                            """
+                            UPDATE ingredients
+                               SET stock = COALESCE(stock,0) + :q,
+                                   last_updated = CURRENT_TIMESTAMP
+                             WHERE name = :n
+                            """
+                        ),
+                        [{"n": u["n"], "q": u["q"]} for u in updates],
+                    )
+
+    bump_db_version()
+    return po_id
 
 def update_stock_from_usage(ingredient_name, quantity):
     """Atualiza o estoque após uso em produção"""
@@ -1236,11 +1428,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_db_initialized() -> bool:
+    """Run schema creation/migrations once per process for speed."""
+    init_database()
+    return True
 # -----------------------------
 # INICIALIZAÇÃO
 # -----------------------------
 # Inicializar banco de dados (cria tabelas se não existirem)
-init_database()
+ensure_db_initialized()
 
 # Carregar dados do banco
 data = get_all_data()
@@ -3514,47 +3713,16 @@ elif page == "Purchases":
                 elif not preview_rows:
                     st.error("Please add at least one valid item.")
                 else:
-                    # Insert header
-                    po_id = insert_data(
-                        "purchase_orders",
-                        {
-                            "transaction_type": transaction_type,
-                            "supplier": supplier,
-                            "order_number": order_number,
-                            "date": po_date,
-                            "freight_total": float(freight_total) if transaction_type == "Purchase" else 0.0,
-                            "notes": notes,
-                            "recorded_by": "User",
-                        },
+                    po_id = save_purchase_order_fast(
+                        transaction_type=transaction_type,
+                        supplier=supplier,
+                        order_number=order_number,
+                        po_date=po_date,
+                        freight_total=float(freight_total),
+                        notes=notes,
+                        recorded_by="User",
+                        preview_rows=preview_rows,
                     )
-
-                    # Insert lines + update stock/cost
-                    for row in preview_rows:
-                        ing = row["Ingredient"]
-                        qty = float(row["Quantity"])
-                        unit_price = float(row["Unit Price"])
-                        eff_unit_cost = float(row["Effective Unit Cost"])
-                        line_total = float(row["Line Total"])
-
-                        insert_data(
-                            "purchase_order_items",
-                            {
-                                "purchase_order_id": po_id,
-                                "ingredient": ing,
-                                "quantity": qty,
-                                "unit": row.get("Unit", ""),
-                                "unit_price": unit_price,
-                                "freight_per_unit": float(row["Freight / Unit"]),
-                                "effective_unit_cost": eff_unit_cost,
-                                "total_cost": line_total,
-                            },
-                        )
-
-                        if transaction_type == "Purchase":
-                            update_stock_and_cost_from_purchase(ing, qty, eff_unit_cost)
-                        else:
-                            # non-purchase transactions affect stock only
-                            update_stock_from_purchase(ing, -qty)
 
                     # Reset editor
                     st.session_state.po_items_df = pd.DataFrame(
