@@ -281,6 +281,18 @@ def execute_query(query: str, params: dict | None = None):
 def get_table_data(table_name: str) -> pd.DataFrame:
     return query_to_df(f"SELECT * FROM {table_name}")
 
+
+def _singularize_table_name(table_name: str) -> str:
+    """Best-effort singularization for common English plurals (for PK naming)."""
+    name = table_name.strip().lower()
+    if name.endswith("ies") and len(name) > 3:
+        return name[:-3] + "y"   # breweries -> brewery
+    if name.endswith("ses") and len(name) > 3:
+        return name[:-2]         # classes -> class (rough)
+    if name.endswith("s") and len(name) > 1:
+        return name[:-1]         # suppliers -> supplier
+    return name
+
 def insert_data(table_name: str, data_dict: dict):
     """Insere dados e retorna o id (quando possível)."""
     require_admin_action()
@@ -294,15 +306,25 @@ def insert_data(table_name: str, data_dict: dict):
     if dialect in {"postgresql", "postgres"}:
         # Retornar a PK quando a tabela tiver um id/ id_* conhecido
         # Tentamos detectar uma PK padrão
-        pk_candidates = ["id", f"id_{table_name.rstrip('s')}"]
+        singular = _singularize_table_name(table_name)
+        pk_candidates = ["id", f"id_{singular}"]
         pk_col = None
-        # Heurística: se existe uma coluna id_... usamos, senão id
-        if "id" in cols:
+        # Look up actual columns so RETURNING never references a non-existent column
+        try:
+            with engine.connect() as _c:
+                rows = _c.execute(sql_text(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = :t"
+                ), {"t": table_name}).fetchall()
+            actual_cols = {r[0] for r in rows}
+        except Exception:
+            actual_cols = set()
+
+        # Heuristic: if caller provided the PK column, use it; else try common PK names
+        if "id" in cols and (not actual_cols or "id" in actual_cols):
             pk_col = "id"
         else:
-            # checar candidatos
             for cand in pk_candidates:
-                if cand != "id" and cand.startswith("id_"):
+                if not actual_cols or cand in actual_cols:
                     pk_col = cand
                     break
 
