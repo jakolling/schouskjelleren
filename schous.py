@@ -757,6 +757,23 @@ def init_database():
         },
     )
 
+    # Suppliers: keep schema compatible across older deploys
+    _ensure_columns(
+        "suppliers",
+        {
+            "name": "TEXT",
+            "contact_person": "TEXT",
+            "phone": "TEXT",
+            "email": "TEXT",
+            "address": "TEXT",
+            "city": "TEXT",
+            "country": "TEXT",
+            "website": "TEXT",
+            "notes": "TEXT",
+            "status": "TEXT",
+        },
+    )
+
 
 def query_to_df(query: str, params: dict | None = None) -> pd.DataFrame:
     """Executa SELECT e retorna DateFrame."""
@@ -2767,6 +2784,7 @@ elif page == "Ingredients":
                 st.markdown("**Add new supplier**")
                 with st.form("new_ing_add_supplier_form", clear_on_submit=True):
                     sup_name = st.text_input("Supplier Name*", key="new_ing_new_sup_name")
+                    contact_person = st.text_input("Contact Person", key="new_ing_new_sup_contact")
                     email = st.text_input("Email", key="new_ing_new_sup_email")
                     phone = st.text_input("Phone", key="new_ing_new_sup_phone")
                     notes_sup = st.text_area("Notes", key="new_ing_new_sup_notes")
@@ -2795,7 +2813,13 @@ elif page == "Ingredients":
                         else:
                             insert_data(
                                 "suppliers",
-                                {"name": sup_name, "email": email, "phone": phone, "notes": notes_sup},
+                                {
+                                    "name": sup_name,
+                                    "contact_person": contact_person,
+                                    "email": email,
+                                    "phone": phone,
+                                    "notes": notes_sup,
+                                },
                             )
                             st.session_state["new_ing_supplier_select"] = str(sup_name)
 
@@ -3247,9 +3271,10 @@ elif page == "Purchases":
     st.title("🛒 Purchases & Inventory Management")
     
     # Tabs para Purchases
-    tab_new, tab_history, tab_reports = st.tabs([
+    tab_new, tab_history, tab_suppliers, tab_reports = st.tabs([
         "🛍️ New Purchase",
         "📜 Purchase History",
+        "🏭 Suppliers",
         "📊 Reports & Analytics"
     ])
     
@@ -3291,7 +3316,7 @@ elif page == "Purchases":
                 st.markdown("**Add new supplier**")
                 with st.form("po_add_supplier_form", clear_on_submit=True):
                     sup_name = st.text_input("Supplier Name*", key="po_new_sup_name")
-                    contact_name = st.text_input("Contact Person", key="po_new_sup_contact")
+                    contact_person = st.text_input("Contact Person", key="po_new_sup_contact")
                     email = st.text_input("Email", key="po_new_sup_email")
                     phone = st.text_input("Phone", key="po_new_sup_phone")
                     notes = st.text_area("Notes", key="po_new_sup_notes")
@@ -3314,7 +3339,7 @@ elif page == "Purchases":
                                 "suppliers",
                                 {
                                     "name": sup_name,
-                                    "contact_name": contact_name,
+                                    "contact_person": contact_person,
                                     "email": email,
                                     "phone": phone,
                                     "notes": notes,
@@ -3710,6 +3735,202 @@ elif page == "Purchases":
         else:
             st.info("No purchase history available yet. Record your first purchase in the 'New Purchase' tab.")
         
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_suppliers:
+        st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+        st.subheader("🏭 Suppliers")
+        st.caption("Manage suppliers here. Ingredients are linked to a supplier, and Purchases can only include items from the selected supplier.")
+
+        suppliers_df = data.get("suppliers", pd.DataFrame()).copy()
+
+        # Normalize id column (SQLite/Postgres)
+        sup_id_col = None
+        for cand in ["id_supplier", "id"]:
+            if cand in suppliers_df.columns:
+                sup_id_col = cand
+                break
+
+        # --- List ---
+        if suppliers_df.empty:
+            st.info("No suppliers yet. Add your first supplier below.")
+        else:
+            col_l1, col_l2 = st.columns([2, 1])
+            with col_l1:
+                q = st.text_input("Search suppliers", key="sup_search", placeholder="Type a name, contact, email...")
+            with col_l2:
+                status_filter = st.selectbox(
+                    "Status",
+                    ["All"] + sorted(suppliers_df.get("status", pd.Series(dtype=str)).dropna().astype(str).unique().tolist()),
+                    key="sup_status_filter",
+                )
+
+            view_df = suppliers_df.copy()
+            if q:
+                ql = q.lower()
+                hay = (
+                    view_df.get("name", "").astype(str)
+                    + " " + view_df.get("contact_person", "").astype(str)
+                    + " " + view_df.get("email", "").astype(str)
+                    + " " + view_df.get("phone", "").astype(str)
+                ).str.lower()
+                view_df = view_df[hay.str.contains(ql, na=False)]
+            if status_filter != "All" and "status" in view_df.columns:
+                view_df = view_df[view_df["status"].astype(str) == status_filter]
+
+            show_cols = [c for c in [sup_id_col, "name", "contact_person", "email", "phone", "status", "notes"] if c and c in view_df.columns]
+            st.dataframe(
+                view_df[show_cols].rename(
+                    columns={
+                        sup_id_col: "ID" if sup_id_col else "ID",
+                        "name": "Supplier",
+                        "contact_person": "Contact Person",
+                        "email": "Email",
+                        "phone": "Phone",
+                        "status": "Status",
+                        "notes": "Notes",
+                    }
+                ),
+                use_container_width=True,
+                height=280,
+            )
+
+        st.markdown("---")
+        st.subheader("➕ Add supplier")
+        with st.form("sup_add_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                sup_name = st.text_input("Supplier Name*", key="sup_add_name")
+                contact_person = st.text_input("Contact Person", key="sup_add_contact")
+            with c2:
+                email = st.text_input("Email", key="sup_add_email")
+                phone = st.text_input("Phone", key="sup_add_phone")
+            with c3:
+                status = st.selectbox("Status", ["Active", "Inactive"], key="sup_add_status")
+                website = st.text_input("Website", key="sup_add_website")
+
+            address = st.text_input("Address", key="sup_add_address")
+            col_city, col_country = st.columns(2)
+            with col_city:
+                city = st.text_input("City", key="sup_add_city")
+            with col_country:
+                country = st.text_input("Country", key="sup_add_country")
+            notes = st.text_area("Notes", key="sup_add_notes")
+            add_ok = st.form_submit_button("Save supplier", type="primary", use_container_width=True)
+
+        if add_ok:
+            if not sup_name:
+                st.error("Supplier name is required!")
+            else:
+                # Basic uniqueness by case-insensitive name
+                existing = (
+                    suppliers_df.get("name", pd.Series(dtype=str)).dropna().astype(str).str.lower().tolist()
+                    if not suppliers_df.empty else []
+                )
+                if str(sup_name).lower() in existing:
+                    st.warning("Supplier already exists. Use the edit section below to update it.")
+                else:
+                    insert_data(
+                        "suppliers",
+                        {
+                            "name": sup_name,
+                            "contact_person": contact_person,
+                            "email": email,
+                            "phone": phone,
+                            "status": status,
+                            "website": website,
+                            "address": address,
+                            "city": city,
+                            "country": country,
+                            "notes": notes,
+                        },
+                    )
+                    st.success(f"✅ Supplier '{sup_name}' added!")
+                    data = get_all_data()
+                    st.rerun()
+
+        st.markdown("---")
+        st.subheader("✏️ Edit supplier")
+
+        suppliers_df = data.get("suppliers", pd.DataFrame()).copy()
+        if suppliers_df.empty:
+            st.info("Add a supplier first to edit it.")
+        else:
+            sup_names = suppliers_df["name"].dropna().astype(str).sort_values().tolist() if "name" in suppliers_df.columns else []
+            selected = st.selectbox("Select supplier", ["Select..."] + sup_names, key="sup_edit_select")
+
+            if selected and selected != "Select...":
+                row = suppliers_df.loc[suppliers_df["name"].astype(str) == str(selected)].iloc[0]
+                supplier_pk = None
+                if "id_supplier" in suppliers_df.columns:
+                    supplier_pk = row.get("id_supplier")
+                elif "id" in suppliers_df.columns:
+                    supplier_pk = row.get("id")
+
+                with st.form("sup_edit_form", clear_on_submit=False):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        e_name = st.text_input("Supplier Name*", value=str(row.get("name", "")), key="sup_edit_name")
+                        e_contact = st.text_input("Contact Person", value=str(row.get("contact_person", "") or ""), key="sup_edit_contact")
+                    with c2:
+                        e_email = st.text_input("Email", value=str(row.get("email", "") or ""), key="sup_edit_email")
+                        e_phone = st.text_input("Phone", value=str(row.get("phone", "") or ""), key="sup_edit_phone")
+                    with c3:
+                        e_status = st.selectbox(
+                            "Status",
+                            ["Active", "Inactive"],
+                            index=0 if str(row.get("status", "Active")) == "Active" else 1,
+                            key="sup_edit_status",
+                        )
+                        e_website = st.text_input("Website", value=str(row.get("website", "") or ""), key="sup_edit_website")
+
+                    e_address = st.text_input("Address", value=str(row.get("address", "") or ""), key="sup_edit_address")
+                    col_city2, col_country2 = st.columns(2)
+                    with col_city2:
+                        e_city = st.text_input("City", value=str(row.get("city", "") or ""), key="sup_edit_city")
+                    with col_country2:
+                        e_country = st.text_input("Country", value=str(row.get("country", "") or ""), key="sup_edit_country")
+                    e_notes = st.text_area("Notes", value=str(row.get("notes", "") or ""), key="sup_edit_notes")
+
+                    edit_ok = st.form_submit_button("Update supplier", type="primary", use_container_width=True)
+
+                if edit_ok:
+                    if not e_name:
+                        st.error("Supplier name is required!")
+                    else:
+                        where_clause = "id_supplier = :id" if "id_supplier" in suppliers_df.columns else "id = :id"
+                        update_data(
+                            "suppliers",
+                            {
+                                "name": e_name,
+                                "contact_person": e_contact,
+                                "email": e_email,
+                                "phone": e_phone,
+                                "status": e_status,
+                                "website": e_website,
+                                "address": e_address,
+                                "city": e_city,
+                                "country": e_country,
+                                "notes": e_notes,
+                            },
+                            where_clause,
+                            {"id": supplier_pk},
+                        )
+                        st.success("✅ Supplier updated!")
+                        data = get_all_data()
+                        st.rerun()
+
+                # Delete (outside any form)
+                st.markdown("##### 🗑️ Delete")
+                st.warning("Deleting a supplier does not automatically update linked ingredients. Consider setting it to Inactive instead.")
+                confirm_del = st.checkbox("I understand the consequences", key="sup_delete_confirm")
+                if st.button("Delete supplier", key="sup_delete_btn", use_container_width=True, disabled=not confirm_del):
+                    where_clause = "id_supplier = :id" if "id_supplier" in suppliers_df.columns else "id = :id"
+                    delete_data("suppliers", where_clause, {"id": supplier_pk})
+                    st.success("✅ Supplier deleted!")
+                    data = get_all_data()
+                    st.rerun()
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     with tab_reports:
