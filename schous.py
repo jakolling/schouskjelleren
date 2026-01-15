@@ -873,38 +873,41 @@ if page == "Dashboard":
                         
                         st.markdown('</div>', unsafe_allow_html=True)
         
-        # Add novo evento
+        # Add new event
         with st.expander("➕ Add New Event"):
-    with st.form("add_event_expander_form", clear_on_submit=True):
+            with st.form("add_event_expander_form", clear_on_submit=True):
                 col_e1, col_e2 = st.columns(2)
                 with col_e1:
                     event_title = st.text_input("Event Title")
-                    event_type = st.selectbox("Event Type", ["Brewing", "Transfer", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"])
+                    event_type = st.selectbox(
+                        "Event Type",
+                        ["Brewing", "Fermentation", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"],
+                    )
                 with col_e2:
                     event_date = st.date_input("Event Date", today)
                     equipment = st.text_input("Equipment (Optional)")
-            
+
                 event_notes = st.text_area("Notes")
-            
+
                 submitted = st.form_submit_button("Add Event", type="primary", use_container_width=True)
-        if submitted and event_title:
-                    new_event = {
-                        "title": event_title,
-                        "event_type": event_type,
-                        "start_date": event_date,
-                        "end_date": event_date,
-                        "equipment": equipment,
-                        "batch_id": "",
-                        "notes": event_notes,
-                        "created_by": "User"
-                    }
-                
-                    insert_data("calendar_events", new_event)
-                    data = get_all_data()
-                    st.success("Event added!")
-                    st.rerun()
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+
+            if submitted and event_title:
+                new_event = {
+                    "title": event_title,
+                    "event_type": event_type,
+                    "start_date": event_date,
+                    "end_date": event_date,
+                    "equipment": equipment,
+                    "batch_id": "",
+                    "notes": event_notes,
+                    "created_by": "User",
+                }
+
+                insert_data("calendar_events", new_event)
+                data = get_all_data()
+                st.success("Event added!")
+                st.rerun()
+st.markdown("</div>", unsafe_allow_html=True)
         
         # PRÓXIMAS ATIVIDADES
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
