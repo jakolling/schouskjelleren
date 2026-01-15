@@ -1,5 +1,6 @@
 # brewery_sqlite_complete.py - VERSÃO COMPLETA COM SQLite
 import streamlit as st
+import bcrypt
 import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
@@ -21,10 +22,63 @@ import tempfile
 # - Configure usuários/senhas (hash bcrypt) e cookie em .streamlit/secrets.toml
 # - Configure DATABASE_URL (Postgres recomendado). Ex:
 #   DATABASE_URL="postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME"
-
-import streamlit_authenticator as stauth
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
+def _auth_users():
+    # Expected structure in secrets:
+    # [auth]
+    #   [auth.credentials]
+    #     [auth.credentials.usernames]
+    #       [auth.credentials.usernames.<username>]
+    #       name = "..."
+    #       password = "$2b$12$..."  # bcrypt hash
+    #       role = "admin" | "viewer"
+    return st.secrets["auth"]["credentials"]["usernames"]
+
+def _check_password(plain: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+def require_login():
+    # If already logged in, show quick status + logout
+    if st.session_state.get("logged_in"):
+        with st.sidebar:
+            st.caption(f"Logado como: {st.session_state.get('auth_name')} ({st.session_state.get('auth_role')})")
+            if st.button("🚪 Logout"):
+                for k in ["logged_in","auth_user","auth_name","auth_role"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+        return
+
+    st.title("🔐 Login")
+    st.write("Entre com usuário e senha para acessar o app.")
+
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("Usuário", value="", placeholder="ex: admin")
+        password = st.text_input("Senha", value="", type="password")
+        submitted = st.form_submit_button("Entrar")
+
+    if not submitted:
+        st.stop()
+
+    users = _auth_users()
+    if username not in users:
+        st.error("Usuário ou senha inválidos.")
+        st.stop()
+
+    user_cfg = users[username]
+    if not _check_password(password, user_cfg.get("password","")):
+        st.error("Usuário ou senha inválidos.")
+        st.stop()
+
+    st.session_state["logged_in"] = True
+    st.session_state["auth_user"] = username
+    st.session_state["auth_name"] = user_cfg.get("name", username)
+    st.session_state["auth_role"] = user_cfg.get("role", "viewer")
+    st.success("Login feito!")
+    st.rerun()
 
 DEFAULT_SQLITE_FILE = os.getenv("SQLITE_FILE", "brewery_database.db")
 
@@ -60,36 +114,6 @@ def _require_auth_config():
             "Crie .streamlit/secrets.toml com a seção [auth]."
         )
         st.stop()
-
-def get_authenticator():
-    _require_auth_config()
-    cfg = st.secrets["auth"]
-    return stauth.Authenticate(
-        credentials=cfg["credentials"],
-        cookie_name=cfg["cookie"]["name"],
-        cookie_cookie_key=cfg["cookie"]["key"],
-        cookie_expiry_days=float(cfg["cookie"].get("expiry_days", 30)),
-    )
-
-def require_login():
-    """Exige login (viewer ou admin) antes de mostrar o app."""
-    authenticator = get_authenticator()
-    name, auth_status, username = authenticator.login("🔐 Login", "main")
-
-    if auth_status is False:
-        st.error("Usuário ou senha inválidos.")
-        st.stop()
-    if auth_status is None:
-        st.info("Entre com usuário e senha para acessar.")
-        st.stop()
-
-    user_cfg = st.secrets["auth"]["credentials"]["usernames"][username]
-    st.session_state["auth_user"] = username
-    st.session_state["auth_name"] = user_cfg.get("name", username)
-    st.session_state["auth_role"] = user_cfg.get("role", "viewer")
-
-    # Logout no sidebar
-    authenticator.logout("🚪 Logout", "sidebar")
 
 def _translate_sqlite_to_postgres(ddl: str) -> str:
     """Tradução simples do DDL do SQLite para Postgres."""
