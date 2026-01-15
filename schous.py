@@ -164,170 +164,417 @@ def _ensure_columns(table_name: str, columns_sql: dict[str, str]) -> None:
 
 
 def init_database():
-    """Cria as tabelas se não existirem (funciona em Postgres e em SQLite)."""
+    """Create tables if they don't exist (Postgres or SQLite).
+    This project is deployed on Postgres (Neon), but we keep SQLite support for local runs.
+    """
     engine = get_engine()
     dialect = engine.dialect.name.lower()
 
-    # Reaproveita o DDL original (SQLite) e traduz para Postgres quando necessário
-    ddl_blocks_sqlite = [
-        """CREATE TABLE IF NOT EXISTS ingredients (
-
-    # Postgres-compatible DDL (avoid AUTOINCREMENT)
-    ddl_blocks_pg = []
-    for ddl in ddl_blocks_sqlite:
-        d = ddl
-        d = d.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
-        d = d.replace("TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP")
-        d = d.replace("REAL", "DOUBLE PRECISION")
-        ddl_blocks_pg.append(d)
-
-    dialect = engine.dialect.name.lower()
-    ddl_blocks = ddl_blocks_pg if dialect in {"postgresql", "postgres"} else ddl_blocks_sqlite
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            manufacturer TEXT,
-            category TEXT,
-            unit TEXT,
-            stock REAL DEFAULT 0,
-            unit_cost REAL DEFAULT 0,
-            low_stock_threshold REAL DEFAULT 10,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )""",
-        """CREATE TABLE IF NOT EXISTS purchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            transaction_type TEXT,
-            ingredient TEXT,
-            manufacturer TEXT,
-            supplier TEXT,
-            quantity REAL,
-            unit TEXT,
-            total_cost REAL,
-            unit_cost REAL,
-            order_number TEXT,
-            date DATE,
-            notes TEXT,
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )""",
-        """CREATE TABLE IF NOT EXISTS suppliers (
-            id_supplier INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            contact TEXT,
-            email TEXT,
-            phone TEXT,
-            address TEXT,
-            website TEXT,
-            notes TEXT,
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )""",
-        """CREATE TABLE IF NOT EXISTS recipes (
-            id_recipe INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            style TEXT,
-            abv REAL,
-            ibu REAL,
-            batch_size REAL,
-            unit TEXT DEFAULT 'L',
-            notes TEXT,
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )""",
-        """CREATE TABLE IF NOT EXISTS recipe_items (
-            id_recipe_item INTEGER PRIMARY KEY AUTOINCREMENT,
-            id_recipe INTEGER,
-            id_ingredient INTEGER,
-            ingredient_name TEXT,
-            quantity REAL,
-            unit TEXT,
-            timing TEXT,
-            notes TEXT,
-            FOREIGN KEY (id_recipe) REFERENCES recipes (id_recipe),
-            FOREIGN KEY (id_ingredient) REFERENCES ingredients (id)
-        )""",
-        """CREATE TABLE IF NOT EXISTS breweries (
-            id_brewery INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            type TEXT,
-            address TEXT,
-            city TEXT,
-            state TEXT,
-            country TEXT,
-            postal_code TEXT,
-            contact_person TEXT,
-            contact_phone TEXT,
-            contact_email TEXT,
-            default_batch_size REAL,
-            annual_capacity_hl REAL,
-            status TEXT DEFAULT 'Active',
-            license_number TEXT,
-            established_date DATE,
-            has_lab INTEGER DEFAULT 0,
-            description TEXT,
-            location TEXT,
-            capacity REAL,
-            unit TEXT,
-            notes TEXT,
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )""",
-        """CREATE TABLE IF NOT EXISTS equipment (
-            id_equipment INTEGER PRIMARY KEY AUTOINCREMENT,
-            brewery_id INTEGER,
-            name TEXT NOT NULL,
-            type TEXT,
-            status TEXT DEFAULT 'Operational',
-            capacity REAL,
-            unit TEXT,
-            next_maintenance DATE,
-            notes TEXT,
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (brewery_id) REFERENCES breweries (id_brewery)
-        )""",
-        """CREATE TABLE IF NOT EXISTS production_orders (
-            id_order INTEGER PRIMARY KEY AUTOINCREMENT,
-            id_recipe INTEGER,
-            recipe_name TEXT,
-            brewery_id INTEGER,
-            brewery_name TEXT,
-            batch_size REAL,
-            unit TEXT,
-            status TEXT DEFAULT 'Planned',
-            start_date DATE,
-            end_date DATE,
-            equipment TEXT,
-            batch_id TEXT,
-            notes TEXT,
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (id_recipe) REFERENCES recipes (id_recipe),
-            FOREIGN KEY (brewery_id) REFERENCES breweries (id_brewery)
-        )""",
-        """CREATE TABLE IF NOT EXISTS calendar_events (
-            id_event INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            date DATE,
-            time TEXT,
-            type TEXT,
-            priority TEXT,
-            related_order_id INTEGER,
-            notes TEXT,
-            created_by TEXT,
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (related_order_id) REFERENCES production_orders (id_order)
-        )""",
-        """CREATE TABLE IF NOT EXISTS team_members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            role TEXT,
-            email TEXT,
-            phone TEXT,
-            status TEXT DEFAULT 'Active',
-            created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )""",
-    ]
+    if dialect in {"postgresql", "postgres"}:
+        ddl_blocks = [
+            """CREATE TABLE IF NOT EXISTS breweries (
+                id_brewery BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT,
+                address TEXT,
+                city TEXT,
+                state TEXT,
+                country TEXT,
+                postal_code TEXT,
+                contact_person TEXT,
+                contact_phone TEXT,
+                contact_email TEXT,
+                default_batch_size DOUBLE PRECISION,
+                annual_capacity_hl DOUBLE PRECISION,
+                status TEXT DEFAULT 'Active',
+                license_number TEXT,
+                established_date DATE,
+                has_lab INTEGER DEFAULT 0,
+                description TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS ingredients (
+                id_ingredient BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT,
+                supplier TEXT,
+                origin TEXT,
+                unit TEXT,
+                cost_per_unit DOUBLE PRECISION,
+                quantity_in_stock DOUBLE PRECISION,
+                reorder_level DOUBLE PRECISION,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS suppliers (
+                id_supplier BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                contact_person TEXT,
+                phone TEXT,
+                email TEXT,
+                address TEXT,
+                city TEXT,
+                country TEXT,
+                website TEXT,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS recipes (
+                id_recipe BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                style TEXT,
+                abv DOUBLE PRECISION,
+                ibu DOUBLE PRECISION,
+                srm DOUBLE PRECISION,
+                batch_size DOUBLE PRECISION,
+                notes TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS recipe_items (
+                id_recipe_item BIGSERIAL PRIMARY KEY,
+                recipe_id TEXT,
+                ingredient_name TEXT,
+                quantity DOUBLE PRECISION,
+                unit TEXT,
+                notes TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS purchases (
+                id_purchase BIGSERIAL PRIMARY KEY,
+                ingredient_id TEXT,
+                ingredient_name TEXT,
+                supplier_id TEXT,
+                supplier_name TEXT,
+                quantity DOUBLE PRECISION,
+                unit TEXT,
+                total_cost DOUBLE PRECISION,
+                purchase_date DATE,
+                notes TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS production_orders (
+                id_order BIGSERIAL PRIMARY KEY,
+                id_recipe TEXT,
+                brewery_id TEXT,
+                planned_volume DOUBLE PRECISION,
+                status TEXT DEFAULT 'Planned',
+                start_date DATE,
+                end_date DATE,
+                equipment TEXT,
+                batch_id TEXT,
+                notes TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS calendar_events (
+                id_event BIGSERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                event_type TEXT,
+                start_date DATE,
+                end_date DATE,
+                equipment TEXT,
+                batch_id TEXT,
+                notes TEXT,
+                created_by TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS equipment (
+                id_equipment BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT,
+                capacity DOUBLE PRECISION,
+                unit TEXT,
+                status TEXT DEFAULT 'Active',
+                notes TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS team_members (
+                id_member BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                role TEXT,
+                email TEXT,
+                phone TEXT,
+                status TEXT DEFAULT 'Active',
+                notes TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+        ]
+    else:
+        ddl_blocks = [
+            """CREATE TABLE IF NOT EXISTS breweries (
+                id_brewery INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                type TEXT,
+                address TEXT,
+                city TEXT,
+                state TEXT,
+                country TEXT,
+                postal_code TEXT,
+                contact_person TEXT,
+                contact_phone TEXT,
+                contact_email TEXT,
+                default_batch_size REAL,
+                annual_capacity_hl REAL,
+                status TEXT DEFAULT 'Active',
+                license_number TEXT,
+                established_date DATE,
+                has_lab INTEGER DEFAULT 0,
+                description TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS ingredients (
+                id_ingredient INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                category TEXT,
+                supplier TEXT,
+                origin TEXT,
+                unit TEXT,
+                cost_per_unit REAL,
+                quantity_in_stock REAL,
+                reorder_level REAL,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS suppliers (
+                id_supplier INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                contact_person TEXT,
+                phone TEXT,
+                email TEXT,
+                address TEXT,
+                city TEXT,
+                country TEXT,
+                website TEXT,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS recipes (
+                id_recipe INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                style TEXT,
+                abv REAL,
+                ibu REAL,
+                srm REAL,
+                batch_size REAL,
+                notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS recipe_items (
+                id_recipe_item INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipe_id TEXT,
+                ingredient_name TEXT,
+                quantity REAL,
+                unit TEXT,
+                notes TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS purchases (
+                id_purchase INTEGER PRIMARY KEY AUTOINCREMENT,
+                ingredient_id TEXT,
+                ingredient_name TEXT,
+                supplier_id TEXT,
+                supplier_name TEXT,
+                quantity REAL,
+                unit TEXT,
+                total_cost REAL,
+                purchase_date DATE,
+                notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS production_orders (
+                id_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_recipe TEXT,
+                brewery_id TEXT,
+                planned_volume REAL,
+                status TEXT DEFAULT 'Planned',
+                start_date DATE,
+                end_date DATE,
+                equipment TEXT,
+                batch_id TEXT,
+                notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS calendar_events (
+                id_event INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                event_type TEXT,
+                start_date DATE,
+                end_date DATE,
+                equipment TEXT,
+                batch_id TEXT,
+                notes TEXT,
+                created_by TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS equipment (
+                id_equipment INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                type TEXT,
+                capacity REAL,
+                unit TEXT,
+                status TEXT DEFAULT 'Active',
+                notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS team_members (
+                id_member INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                role TEXT,
+                email TEXT,
+                phone TEXT,
+                status TEXT DEFAULT 'Active',
+                notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+        ]
 
     with engine.begin() as conn:
         for ddl in ddl_blocks:
-            ddl_to_run = ddl
-            if dialect in {"postgresql", "postgres"}:
-                ddl_to_run = _translate_sqlite_to_postgres(ddl)
-            conn.execute(sql_text(ddl_to_run))
+            conn.execute(sql_text(ddl))
+
+    # Auto-sync schema with UI (adds missing columns safely)
+    _ensure_columns(
+        "breweries",
+        {
+            "type": "TEXT",
+            "address": "TEXT",
+            "city": "TEXT",
+            "state": "TEXT",
+            "country": "TEXT",
+            "postal_code": "TEXT",
+            "contact_person": "TEXT",
+            "contact_phone": "TEXT",
+            "contact_email": "TEXT",
+            "default_batch_size": "DOUBLE PRECISION",
+            "annual_capacity_hl": "DOUBLE PRECISION",
+            "status": "TEXT",
+            "license_number": "TEXT",
+            "established_date": "DATE",
+            "has_lab": "INTEGER DEFAULT 0",
+            "description": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "ingredients",
+        {
+            "category": "TEXT",
+            "supplier": "TEXT",
+            "origin": "TEXT",
+            "unit": "TEXT",
+            "cost_per_unit": "DOUBLE PRECISION",
+            "quantity_in_stock": "DOUBLE PRECISION",
+            "reorder_level": "DOUBLE PRECISION",
+            "notes": "TEXT",
+            "status": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "suppliers",
+        {
+            "contact_person": "TEXT",
+            "phone": "TEXT",
+            "email": "TEXT",
+            "address": "TEXT",
+            "city": "TEXT",
+            "country": "TEXT",
+            "website": "TEXT",
+            "notes": "TEXT",
+            "status": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "recipes",
+        {
+            "style": "TEXT",
+            "abv": "DOUBLE PRECISION",
+            "ibu": "DOUBLE PRECISION",
+            "srm": "DOUBLE PRECISION",
+            "batch_size": "DOUBLE PRECISION",
+            "notes": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "recipe_items",
+        {
+            "recipe_id": "TEXT",
+            "ingredient_name": "TEXT",
+            "quantity": "DOUBLE PRECISION",
+            "unit": "TEXT",
+            "notes": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "purchases",
+        {
+            "ingredient_id": "TEXT",
+            "ingredient_name": "TEXT",
+            "supplier_id": "TEXT",
+            "supplier_name": "TEXT",
+            "quantity": "DOUBLE PRECISION",
+            "unit": "TEXT",
+            "total_cost": "DOUBLE PRECISION",
+            "purchase_date": "DATE",
+            "notes": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "production_orders",
+        {
+            "id_recipe": "TEXT",
+            "brewery_id": "TEXT",
+            "planned_volume": "DOUBLE PRECISION",
+            "status": "TEXT",
+            "start_date": "DATE",
+            "end_date": "DATE",
+            "equipment": "TEXT",
+            "batch_id": "TEXT",
+            "notes": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "calendar_events",
+        {
+            "event_type": "TEXT",
+            "start_date": "DATE",
+            "end_date": "DATE",
+            "equipment": "TEXT",
+            "batch_id": "TEXT",
+            "notes": "TEXT",
+            "created_by": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "equipment",
+        {
+            "type": "TEXT",
+            "capacity": "DOUBLE PRECISION",
+            "unit": "TEXT",
+            "status": "TEXT",
+            "notes": "TEXT",
+        },
+    )
+
+    _ensure_columns(
+        "team_members",
+        {
+            "role": "TEXT",
+            "email": "TEXT",
+            "phone": "TEXT",
+            "status": "TEXT",
+            "notes": "TEXT",
+        },
+    )
+
+
 def query_to_df(query: str, params: dict | None = None) -> pd.DataFrame:
     """Executa SELECT e retorna DateFrame."""
     engine = get_engine()
