@@ -1518,6 +1518,79 @@ elif page == "Breweries":
         
         # Listar Beerrias Existentes
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+        
+        # Edit Brewery (admin only) - only saves when you click the button
+        if st.session_state.get("edit_brewery"):
+            require_admin_action()
+            edit_id = st.session_state["edit_brewery"]
+            bdf = query_to_df("SELECT * FROM breweries WHERE id_brewery = :id_brewery", {"id_brewery": edit_id})
+            if not bdf.empty:
+                b = bdf.iloc[0].to_dict()
+                st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+                st.subheader(f"📝 Editing Brewery: {b.get('name','')}")
+                with st.form("edit_brewery_form", clear_on_submit=False):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        e_name = st.text_input("Brewery Name*", value=b.get("name",""), key="edit_brewery_name")
+                        e_type = st.text_input("Brewery Type", value=b.get("type","") or "", key="edit_brewery_type")
+                        e_address = st.text_input("Address", value=b.get("address","") or "", key="edit_brewery_address")
+                        e_city = st.text_input("City", value=b.get("city","") or "", key="edit_brewery_city")
+                        e_state = st.text_input("State", value=b.get("state","") or "", key="edit_brewery_state")
+                        e_country = st.text_input("Country", value=b.get("country","") or "", key="edit_brewery_country")
+                        e_postal = st.text_input("Postal Code", value=b.get("postal_code","") or "", key="edit_brewery_postal")
+                    with col2:
+                        e_contact_person = st.text_input("Contact Person", value=b.get("contact_person","") or "", key="edit_brewery_contact_person")
+                        e_contact_phone = st.text_input("Contact Phone", value=b.get("contact_phone","") or "", key="edit_brewery_contact_phone")
+                        e_contact_email = st.text_input("Contact Email", value=b.get("contact_email","") or "", key="edit_brewery_contact_email")
+                        e_default_batch = st.number_input("Default Batch Size (L)", min_value=0.0, value=float(b.get("default_batch_size") or 0.0), step=10.0, key="edit_brewery_default_batch")
+                        e_annual = st.number_input("Annual Capacity (hL)", min_value=0.0, value=float(b.get("annual_capacity_hl") or 0.0), step=10.0, key="edit_brewery_annual")
+                        e_status = st.text_input("Status", value=b.get("status","") or "Active", key="edit_brewery_status")
+                        e_has_lab = st.checkbox("Has Lab", value=bool(b.get("has_lab") or 0), key="edit_brewery_has_lab")
+                    e_license = st.text_input("License Number", value=b.get("license_number","") or "", key="edit_brewery_license")
+                    e_established = st.date_input("Established Date", value=pd.to_datetime(b.get("established_date")).date() if pd.notna(b.get("established_date")) else datetime.now().date(), key="edit_brewery_established")
+                    e_desc = st.text_area("Description", value=b.get("description","") or "", key="edit_brewery_desc")
+
+                    c1, c2 = st.columns([1,1])
+                    with c1:
+                        save_edit = st.form_submit_button("💾 Save Brewery", type="primary", use_container_width=True)
+                    with c2:
+                        cancel_edit = st.form_submit_button("Cancel", use_container_width=True)
+
+                if cancel_edit:
+                    st.session_state.pop("edit_brewery", None)
+                    st.rerun()
+
+                if save_edit:
+                    if not e_name:
+                        st.error("Brewery name is required.")
+                    else:
+                        updates = {
+                            "name": e_name,
+                            "type": e_type,
+                            "address": e_address,
+                            "city": e_city,
+                            "state": e_state,
+                            "country": e_country,
+                            "postal_code": e_postal,
+                            "contact_person": e_contact_person,
+                            "contact_phone": e_contact_phone,
+                            "contact_email": e_contact_email,
+                            "default_batch_size": e_default_batch,
+                            "annual_capacity_hl": e_annual,
+                            "status": e_status,
+                            "license_number": e_license,
+                            "established_date": e_established,
+                            "has_lab": 1 if e_has_lab else 0,
+                            "description": e_desc,
+                        }
+                        update_data("breweries", updates, "id_brewery = :id_brewery", {"id_brewery": edit_id})
+                        st.session_state.pop("edit_brewery", None)
+                        st.success("✅ Brewery updated.")
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                st.session_state.pop("edit_brewery", None)
+
         st.subheader("📋 Existing Breweries")
         
         breweries_df = data.get("breweries", pd.DataFrame())
@@ -1596,15 +1669,33 @@ elif page == "Breweries":
                             st.session_state['selected_brewery'] = brewery['id_brewery']
                             st.session_state['page'] = 'Breweries'
                             st.session_state['breweries_tab'] = '⚙️ Equipment'
+                            # preselect this brewery in the equipment tab dropdown
+                            st.session_state['equipment_brewery_select'] = brewery.get('name', '')
                             st.rerun()
                     with col_btn2:
                         if st.button(f"Edit", key=f"edit_{brewery['id_brewery']}", use_container_width=True):
                             st.session_state['edit_brewery'] = brewery['id_brewery']
+                            st.rerun()
                     with col_btn3:
                         if st.button(f"🗑️ Delete", key=f"del_{brewery['id_brewery']}", use_container_width=True, type="secondary"):
-                            st.session_state.delete_confirmation = {"type": "brewery", "id": brewery['id_brewery'], "name": brewery['name']}
+                            st.session_state['confirm_delete_brewery'] = brewery['id_brewery']
                             st.rerun()
-                    
+
+
+                    # Inline delete confirmation (right under the buttons)
+                    if st.session_state.get('confirm_delete_brewery') == brewery['id_brewery']:
+                        st.warning("Are you sure you want to delete this brewery? This cannot be undone.")
+                        c1, c2, c3 = st.columns([1, 1, 2])
+                        with c1:
+                            if st.button("✅ Confirm delete", key=f"confirm_del_{brewery['id_brewery']}", type="primary", use_container_width=True):
+                                delete_data("breweries", "id_brewery = :id_brewery", {"id_brewery": brewery['id_brewery']})
+                                st.session_state.pop('confirm_delete_brewery', None)
+                                st.success("Brewery deleted.")
+                                st.rerun()
+                        with c2:
+                            if st.button("Cancel", key=f"cancel_del_{brewery['id_brewery']}", use_container_width=True):
+                                st.session_state.pop('confirm_delete_brewery', None)
+                                st.rerun()
                     if brewery.get('description'):
                         st.markdown("---")
                         st.write("**Description:**")
