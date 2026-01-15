@@ -303,11 +303,11 @@ def init_database():
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS equipment (
-                id_equipment BIGSERIAL PRIMARY KEY,
+                id_equipment INTEGER PRIMARY KEY AUTOINCREMENT,
                 brewery_id TEXT,
                 name TEXT NOT NULL,
                 type TEXT,
-                capacity_liters DOUBLE PRECISION,
+                capacity_liters REAL,
                 unit TEXT,
                 manufacturer TEXT,
                 model TEXT,
@@ -318,11 +318,11 @@ def init_database():
                 next_maintenance DATE,
                 cleaning_frequency TEXT,
                 cleaning_due DATE,
-                pressure_rating DOUBLE PRECISION,
+                pressure_rating REAL,
                 has_jacket INTEGER DEFAULT 0,
                 has_sight_glass INTEGER DEFAULT 0,
                 notes TEXT,
-                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS team_members (
                 id_member BIGSERIAL PRIMARY KEY,
@@ -591,10 +591,22 @@ def init_database():
     _ensure_columns(
         "equipment",
         {
+            "brewery_id": "TEXT",
             "type": "TEXT",
-            "capacity": "DOUBLE PRECISION",
+            "capacity_liters": "DOUBLE PRECISION",
             "unit": "TEXT",
+            "manufacturer": "TEXT",
+            "model": "TEXT",
+            "serial_number": "TEXT",
+            "material": "TEXT",
             "status": "TEXT",
+            "install_date": "DATE",
+            "next_maintenance": "DATE",
+            "cleaning_frequency": "TEXT",
+            "cleaning_due": "DATE",
+            "pressure_rating": "DOUBLE PRECISION",
+            "has_jacket": "INTEGER DEFAULT 0",
+            "has_sight_glass": "INTEGER DEFAULT 0",
             "notes": "TEXT",
         },
     )
@@ -693,12 +705,39 @@ def insert_data(table_name: str, data_dict: dict):
                 res = conn.execute(sql_text(sql), filtered)
                 row = res.fetchone()
                 return row[0] if row else None
-        except Exception:
+        except Exception as e:
             # retry without RETURNING (some schemas/PKs may differ)
             sql2 = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
-            with engine.begin() as conn:
-                conn.execute(sql_text(sql2), filtered)
-            return None  # retry without RETURNING
+            try:
+                with engine.begin() as conn:
+                    conn.execute(sql_text(sql2), filtered)
+                return None
+            except Exception as e2:
+                # Friendly, safe error message for admins (Streamlit redacts the original)
+                try:
+                    import sqlalchemy
+                    from sqlalchemy import exc as sa_exc
+                    orig = getattr(e2, "orig", None)
+                    if orig is not None:
+                        msg = str(orig)
+                        # Auto-fix missing column if Postgres says UndefinedColumn (SQLSTATE 42703)
+                        pgcode = getattr(orig, "pgcode", None)
+                        if pgcode == "42703":
+                            mcol = re.search(r'column "([^"]+)"', msg)
+                            if mcol:
+                                missing_col = mcol.group(1)
+                                _ensure_columns(table_name, {missing_col: "TEXT"})
+                                # retry once
+                                with engine.begin() as conn:
+                                    conn.execute(sql_text(sql2), filtered)
+                                return None
+                        st.error(f"Database error: {type(orig).__name__}: {msg}")
+                    else:
+                        st.error(f"Database error: {type(e2).__name__}: {e2}")
+                except Exception:
+                    # If anything goes wrong while showing the message, just re-raise
+                    pass
+                raise
     else:
         sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
         with engine.begin() as conn:
@@ -1518,79 +1557,6 @@ elif page == "Breweries":
         
         # Listar Beerrias Existentes
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-        
-        # Edit Brewery (admin only) - only saves when you click the button
-        if st.session_state.get("edit_brewery"):
-            require_admin_action()
-            edit_id = st.session_state["edit_brewery"]
-            bdf = query_to_df("SELECT * FROM breweries WHERE id_brewery = :id_brewery", {"id_brewery": edit_id})
-            if not bdf.empty:
-                b = bdf.iloc[0].to_dict()
-                st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-                st.subheader(f"📝 Editing Brewery: {b.get('name','')}")
-                with st.form("edit_brewery_form", clear_on_submit=False):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        e_name = st.text_input("Brewery Name*", value=b.get("name",""), key="edit_brewery_name")
-                        e_type = st.text_input("Brewery Type", value=b.get("type","") or "", key="edit_brewery_type")
-                        e_address = st.text_input("Address", value=b.get("address","") or "", key="edit_brewery_address")
-                        e_city = st.text_input("City", value=b.get("city","") or "", key="edit_brewery_city")
-                        e_state = st.text_input("State", value=b.get("state","") or "", key="edit_brewery_state")
-                        e_country = st.text_input("Country", value=b.get("country","") or "", key="edit_brewery_country")
-                        e_postal = st.text_input("Postal Code", value=b.get("postal_code","") or "", key="edit_brewery_postal")
-                    with col2:
-                        e_contact_person = st.text_input("Contact Person", value=b.get("contact_person","") or "", key="edit_brewery_contact_person")
-                        e_contact_phone = st.text_input("Contact Phone", value=b.get("contact_phone","") or "", key="edit_brewery_contact_phone")
-                        e_contact_email = st.text_input("Contact Email", value=b.get("contact_email","") or "", key="edit_brewery_contact_email")
-                        e_default_batch = st.number_input("Default Batch Size (L)", min_value=0.0, value=float(b.get("default_batch_size") or 0.0), step=10.0, key="edit_brewery_default_batch")
-                        e_annual = st.number_input("Annual Capacity (hL)", min_value=0.0, value=float(b.get("annual_capacity_hl") or 0.0), step=10.0, key="edit_brewery_annual")
-                        e_status = st.text_input("Status", value=b.get("status","") or "Active", key="edit_brewery_status")
-                        e_has_lab = st.checkbox("Has Lab", value=bool(b.get("has_lab") or 0), key="edit_brewery_has_lab")
-                    e_license = st.text_input("License Number", value=b.get("license_number","") or "", key="edit_brewery_license")
-                    e_established = st.date_input("Established Date", value=pd.to_datetime(b.get("established_date")).date() if pd.notna(b.get("established_date")) else datetime.now().date(), key="edit_brewery_established")
-                    e_desc = st.text_area("Description", value=b.get("description","") or "", key="edit_brewery_desc")
-
-                    c1, c2 = st.columns([1,1])
-                    with c1:
-                        save_edit = st.form_submit_button("💾 Save Brewery", type="primary", use_container_width=True)
-                    with c2:
-                        cancel_edit = st.form_submit_button("Cancel", use_container_width=True)
-
-                if cancel_edit:
-                    st.session_state.pop("edit_brewery", None)
-                    st.rerun()
-
-                if save_edit:
-                    if not e_name:
-                        st.error("Brewery name is required.")
-                    else:
-                        updates = {
-                            "name": e_name,
-                            "type": e_type,
-                            "address": e_address,
-                            "city": e_city,
-                            "state": e_state,
-                            "country": e_country,
-                            "postal_code": e_postal,
-                            "contact_person": e_contact_person,
-                            "contact_phone": e_contact_phone,
-                            "contact_email": e_contact_email,
-                            "default_batch_size": e_default_batch,
-                            "annual_capacity_hl": e_annual,
-                            "status": e_status,
-                            "license_number": e_license,
-                            "established_date": e_established,
-                            "has_lab": 1 if e_has_lab else 0,
-                            "description": e_desc,
-                        }
-                        update_data("breweries", updates, "id_brewery = :id_brewery", {"id_brewery": edit_id})
-                        st.session_state.pop("edit_brewery", None)
-                        st.success("✅ Brewery updated.")
-                        st.rerun()
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.session_state.pop("edit_brewery", None)
-
         st.subheader("📋 Existing Breweries")
         
         breweries_df = data.get("breweries", pd.DataFrame())
@@ -1669,33 +1635,15 @@ elif page == "Breweries":
                             st.session_state['selected_brewery'] = brewery['id_brewery']
                             st.session_state['page'] = 'Breweries'
                             st.session_state['breweries_tab'] = '⚙️ Equipment'
-                            # preselect this brewery in the equipment tab dropdown
-                            st.session_state['equipment_brewery_select'] = brewery.get('name', '')
                             st.rerun()
                     with col_btn2:
                         if st.button(f"Edit", key=f"edit_{brewery['id_brewery']}", use_container_width=True):
                             st.session_state['edit_brewery'] = brewery['id_brewery']
-                            st.rerun()
                     with col_btn3:
                         if st.button(f"🗑️ Delete", key=f"del_{brewery['id_brewery']}", use_container_width=True, type="secondary"):
-                            st.session_state['confirm_delete_brewery'] = brewery['id_brewery']
+                            st.session_state.delete_confirmation = {"type": "brewery", "id": brewery['id_brewery'], "name": brewery['name']}
                             st.rerun()
-
-
-                    # Inline delete confirmation (right under the buttons)
-                    if st.session_state.get('confirm_delete_brewery') == brewery['id_brewery']:
-                        st.warning("Are you sure you want to delete this brewery? This cannot be undone.")
-                        c1, c2, c3 = st.columns([1, 1, 2])
-                        with c1:
-                            if st.button("✅ Confirm delete", key=f"confirm_del_{brewery['id_brewery']}", type="primary", use_container_width=True):
-                                delete_data("breweries", "id_brewery = :id_brewery", {"id_brewery": brewery['id_brewery']})
-                                st.session_state.pop('confirm_delete_brewery', None)
-                                st.success("Brewery deleted.")
-                                st.rerun()
-                        with c2:
-                            if st.button("Cancel", key=f"cancel_del_{brewery['id_brewery']}", use_container_width=True):
-                                st.session_state.pop('confirm_delete_brewery', None)
-                                st.rerun()
+                    
                     if brewery.get('description'):
                         st.markdown("---")
                         st.write("**Description:**")
@@ -1925,12 +1873,24 @@ elif page == "Breweries":
             breweries_df = data.get("breweries", pd.DataFrame())
             if not breweries_df.empty:
                 brewery_options = breweries_df["name"].tolist()
+
+                # If we arrived here from a Brewery card ("View Equipment"), preselect that brewery.
+                preferred_id = st.session_state.get("selected_brewery")
+                if preferred_id is not None and preferred_id in set(breweries_df["id_brewery"].values):
+                    preferred_name = breweries_df.loc[breweries_df["id_brewery"] == preferred_id, "name"].iloc[0]
+                    st.session_state["equipment_brewery_select"] = preferred_name
+
                 selected_brewery = st.selectbox(
                     "Select Brewery for Equipment*",
                     brewery_options,
-                    key="equipment_brewery_select"
+                    key="equipment_brewery_select",
                 )
-                brewery_id = breweries_df[breweries_df["name"] == selected_brewery]["id_brewery"].iloc[0]
+
+                match = breweries_df[breweries_df["name"] == selected_brewery]
+                brewery_id = match["id_brewery"].iloc[0] if not match.empty else None
+                if brewery_id is None:
+                    st.error("Selected brewery not found in the database.")
+                    st.stop()
             else:
                 st.warning("⚠️ Please add a brewery first!")
                 brewery_id = None
@@ -2079,7 +2039,18 @@ elif page == "Breweries":
             st.subheader("📋 Existing Equipment")
             
             equipment_df = data.get("equipment", pd.DataFrame())
-            if not equipment_df.empty:
+            if equipment_df.empty:
+                st.info("ℹ️ No equipment registered yet. Use **Add New Equipment** to create the first one.")
+            else:
+                # Ensure optional columns exist (prevents KeyError)
+                if "current_volume" not in equipment_df.columns:
+                    equipment_df["current_volume"] = 0.0
+                if "capacity_liters" not in equipment_df.columns:
+                    equipment_df["capacity_liters"] = 0.0
+                if "manufacturer" not in equipment_df.columns:
+                    equipment_df["manufacturer"] = ""
+                if "model" not in equipment_df.columns:
+                    equipment_df["model"] = ""
                 # Filtros
                 col_eq_filter1, col_eq_filter2, col_eq_filter3 = st.columns(3)
                 
@@ -2109,6 +2080,14 @@ elif page == "Breweries":
                 
                 # Aplicar filtros
                 filtered_equipment = equipment_df.copy()
+                if 'current_volume' not in filtered_equipment.columns:
+                    filtered_equipment['current_volume'] = 0.0
+                if 'capacity_liters' not in filtered_equipment.columns:
+                    filtered_equipment['capacity_liters'] = 0.0
+                if 'manufacturer' not in filtered_equipment.columns:
+                    filtered_equipment['manufacturer'] = ''
+                if 'model' not in filtered_equipment.columns:
+                    filtered_equipment['model'] = ''
                 
                 if eq_type_filter != "All":
                     filtered_equipment = filtered_equipment[filtered_equipment["type"] == eq_type_filter]
@@ -2129,7 +2108,7 @@ elif page == "Breweries":
                             if not breweries_df.empty and eq["brewery_id"] in breweries_df["id_brewery"].values:
                                 brewery_name = breweries_df[breweries_df["id_brewery"] == eq["brewery_id"]]["name"].iloc[0]
                             
-                            occupancy_pct = (eq["current_volume"] / eq["capacity_liters"]) * 100 if eq["capacity_liters"] > 0 else 0
+                            occupancy_pct = (eq.get("current_volume", 0) / eq["capacity_liters"]) * 100 if eq["capacity_liters"] > 0 else 0
                             
                             status_colors = {
                                 "Empty": "#10b981",
@@ -2169,8 +2148,9 @@ elif page == "Breweries":
                     st.markdown("---")
                     st.subheader("Detailed View")
                     display_cols = ["name", "type", "capacity_liters", "current_volume", "status", "manufacturer", "model"]
+                    existing_cols = [c for c in display_cols if c in filtered_equipment.columns]
                     st.dataframe(
-                        filtered_equipment[display_cols].rename(columns={
+                        filtered_equipment[existing_cols].rename(columns={
                             "name": "Name",
                             "type": "Type", 
                             "capacity_liters": "Capacity (L)",
@@ -2182,9 +2162,10 @@ elif page == "Breweries":
                         use_container_width=True
                     )
                 else:
-                    st.info("No equipment found with selected filters")
-            else:
-                st.info("No equipment registered yet.")
+                    if brewery_filter != "All":
+                        st.info(f"ℹ️ No equipment registered for **{brewery_filter}** yet.")
+                    else:
+                        st.info("ℹ️ No equipment found with selected filters.")
         
         st.markdown("</div>", unsafe_allow_html=True)
     if selected_brew_tab == "📊 Overview":
