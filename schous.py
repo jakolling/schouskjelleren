@@ -24,6 +24,30 @@ import tempfile
 #   DATABASE_URL="postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME"
 from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
+def render_status_badge(status: str | None) -> str:
+    """Return a small HTML badge for statuses like Active/Inactive/Planned/Completed."""
+    s = (status or "").strip()
+    if not s:
+        s = "N/A"
+    s_low = s.lower()
+
+    # Map common statuses to CSS classes
+    if s_low in {"active", "enabled", "open", "in stock", "available"}:
+        cls = "badge-green"
+    elif s_low in {"inactive", "disabled", "closed", "out of stock", "unavailable"}:
+        cls = "badge-gray"
+    elif s_low in {"planned", "draft"}:
+        cls = "badge-blue"
+    elif s_low in {"in progress", "brewing", "fermenting"}:
+        cls = "badge-orange"
+    elif s_low in {"completed", "done", "finished"}:
+        cls = "badge-green"
+    elif s_low in {"cancelled", "canceled", "error"}:
+        cls = "badge-red"
+    else:
+        cls = "badge-gray"
+
+    return f"<span class='status-badge {cls}'>{s}</span>"
 def _auth_users():
     # Expected structure in secrets:
     # [auth]
