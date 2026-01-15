@@ -6,3 +6,4 @@ sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 streamlit-authenticator==0.3.2
 openpyxl==3.1.5
+bcrypt==4.1.3
