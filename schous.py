@@ -303,11 +303,11 @@ def init_database():
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS equipment (
-                id_equipment INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_equipment BIGSERIAL PRIMARY KEY,
                 brewery_id TEXT,
                 name TEXT NOT NULL,
                 type TEXT,
-                capacity_liters REAL,
+                capacity_liters DOUBLE PRECISION,
                 unit TEXT,
                 manufacturer TEXT,
                 model TEXT,
@@ -318,11 +318,11 @@ def init_database():
                 next_maintenance DATE,
                 cleaning_frequency TEXT,
                 cleaning_due DATE,
-                pressure_rating REAL,
+                pressure_rating DOUBLE PRECISION,
                 has_jacket INTEGER DEFAULT 0,
                 has_sight_glass INTEGER DEFAULT 0,
                 notes TEXT,
-                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS team_members (
                 id_member BIGSERIAL PRIMARY KEY,
