@@ -303,14 +303,26 @@ def init_database():
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS equipment (
-                id_equipment BIGSERIAL PRIMARY KEY,
+                id_equipment INTEGER PRIMARY KEY AUTOINCREMENT,
+                brewery_id TEXT,
                 name TEXT NOT NULL,
                 type TEXT,
-                capacity DOUBLE PRECISION,
+                capacity_liters REAL,
                 unit TEXT,
+                manufacturer TEXT,
+                model TEXT,
+                serial_number TEXT,
+                material TEXT,
                 status TEXT DEFAULT 'Active',
+                install_date DATE,
+                next_maintenance DATE,
+                cleaning_frequency TEXT,
+                cleaning_due DATE,
+                pressure_rating REAL,
+                has_jacket INTEGER DEFAULT 0,
+                has_sight_glass INTEGER DEFAULT 0,
                 notes TEXT,
-                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS team_members (
                 id_member BIGSERIAL PRIMARY KEY,
@@ -676,10 +688,17 @@ def insert_data(table_name: str, data_dict: dict):
 
     if dialect in {"postgresql", "postgres"}:
         sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders}) RETURNING {pk_col}"
-        with engine.begin() as conn:
-            res = conn.execute(sql_text(sql), filtered)
-            row = res.fetchone()
-            return row[0] if row else None
+        try:
+            with engine.begin() as conn:
+                res = conn.execute(sql_text(sql), filtered)
+                row = res.fetchone()
+                return row[0] if row else None
+        except Exception:
+            # retry without RETURNING (some schemas/PKs may differ)
+            sql2 = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
+            with engine.begin() as conn:
+                conn.execute(sql_text(sql2), filtered)
+            return None  # retry without RETURNING
     else:
         sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders})"
         with engine.begin() as conn:
@@ -1835,70 +1854,105 @@ elif page == "Breweries":
         if equipment_action == "Add New Equipment" and brewery_id:
             st.markdown("---")
             st.subheader(f"➕ Add Equipment to {selected_brewery}")
-            
-            col_eq_form1, col_eq_form2, col_eq_form3 = st.columns(3)
-            
-            with col_eq_form1:
-                equipment_name = st.text_input("Equipment Name*", key="new_eq_name")
-                equipment_type = st.selectbox(
-                    "Equipment Type*",
-                    [
-                        "Fermentation Tank", 
-                        "Bright Beer Tank (BBT)", 
-                        "Serving Tank", 
-                        "Brew Kettle", 
-                        "Mash Tun", 
-                        "Whirlpool", 
-                        "Heat Exchanger",
-                        "Hot Liquor Tank (HLT)",
-                        "Cold Liquor Tank (CLT)",
-                        "Glycol Unit", 
-                        "Pump", 
-                        "Filter",
-                        "Centrifuge",
-                        "Carbonation Stone",
-                        "Yeast Brink",
-                        "CIP System",
-                        "Other"
-                    ],
-                    key="new_eq_type"
-                )
-                
-                capacity = st.number_input("Capacity (L)*", min_value=1.0, value=100.0, step=1.0, key="new_eq_capacity")
-            
-            with col_eq_form2:
-                manufacturer = st.text_input("Manufacturer", key="new_eq_manufacturer")
-                model = st.text_input("Model", key="new_eq_model")
-                serial_number = st.text_input("Serial Number", key="new_eq_serial")
-                
-                if "Tank" in equipment_type:
-                    status_options = ["Empty", "In Use", "Cleaning", "Ready", "Maintenance", "Out of Service"]
-                else:
-                    status_options = ["Operational", "Maintenance", "Out of Service", "In Use", "Standby"]
-                
-                status = st.selectbox("Status*", status_options, key="new_eq_status")
-            
-            with col_eq_form3:
-                install_date = st.date_input("Installation Date", datetime.now().date(), key="new_eq_install")
-                next_maintenance = st.date_input("Next Maintenance Due", datetime.now().date() + timedelta(days=90), key="new_eq_maintenance")
-                
-                if "Tank" in equipment_type:
-                    material = st.selectbox("Material", ["Stainless Steel", "Glass-Lined Steel", "Plastic", "Wood", "Other"], key="new_eq_material")
-                    pressure_rating = st.number_input("Pressure Rating (psi)", min_value=0.0, value=15.0, step=0.5, key="new_eq_pressure")
-                    has_jacket = st.checkbox("Temperature Jacket", value=True, key="new_eq_jacket")
-                    has_sight_glass = st.checkbox("Sight Glass", value=True, key="new_eq_sight")
-                else:
-                    material = st.selectbox("Material", ["Stainless Steel", "Copper", "Plastic", "Other"], key="new_eq_material_other")
-                
-                cleaning_frequency = st.selectbox(
-                    "Cleaning Frequency",
-                    ["After each use", "Daily", "Weekly", "Monthly", "As needed"],
-                    key="new_eq_cleaning"
-                )
-            
-            equipment_notes = st.text_area("Notes / Special Instructions", key="new_eq_notes")
-            
-            if st.button("⚙️ Add Equipment", type="primary", use_container_width=True, key="add_eq_btn"):
+
+            with st.form("add_equipment_form", clear_on_submit=True):
+                col_eq_form1, col_eq_form2, col_eq_form3 = st.columns(3)
+
+                with col_eq_form1:
+                    equipment_name = st.text_input("Equipment Name*", key="new_eq_name")
+                    equipment_type = st.selectbox(
+                        "Equipment Type*",
+                        [
+                            "Fermentation Tank",
+                            "Bright Beer Tank (BBT)",
+                            "Serving Tank",
+                            "Brew Kettle",
+                            "Mash Tun",
+                            "Whirlpool",
+                            "Heat Exchanger",
+                            "Hot Liquor Tank (HLT)",
+                            "Cold Liquor Tank (CLT)",
+                            "Glycol Unit",
+                            "Pump",
+                            "Chiller",
+                            "Compressor",
+                            "Keg Washer",
+                            "Can Filler",
+                            "Bottling Line",
+                            "Labeler",
+                            "Filter",
+                            "Centrifuge",
+                            "Carbonation Stone",
+                            "Yeast Brink",
+                            "CIP System",
+                            "Other",
+                        ],
+                        key="new_eq_type",
+                    )
+                    capacity = st.number_input(
+                        "Capacity (L)*",
+                        min_value=1.0,
+                        value=100.0,
+                        step=1.0,
+                        key="new_eq_capacity",
+                    )
+
+                with col_eq_form2:
+                    manufacturer = st.text_input("Manufacturer", key="new_eq_manufacturer")
+                    model = st.text_input("Model", key="new_eq_model")
+                    serial_number = st.text_input("Serial Number", key="new_eq_serial")
+
+                    if "Tank" in equipment_type:
+                        status_options = ["Empty", "In Use", "Cleaning", "Ready", "Maintenance", "Out of Service"]
+                    else:
+                        status_options = ["Operational", "Maintenance", "Out of Service", "In Use", "Standby"]
+
+                    status = st.selectbox("Status*", status_options, key="new_eq_status")
+
+                with col_eq_form3:
+                    install_date = st.date_input("Installation Date", datetime.now().date(), key="new_eq_install")
+                    next_maintenance = st.date_input(
+                        "Next Maintenance",
+                        datetime.now().date() + timedelta(days=90),
+                        key="new_eq_maintenance",
+                    )
+
+                    if "Tank" in equipment_type:
+                        material = st.selectbox(
+                            "Material",
+                            ["Stainless Steel", "Coated Steel", "Plastic", "Wood", "Other"],
+                            key="new_eq_material",
+                        )
+                        pressure_rating = st.number_input(
+                            "Pressure Rating (psi)",
+                            min_value=0.0,
+                            value=15.0,
+                            step=0.5,
+                            key="new_eq_pressure",
+                        )
+                        has_jacket = st.checkbox("Temperature Jacket", value=True, key="new_eq_jacket")
+                        has_sight_glass = st.checkbox("Sight Glass", value=True, key="new_eq_sight")
+                    else:
+                        material = st.selectbox(
+                            "Material",
+                            ["Stainless Steel", "Copper", "Plastic", "Other"],
+                            key="new_eq_material_other",
+                        )
+                        pressure_rating = None
+                        has_jacket = False
+                        has_sight_glass = False
+
+                    cleaning_frequency = st.selectbox(
+                        "Cleaning Frequency",
+                        ["After each use", "Daily", "Weekly", "Monthly", "As needed"],
+                        key="new_eq_cleaning",
+                    )
+
+                equipment_notes = st.text_area("Notes / Special Instructions", key="new_eq_notes")
+
+                submitted = st.form_submit_button("⚙️ Add Equipment", type="primary", use_container_width=True)
+
+            if submitted:
                 if not equipment_name:
                     st.error("Equipment name is required!")
                 else:
@@ -1916,19 +1970,19 @@ elif page == "Breweries":
                         "next_maintenance": next_maintenance,
                         "cleaning_frequency": cleaning_frequency,
                         "cleaning_due": datetime.now().date() + timedelta(days=7),
-                        "notes": equipment_notes
+                        "notes": equipment_notes,
                     }
-                    
-                    if "Tank" in equipment_type:
+
+                    if "Tank" in equipment_type and pressure_rating is not None:
                         new_equipment["pressure_rating"] = pressure_rating
                         new_equipment["has_jacket"] = 1 if has_jacket else 0
                         new_equipment["has_sight_glass"] = 1 if has_sight_glass else 0
-                    
+
                     insert_data("equipment", new_equipment)
                     data = get_all_data()
                     st.success(f"✅ Equipment '{equipment_name}' added to {selected_brewery}!")
                     st.rerun()
-        
+
         elif equipment_action == "View/Edit Existing":
             st.markdown("---")
             st.subheader("📋 Existing Equipment")
