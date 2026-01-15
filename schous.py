@@ -93,28 +93,6 @@ def get_database_url() -> str:
 
 @st.cache_resource
 
-    # Ensure breweries schema matches the UI fields (safe to run repeatedly)
-    _ensure_columns(
-        "breweries",
-        {
-            "type": "TEXT",
-            "address": "TEXT",
-            "city": "TEXT",
-            "state": "TEXT",
-            "country": "TEXT",
-            "postal_code": "TEXT",
-            "contact_person": "TEXT",
-            "contact_phone": "TEXT",
-            "contact_email": "TEXT",
-            "default_batch_size": "DOUBLE PRECISION",
-            "annual_capacity_hl": "DOUBLE PRECISION",
-            "license_number": "TEXT",
-            "established_date": "DATE",
-            "has_lab": "INTEGER DEFAULT 0",
-            "description": "TEXT",
-        },
-    )
-
 def get_engine() -> Engine:
     """Engine compartilhado (pool de conexões) para suportar múltiplos usuários."""
     db_url = get_database_url()
