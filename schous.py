@@ -792,16 +792,60 @@ def insert_data(table_name: str, data_dict: dict):
                 return None
 
 def update_data(table_name: str, data_dict: dict, where_clause: str, where_params: dict):
-    """Atualiza dados (admin only)."""
+    """Update rows (admin only). Filters unknown columns and coerces numpy/pandas scalars."""
     require_admin_action()
-    set_clause = ", ".join([f"{k} = :set_{k}" for k in data_dict.keys()])
-    params = {f"set_{k}": _to_python_scalar(v) for k, v in data_dict.items()}
-    params.update({k: _to_python_scalar(v) for k, v in (where_params or {}).items()})
-    sql = f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}"
+    data_dict = data_dict or {}
+    where_params = where_params or {}
+
     engine = get_engine()
-    with engine.begin() as conn:
-        res = conn.execute(sql_text(sql), params)
-        return res.rowcount
+
+    # Fetch actual columns from DB to avoid "UndefinedColumn" errors
+    dialect = engine.url.get_backend_name() if engine and engine.url else ""
+    actual_cols = []
+    try:
+        if dialect in {"postgresql", "postgres"}:
+            q = """SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = :t"""
+            with engine.begin() as conn:
+                actual_cols = [r[0] for r in conn.execute(sql_text(q), {"t": table_name}).fetchall()]
+        else:
+            with engine.begin() as conn:
+                actual_cols = [r[1] for r in conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()]
+    except Exception:
+        actual_cols = list(data_dict.keys())
+
+    # Keep only columns that exist
+    filtered_updates = {k: _to_python_scalar(v) for k, v in data_dict.items() if k in set(actual_cols)}
+    if not filtered_updates:
+        return 0
+
+    set_clause = ", ".join([f"{k} = :set_{k}" for k in filtered_updates.keys()])
+    params = {f"set_{k}": v for k, v in filtered_updates.items()}
+    params.update({k: _to_python_scalar(v) for k, v in where_params.items()})
+
+    sql = f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}"
+
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(sql_text(sql), params)
+            return res.rowcount
+    except Exception as e:
+        # If Postgres says a column doesn't exist, auto-add it as TEXT and retry once.
+        orig = getattr(e, "orig", None)
+        msg = str(orig) if orig is not None else str(e)
+        pgcode = getattr(orig, "pgcode", None) if orig is not None else None
+        if pgcode == "42703":  # UndefinedColumn
+            mcol = re.search(r'column "([^"]+)"', msg)
+            if mcol:
+                missing_col = mcol.group(1)
+                _ensure_columns(table_name, {missing_col: "TEXT"})
+                with engine.begin() as conn:
+                    res = conn.execute(sql_text(sql), params)
+                    return res.rowcount
+
+        # Show a safe error message (Streamlit otherwise redacts)
+        st.error(f"Database error: {type(orig).__name__ if orig is not None else type(e).__name__}: {msg}")
+        raise
 
 def delete_data(table_name: str, where_clause: str, where_params: dict):
     """Deleta dados (admin only)."""
