@@ -1,11 +1,5 @@
 # Brewery Manager - Multi-user Streamlit app (Postgres/Neon)
 import streamlit as st
-st.set_page_config(
-    page_title="Brewery Manager",
-    page_icon="⭐",
-    layout="wide"
-)
-
 import bcrypt
 import pandas as pd
 import numpy as np
@@ -17,7 +11,6 @@ import calendar
 import re
 import os
 import tempfile
-from typing import Optional
 
 # -----------------------------
 # AUTH + CONFIGURAÇÃO DO BANCO DE DADOS (Multiusuário)
@@ -29,28 +22,14 @@ from typing import Optional
 # - Configure usuários/senhas (hash bcrypt) e cookie em .streamlit/secrets.toml
 # - Configure DATABASE_URL (Postgres recomendado). Ex:
 #   DATABASE_URL="postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME"
-from sqlalchemy import create_engine, text as sql_text, inspect
+from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
-
-def format_money(value, currency_symbol="$", decimals=2, decimal_comma=True):
-    """Format numeric currency values for UI.
-
-    - decimals: number of decimal places
-    - decimal_comma: if True, use comma as decimal separator (e.g., 12,60)
-    """
-    if value is None:
-        return f"{currency_symbol}—"
-    try:
-        x=float(value)
-    except Exception:
-        return f"{currency_symbol}—"
-    s=f"{x:,.{decimals}f}"
-    if decimal_comma:
-        # swap thousands/decimal separators: 1,234.56 -> 1.234,56
-        s=s.replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"{currency_symbol}{s}"
-
+st.set_page_config(
+    page_title="Brewery Manager",
+    page_icon="⭐",
+    layout="wide"
+)
 
 def render_status_badge(status: str | None) -> str:
     """Return a small HTML badge for statuses like Active/Inactive/Planned/Completed."""
@@ -235,107 +214,6 @@ def get_table_columns_cached(table_name: str, dialect: str | None = None) -> lis
     d = (dialect or engine.dialect.name).lower()
     cols = _get_table_columns_cached(table_name, d)
     return cols if cols else []
-
-
-def get_table_id_column(table_name: str, dialect: str | None = None) -> str:
-    """Return the primary-key column name for a table (best effort).
-
-    Why this exists: the app supports legacy/hand-edited schemas where PKs can be
-    `id`, `id_ingredient`, `ingredient_id`, etc. We try to detect the *real* PK
-    using SQLAlchemy's inspector first, then fall back to heuristics.
-    """
-    engine = get_engine()
-
-    # 1) Ask the database for the PK (works on Postgres/SQLite when constraints exist)
-    try:
-        insp = inspect(engine)
-        pk = insp.get_pk_constraint(table_name) or {}
-        cols = pk.get('constrained_columns') or []
-        if cols:
-            return cols[0]
-    except Exception:
-        pass
-
-    # 2) Heuristics based on existing columns
-    cols = get_table_columns_cached(table_name, dialect)
-    if not cols:
-        return 'id'
-
-    # Common explicit candidates
-    for cand in (
-        'id',
-        'id_ingredient', 'ingredient_id',
-        'id_supplier', 'supplier_id',
-        'id_brewery', 'brewery_id',
-        'id_recipe', 'recipe_id',
-        'id_receipt', 'receipt_id',
-        'id_order', 'order_id',
-        'id_purchase_order', 'purchase_order_id',
-        'id_purchase_item', 'purchase_item_id',
-    ):
-        if cand in cols:
-            return cand
-
-    # 3) Last resort: first column that looks like a PK
-    for c in cols:
-        cl = c.lower()
-        if cl == 'id' or cl.endswith('_id') or cl.startswith('id_'):
-            return c
-
-    return 'id'
-
-def get_pk_value(row, id_col: str | None = None):
-    'Extract a primary-key value from a pandas Series or dict (best effort).'
-    try:
-        if row is None:
-            return None
-
-        cands = []
-        if id_col:
-            cands.append(id_col)
-        cands += [
-            'id',
-            'id_ingredient', 'ingredient_id',
-            'id_supplier', 'supplier_id',
-            'id_brewery', 'brewery_id',
-            'id_recipe', 'recipe_id',
-            'id_order', 'order_id',
-        ]
-
-        for k in cands:
-            try:
-                if hasattr(row, '__contains__') and k in row:
-                    v = row[k]
-                elif hasattr(row, 'get'):
-                    v = row.get(k)
-                else:
-                    v = None
-            except Exception:
-                v = None
-
-            if v is None:
-                continue
-            try:
-                # pandas uses NaN for missing
-                import pandas as pd
-                if pd.isna(v):
-                    continue
-            except Exception:
-                pass
-
-            s = str(v).strip()
-            if not s:
-                continue
-            # Keep as int when possible (common PK type)
-            try:
-                return int(float(s))
-            except Exception:
-                return v
-
-        return None
-    except Exception:
-        return None
-
 
 def is_admin() -> bool:
     return st.session_state.get("auth_role") == "admin"
@@ -1121,91 +999,6 @@ def delete_data(table_name: str, where_clause: str, where_params: dict):
     bump_db_version()
     return res.rowcount
 
-
-# --- Ingredient hard-delete hygiene ---
-# If you delete an ingredient, you almost always also want it gone from “stock” views.
-# Older schemas store movements/purchases by ingredient NAME (text), not by FK id.
-# So we do a best-effort purge of dependent rows when the user confirms deletion.
-
-def _table_exists(table_name: str) -> bool:
-    try:
-        engine = get_engine()
-        return inspect(engine).has_table(table_name)
-    except Exception:
-        return False
-
-
-def _table_columns(table_name: str) -> list[str]:
-    try:
-        engine = get_engine()
-        d = engine.dialect.name.lower()
-        # Prefer cached column lookup when available
-        try:
-            cols = get_table_columns_cached(table_name, d)
-        except Exception:
-            cols = []
-        if cols:
-            return cols
-        return get_table_columns(table_name)
-    except Exception:
-        return []
-
-
-def purge_ingredient_references(ingredient_id, ingredient_name: str | None) -> int:
-    """Best-effort purge of rows in other tables that reference an ingredient.
-
-    This is meant for *initial setup/cleanup* workflows, where deleting an ingredient
-    should also remove it from stock history / purchase items.
-
-    Returns number of deleted rows (best effort).
-    """
-    require_admin_action()
-
-    deleted = 0
-    name = (ingredient_name or '').strip()
-
-    # Tables we may need to clean up (many deployments won't have all of them)
-    candidate_tables = [
-        'purchases',
-        'purchase_order_items',
-        'ingredient_inventory_layers',
-        'inventory_layers',
-        'stock_movements',
-        'inventory_transactions',
-    ]
-
-    # Common column names we’ve seen across schemas
-    id_cols = ['ingredient_id', 'id_ingredient', 'ingredientid']
-    name_cols = ['ingredient', 'ingredient_name', 'name']
-
-    for tbl in candidate_tables:
-        if not _table_exists(tbl):
-            continue
-        cols = set(c.lower() for c in _table_columns(tbl))
-
-        # Delete by FK id where possible
-        if ingredient_id is not None:
-            for c in id_cols:
-                if c in cols:
-                    try:
-                        deleted += delete_data(tbl, f"{c} = :iid", {'iid': ingredient_id})
-                    except Exception:
-                        pass
-                    break
-
-        # Delete by ingredient text name (legacy schemas)
-        if name:
-            for c in name_cols:
-                if c in cols:
-                    # For purchase_order_items, a 'name' column may refer to the item name; still ok.
-                    try:
-                        deleted += delete_data(tbl, f"{c} = :nm", {'nm': name})
-                    except Exception:
-                        pass
-                    break
-
-    return deleted
-
 def _get_all_data_uncached() -> dict[str, pd.DataFrame]:
     """Loads all tables from DB (no cache)."""
     table_names = [
@@ -1508,72 +1301,12 @@ def update_stock_from_usage(ingredient_name, quantity):
     )
 
 def check_ingredient_usage(ingredient_id):
-    """Verifica se um ingrediente está em uso em receitas.
-
-    Esta função precisa ser compatível com diferentes esquemas:
-    - Alguns bancos guardam o vínculo por id (ex.: id_ingredient / ingredient_id).
-    - Outros guardam apenas o nome do ingrediente em recipe_items (ingredient_name).
-
-    A ideia aqui é **não quebrar** o app quando o esquema não tem a coluna esperada.
-    """
-
-    try:
-        engine = get_engine()
-        dialect = getattr(engine.dialect, "name", "").lower() or None
-
-        # Se a tabela nem existir ainda, não está em uso.
-        recipe_cols = get_table_columns_cached("recipe_items", dialect)
-        if not recipe_cols:
-            return False
-
-        # 1) Esquema por ID
-        if "id_ingredient" in recipe_cols:
-            df = query_to_df(
-                "SELECT COUNT(*) AS count FROM recipe_items WHERE id_ingredient = :ingredient_id",
-                {"ingredient_id": ingredient_id},
-            )
-            return (not df.empty) and (int(df.iloc[0]["count"]) > 0)
-
-        if "ingredient_id" in recipe_cols:
-            df = query_to_df(
-                "SELECT COUNT(*) AS count FROM recipe_items WHERE ingredient_id = :ingredient_id",
-                {"ingredient_id": ingredient_id},
-            )
-            return (not df.empty) and (int(df.iloc[0]["count"]) > 0)
-
-        # 2) Esquema por nome (recipe_items.ingredient_name)
-        if "ingredient_name" in recipe_cols:
-            ing_cols = get_table_columns_cached("ingredients", dialect) or []
-            # Descobrir qual coluna é o ID no schema atual
-            # Prefer a coluna real do schema (normalmente id_ingredient). Só usa `id` se existir mesmo.
-            ing_id_col = (
-                "id_ingredient" if "id_ingredient" in ing_cols else ("id" if "id" in ing_cols else None)
-            )
-            if not ing_id_col:
-                return False
-
-            ing_df = query_to_df(
-                f"SELECT name FROM ingredients WHERE {ing_id_col} = :id",
-                {"id": ingredient_id},
-            )
-            if ing_df.empty:
-                return False
-            ing_name = str(ing_df.iloc[0]["name"])
-
-            df = query_to_df(
-                "SELECT COUNT(*) AS count FROM recipe_items WHERE ingredient_name = :name",
-                {"name": ing_name},
-            )
-            return (not df.empty) and (int(df.iloc[0]["count"]) > 0)
-
-        # Sem coluna compatível -> assume não usado
-        return False
-
-    except Exception:
-        # Se houver algum problema de schema/SQL, evita crash ao deletar.
-        # Melhor ser conservador? Aqui escolho 'não usado' para não travar o app.
-        # Se preferir bloquear deletar quando der erro, troque para `return True`.
-        return False
+    """Verifica se um ingrediente está em uso em receitas"""
+    result = query_to_df(
+        "SELECT COUNT(*) as count FROM recipe_items WHERE id_ingredient = :ingredient_id",
+        {"ingredient_id": ingredient_id}
+    )
+    return result.iloc[0]['count'] > 0
 
 def check_supplier_usage(supplier_name):
     """Verifica se um fornecedor tem compras associadas"""
@@ -1879,8 +1612,7 @@ def handle_delete_confirmation():
                 if check_ingredient_usage(delete_id):
                     st.error("Failed to delete ingredient. It may be used in recipes.")
                 else:
-                    id_col = get_table_id_column("ingredients")
-                    delete_data("ingredients", f"{id_col} = :id", {"id": delete_id})
+                    delete_data("ingredients", "id = :id", {"id": delete_id})
                     st.success(f"Ingredient '{delete_name}' deleted successfully!")
             
             elif delete_type == "supplier":
@@ -1908,7 +1640,7 @@ def handle_delete_confirmation():
             st.rerun()
 
 # Verificar se há confirmação pendente
-if st.session_state.delete_confirmation["type"] in ["supplier", "brewery"]:
+if st.session_state.delete_confirmation["type"] in ["ingredient", "supplier", "brewery"]:
     handle_delete_confirmation()
 
 # -----------------------------
@@ -3317,13 +3049,14 @@ elif page == "Ingredients":
                     manufacturer = st.text_input("Manufacturer", key="new_ing_manufacturer")
 
                     category_options = [
-                        "Fermentable",
+                        "Grain",
+                        "Malt Extract",
                         "Hops",
                         "Yeast",
-                        "Fruit",
-                        "Spice",
-                        "Brewing Salt",
-                        "Packaging",
+                        "Sugar",
+                        "Water Treatment",
+                        "Spices",
+                        "Fruits",
                         "Other",
                     ]
                     category = st.selectbox("Category*", category_options, key="new_ing_category")
@@ -3343,18 +3076,16 @@ elif page == "Ingredients":
                         step=0.1,
                         key="new_ing_threshold",
                     )
+
                 # Additional fields (inside the form, outside columns)
-                if category == "Hops":
-                    alpha_acid = st.number_input(
-                        "Alpha Acid % (Hops only)",
-                        min_value=0.0,
-                        max_value=100.0,
-                        value=0.0,
-                        step=0.1,
-                        key="new_ing_alpha",
-                    )
-                else:
-                    alpha_acid = 0.0
+                alpha_acid = st.number_input(
+                    "Alpha Acid % (for hops)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=0.0,
+                    step=0.1,
+                    key="new_ing_alpha",
+                )
                 lot_number = st.text_input("Lot/Batch Number", key="new_ing_lot")
                 expiry_date = st.date_input("Expiry Date (optional)", key="new_ing_expiry")
                 notes = st.text_area("Notes", key="new_ing_notes")
@@ -3439,9 +3170,10 @@ elif page == "Ingredients":
                         new_manufacturer = st.text_input("Manufacturer", value=ing_data.get("manufacturer", ""), key="edit_ing_manufacturer")
                         
                         category_options = [
-                            "Fermentable", "Hops", "Yeast", "Fruit", "Spice", "Brewing Salt", "Packaging", "Other"
+                            "Grain", "Malt Extract", "Hops", "Yeast", "Sugar", 
+                            "Water Treatment", "Spices", "Fruits", "Other"
                         ]
-                        current_category = ing_data.get("category", "Fermentable")
+                        current_category = ing_data.get("category", "Grain")
                         new_category = st.selectbox("Category", category_options, 
                                                   index=category_options.index(current_category) if current_category in category_options else 0,
                                                   key="edit_ing_category")
@@ -3459,7 +3191,7 @@ elif page == "Ingredients":
                     with col_edit2:
                         # Unit cost is calculated from Purchases (incl. freight allocation)
                         current_cost = float(ing_data.get("unit_cost", 0) or 0)
-                        st.metric("Current Unit Cost (calculated)", format_money(current_cost, currency_symbol="$", decimals=2, decimal_comma=True))
+                        st.metric("Current Unit Cost (calculated)", f"${current_cost:,.4f}")
 
                         # Supplier relationship
                         suppliers_df = data.get("suppliers", pd.DataFrame())
@@ -3534,87 +3266,29 @@ elif page == "Ingredients":
                             if 'new_expiry' in locals():
                                 updates["expiry_date"] = new_expiry if new_expiry else None
                             
-                            id_col = get_table_id_column("ingredients")
-                            pk_value = get_pk_value(ing_data, id_col)
-                            if pk_value is None:
-                                st.error('Could not resolve ingredient ID for this row. Please refresh and try again.')
-                                st.stop()
-                            update_data("ingredients", updates, f"{id_col} = :id", {"id": pk_value})
+                            update_data("ingredients", updates, "id = :id", {"id": ing_data["id"]})
                             data = get_all_data()
                             st.success(f"✅ Ingredient '{new_name}' updated successfully!")
                             st.rerun()
                     
                     with col_btn2:
                         if st.button("🗑️ Delete Ingredient", use_container_width=True, type="secondary", key="delete_ing_btn"):
-                            id_col = get_table_id_column("ingredients")
-                            pk_value = get_pk_value(ing_data, id_col)
-                            if pk_value is None:
-                                st.error('Could not resolve ingredient ID for deletion. Try refreshing the page.')
-                                st.stop()
                             # Verificar se o ingrediente está em uso em receitas
-                            in_use = check_ingredient_usage(pk_value)
+                            in_use = check_ingredient_usage(ing_data["id"])
                             
                             if in_use:
                                 st.error("Cannot delete ingredient that is used in recipes! Remove it from recipes first.")
                             else:
-                                id_col = get_table_id_column("ingredients")
-                                pk_value = get_pk_value(ing_data, id_col)
-                                st.session_state.delete_confirmation = {"type": "ingredient", "id": pk_value, "name": selected_ingredient}
+                                st.session_state.delete_confirmation = {"type": "ingredient", "id": ing_data["id"], "name": selected_ingredient}
                                 st.rerun()
                     
                     with col_btn3:
                         if st.button("🔄 Reset Stock", use_container_width=True, key="reset_stock_btn"):
                             # Apenas resetar o estoque para 0
-                            id_col = get_table_id_column("ingredients")
-                            pk_value = get_pk_value(ing_data, id_col)
-                            if pk_value is None:
-                                st.error('Could not resolve ingredient ID for stock reset. Try refreshing the page.')
-                                st.stop()
-                            update_data("ingredients", {"stock": 0}, f"{id_col} = :id", {"id": pk_value})
+                            update_data("ingredients", {"stock": 0}, "id = :id", {"id": ing_data["id"]})
                             data = get_all_data()
                             st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
                             st.rerun()
-
-                    # Inline delete confirmation (must appear directly below the Delete button)
-                    id_col = get_table_id_column("ingredients")
-                    current_ing_id = get_pk_value(ing_data, id_col)
-                    delete_conf = st.session_state.get("delete_confirmation", {"type": None})
-                    if delete_conf.get("type") == "ingredient" and delete_conf.get("id") == current_ing_id:
-                        st.markdown(f"""
-                        <div class="delete-confirmation">
-                            <h3>⚠️ Confirm Ingredient Deletion</h3>
-                            <p>Are you sure you want to delete <strong>'{delete_conf.get('name')}'</strong>?</p>
-                            <p>This action cannot be undone.</p>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                        c1, c2, c3 = st.columns([1, 1, 2])
-                        with c1:
-                            if st.button("✅ Yes, Delete", type="primary", use_container_width=True,
-                                         key=f"confirm_delete_ing_{current_ing_id}"):
-                                # Safety check: ingredient cannot be deleted if used in recipes
-                                if check_ingredient_usage(current_ing_id):
-                                    st.error("Failed to delete ingredient. It may be used in recipes.")
-                                else:
-                                    id_col = get_table_id_column("ingredients")
-                                    pk_value = get_pk_value(ing_data, id_col)
-                                    # Also purge any orphaned stock/purchase rows so the ingredient truly disappears from stock views
-                                    purge_ingredient_references(pk_value, delete_conf.get("name"))
-                                    rc = delete_data("ingredients", f"{id_col} = :id", {"id": pk_value})
-                                    if rc:
-                                        st.success(f"Ingredient '{delete_conf.get('name')}' deleted successfully!")
-                                    else:
-                                        st.error('Nothing was deleted (0 rows affected). This usually means the ID mapping did not match the database schema.')
-
-                                st.session_state.delete_confirmation = {"type": None, "id": None, "name": None}
-                                data = get_all_data()
-                                st.rerun()
-
-                        with c2:
-                            if st.button("❌ Cancel", use_container_width=True,
-                                         key=f"cancel_delete_ing_{current_ing_id}"):
-                                st.session_state.delete_confirmation = {"type": None, "id": None, "name": None}
-                                st.rerun()
             else:
                 st.info("No ingredients available to edit.")
         
@@ -3958,10 +3632,20 @@ elif page == "Purchases":
 
             ingredient_options = sorted(eligible_df["name"].dropna().astype(str).tolist())
 
+
+            # Unit dropdown options (from DB + some common units)
+            base_units = ["kg", "g", "lb", "oz", "l", "ml", "unit", "pcs", "pack"]
+            units_from_db = []
+            try:
+                if "unit" in eligible_df.columns:
+                    units_from_db = (eligible_df["unit"].dropna().astype(str).str.strip().unique().tolist())
+            except Exception:
+                units_from_db = []
+            unit_options = sorted({u for u in (units_from_db + base_units) if str(u).strip()}, key=lambda x: str(x).lower())
             # Keep a local working table in session state
             if "po_items_df" not in st.session_state:
                 st.session_state.po_items_df = pd.DataFrame(
-                    [{"Ingredient": "", "Quantity": 1.0, "Unit Price": 0.0}]
+                    [{"Ingredient": "", "Quantity": 1.0, "Unit": "", "Unit Price": 0.0}]
                 )
 
             edited_items = st.data_editor(
@@ -3982,6 +3666,11 @@ elif page == "Purchases":
                         format="%.3f",
                         required=False,
                     ),
+                    "Unit": st.column_config.SelectboxColumn(
+                        "Unit",
+                        options=[""] + unit_options,
+                        required=False,
+                    ),
                     "Unit Price": st.column_config.NumberColumn(
                         "Unit Price",
                         min_value=0.0,
@@ -3997,7 +3686,7 @@ elif page == "Purchases":
 
             # --- Preview / freight allocation ---
             items = edited_items.copy()
-            items = items.fillna({"Ingredient": "", "Quantity": 0.0, "Unit Price": 0.0})
+            items = items.fillna({"Ingredient": "", "Quantity": 0.0, "Unit": "", "Unit Price": 0.0})
             items = items[(items["Ingredient"].astype(str).str.len() > 0) & (items["Quantity"] > 0)]
 
             total_qty = float(items["Quantity"].sum()) if len(items) else 0.0
@@ -4008,11 +3697,12 @@ elif page == "Purchases":
                 ing = str(r["Ingredient"])
                 qty = float(r["Quantity"])
                 unit_price = float(r["Unit Price"])
-                unit = ""
-                try:
-                    unit = str(ingredients_df[ingredients_df["name"] == ing].iloc[0].get("unit", ""))
-                except Exception:
-                    unit = ""
+                unit = str(r.get("Unit", "") or "")
+                if not unit:
+                    try:
+                        unit = str(ingredients_df[ingredients_df["name"] == ing].iloc[0].get("unit", ""))
+                    except Exception:
+                        unit = ""
                 eff_unit_cost = unit_price + freight_per_unit
                 preview_rows.append(
                     {
@@ -4061,7 +3751,7 @@ elif page == "Purchases":
 
                     # Reset editor
                     st.session_state.po_items_df = pd.DataFrame(
-                        [{"Ingredient": "", "Quantity": 1.0, "Unit Price": 0.0}]
+                        [{"Ingredient": "", "Quantity": 1.0, "Unit": "", "Unit Price": 0.0}]
                     )
                     data = get_all_data()
                     st.success(f"✅ Order saved! #{order_number if order_number else po_id}")
