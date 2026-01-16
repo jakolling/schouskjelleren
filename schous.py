@@ -114,7 +114,7 @@ def require_login():
         with st.sidebar:
             st.caption(f"Signed in as: {st.session_state.get('auth_name')} ({st.session_state.get('auth_role')})")
             if st.button("🚪 Sign out"):
-                for k in ["logged_in","auth_user","auth_name","auth_role"]:
+                for k in ["logged_in","auth_user","auth_name","auth_role","view_mode"]:
                     st.session_state.pop(k, None)
                 st.rerun()
         return
@@ -127,6 +127,17 @@ def require_login():
         password = st.text_input("Password", value="", type="password")
         submitted = st.form_submit_button("Sign in")
 
+
+
+    # Public read-only mode (no login required)
+    view_mode = st.button("👀 ENTRAR EM MODO VISUALIZAÇÃO", use_container_width=True)
+    if view_mode:
+        st.session_state["logged_in"] = True
+        st.session_state["auth_user"] = "viewer"
+        st.session_state["auth_name"] = "View mode"
+        st.session_state["auth_role"] = "viewer"
+        st.session_state["view_mode"] = True
+        st.rerun()
     if not submitted:
         st.stop()
 
@@ -217,6 +228,10 @@ def get_table_columns_cached(table_name: str, dialect: str | None = None) -> lis
 
 def is_admin() -> bool:
     return st.session_state.get("auth_role") == "admin"
+
+
+def is_viewer() -> bool:
+    return not is_admin()
 
 def require_admin_action():
     """Bloqueio forte: viewers nunca escrevem no banco."""
@@ -1652,6 +1667,8 @@ page = st.sidebar.radio("Navigation", [
 ], key="page")
 st.sidebar.markdown("---")
 st.sidebar.info(f"👤 Role: {st.session_state.get('auth_role','viewer')}")
+if st.session_state.get('view_mode'):
+    st.sidebar.caption('👀 Visualização (somente leitura)')
 
 # -----------------------------
 # Dashboard Page
@@ -1907,6 +1924,23 @@ if page == "Dashboard":
 # -----------------------------
 elif page == "Breweries":
     st.title("🏭 Breweries & Equipment Management")
+
+
+    if is_viewer():
+        st.info('👀 Modo visualização: você pode navegar e gerar relatórios, mas não pode criar/editar/deletar nada.')
+        breweries_df = data.get('breweries', pd.DataFrame())
+        equipment_df = data.get('equipment', pd.DataFrame())
+        st.subheader('📍 Breweries')
+        if breweries_df is None or breweries_df.empty:
+            st.info('No breweries yet.')
+        else:
+            st.dataframe(breweries_df, use_container_width=True, height=320)
+        st.subheader('⚙️ Equipment')
+        if equipment_df is None or equipment_df.empty:
+            st.info('No equipment yet.')
+        else:
+            st.dataframe(equipment_df, use_container_width=True, height=320)
+        st.stop()
     
     brew_tabs = ["📍 Breweries", "⚙️ Equipment", "📊 Overview"]
     selected_brew_tab = st.radio("", brew_tabs, horizontal=True, key="breweries_tab")
@@ -2780,6 +2814,21 @@ elif page == "Breweries":
 # -----------------------------
 elif page == "Ingredients":
     st.title("🌾 Ingredients Management")
+
+
+    if is_viewer():
+        st.info('👀 Modo visualização: leitura apenas. Para editar ingredientes, faça login como admin.')
+        ingredients_df = data.get('ingredients', pd.DataFrame())
+        if ingredients_df is None or ingredients_df.empty:
+            st.info('No ingredients yet.')
+            st.stop()
+        view_cols = [c for c in ['name','manufacturer','category','stock','unit','unit_cost','low_stock_threshold','last_updated'] if c in ingredients_df.columns]
+        view_df = ingredients_df.copy()
+        st.subheader('📦 Ingredients')
+        st.dataframe(view_df[view_cols] if view_cols else view_df, use_container_width=True, height=520)
+        csv = (view_df[view_cols] if view_cols else view_df).to_csv(index=False).encode('utf-8')
+        st.download_button('📥 Export (CSV)', csv, file_name='ingredients.csv', mime='text/csv')
+        st.stop()
     
     # Tabs para Ingredients
     tab_stock, tab_add, tab_categories, tab_history = st.tabs([
@@ -3049,13 +3098,14 @@ elif page == "Ingredients":
                     manufacturer = st.text_input("Manufacturer", key="new_ing_manufacturer")
 
                     category_options = [
-                        "Fermentable",
+                        "Grain",
+                        "Malt Extract",
                         "Hops",
                         "Yeast",
-                        "Fruit",
-                        "Spice",
-                        "Brewing Salt",
-                        "Packaging",
+                        "Sugar",
+                        "Water Treatment",
+                        "Spices",
+                        "Fruits",
                         "Other",
                     ]
                     category = st.selectbox("Category*", category_options, key="new_ing_category")
@@ -3169,28 +3219,10 @@ elif page == "Ingredients":
                         new_manufacturer = st.text_input("Manufacturer", value=ing_data.get("manufacturer", ""), key="edit_ing_manufacturer")
                         
                         category_options = [
-                            "Fermentable",
-                            "Hops",
-                            "Yeast",
-                            "Fruit",
-                            "Spice",
-                            "Brewing Salt",
-                            "Packaging",
-                            "Other",
+                            "Grain", "Malt Extract", "Hops", "Yeast", "Sugar", 
+                            "Water Treatment", "Spices", "Fruits", "Other"
                         ]
-                        # Backward-compat: map older category labels into the new set
-                        _cat_raw = str(ing_data.get("category", "") or "")
-                        _cat_map = {
-                            "Grain": "Fermentable",
-                            "Malt Extract": "Fermentable",
-                            "Sugar": "Fermentable",
-                            "Water Treatment": "Brewing Salt",
-                            "Spices": "Spice",
-                            "Fruits": "Fruit",
-                        }
-                        current_category = _cat_map.get(_cat_raw, _cat_raw) or "Fermentable"
-                        if current_category not in category_options:
-                            current_category = "Fermentable"
+                        current_category = ing_data.get("category", "Grain")
                         new_category = st.selectbox("Category", category_options, 
                                                   index=category_options.index(current_category) if current_category in category_options else 0,
                                                   key="edit_ing_category")
@@ -3494,6 +3526,27 @@ elif page == "Ingredients":
 # -----------------------------
 elif page == "Purchases":
     st.title("🛒 Purchases & Inventory Management")
+
+
+    if is_viewer():
+        st.info('👀 Modo visualização: leitura apenas. Para registrar compras/fornecedores, faça login como admin.')
+        po = data.get('purchase_orders', pd.DataFrame())
+        poi = data.get('purchase_order_items', pd.DataFrame())
+        legacy = data.get('purchases', pd.DataFrame())
+        st.subheader('🧾 Purchase Orders')
+        if po is None or po.empty:
+            st.info('No purchase orders yet.')
+        else:
+            st.dataframe(po, use_container_width=True, height=260)
+        st.subheader('📦 Purchase Order Items')
+        if poi is None or poi.empty:
+            st.info('No purchase order items yet.')
+        else:
+            st.dataframe(poi, use_container_width=True, height=260)
+        if legacy is not None and not legacy.empty:
+            st.subheader('🗂️ Legacy Purchases')
+            st.dataframe(legacy, use_container_width=True, height=220)
+        st.stop()
     
     # Tabs para Purchases
     tab_new, tab_history, tab_suppliers, tab_reports = st.tabs([
@@ -3784,60 +3837,39 @@ elif page == "Purchases":
             items = items[(items["Ingredient"].astype(str).str.len() > 0) & (items["Quantity"] > 0)]
 
             total_qty = float(items["Quantity"].sum()) if len(items) else 0.0
-
-            # Supplier order confirmations typically total as:
-            #   subtotal = sum(qty * unit_price)
-            #   order_total = subtotal + freight_total
-            # For inventory valuation we still need an allocated freight per line.
-            # Allocating by subtotal works across mixed units (kg, unit, etc.).
-            subtotal = float((items["Quantity"] * items["Unit Price"]).sum()) if len(items) else 0.0
-            freight_total_float = float(freight_total) if freight_total else 0.0
+            freight_per_unit = (float(freight_total) / total_qty) if (transaction_type == "Purchase" and total_qty > 0) else 0.0
 
             preview_rows = []
             for _, r in items.iterrows():
                 ing = str(r["Ingredient"])
                 qty = float(r["Quantity"])
                 unit_price = float(r["Unit Price"])
-
                 # Unit is sourced from the ingredient registry during entry.
                 # Use it directly to avoid schema/name mismatches.
                 unit = str(r.get("Unit", "") or "")
-
-                line_subtotal = qty * unit_price
-                if transaction_type == "Purchase" and subtotal > 0:
-                    allocated_freight = freight_total_float * (line_subtotal / subtotal)
-                else:
-                    allocated_freight = 0.0
-
-                freight_per_unit_line = (allocated_freight / qty) if qty > 0 else 0.0
-                eff_unit_cost = unit_price + freight_per_unit_line
-
+                eff_unit_cost = unit_price + freight_per_unit
                 preview_rows.append(
                     {
                         "Ingredient": ing,
                         "Quantity": qty,
                         "Unit": unit,
                         "Unit Price": unit_price,
-                        "Line Subtotal": line_subtotal,
-                        "Allocated Freight": allocated_freight,
-                        "Freight / Unit": freight_per_unit_line,
+                        "Freight / Unit": freight_per_unit,
                         "Effective Unit Cost": eff_unit_cost,
-                        "Line Total": line_subtotal + allocated_freight,
+                        "Line Total": qty * eff_unit_cost,
                     }
                 )
 
             if preview_rows:
                 preview_df = pd.DataFrame(preview_rows)
 
-                col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+                col_p1, col_p2, col_p3 = st.columns(3)
                 with col_p1:
                     st.metric("Total Units", f"{total_qty:,.3f}")
                 with col_p2:
-                    st.metric("Subtotal", f"${subtotal:,.2f}")
+                    st.metric("Freight / Unit", f"${freight_per_unit:,.4f}")
                 with col_p3:
-                    st.metric("Freight", f"${freight_total_float:,.2f}")
-                with col_p4:
-                    st.metric("Order Total", f"${(subtotal + freight_total_float):,.2f}")
+                    st.metric("Order Total", f"${preview_df['Line Total'].sum():,.2f}")
 
                 st.dataframe(preview_df, use_container_width=True, height=300)
             else:
@@ -4555,6 +4587,23 @@ elif page == "Purchases":
 # -----------------------------
 elif page == "Recipes":
     st.title("📋 Recipe Management")
+
+
+    if is_viewer():
+        st.info('👀 Modo visualização: leitura apenas. Para criar/editar receitas, faça login como admin.')
+        recipes_df = data.get('recipes', pd.DataFrame())
+        items_df = data.get('recipe_items', pd.DataFrame())
+        st.subheader('📖 Recipes')
+        if recipes_df is None or recipes_df.empty:
+            st.info('No recipes yet.')
+        else:
+            st.dataframe(recipes_df, use_container_width=True, height=280)
+        st.subheader('🧾 Recipe Items')
+        if items_df is None or items_df.empty:
+            st.info('No recipe items yet.')
+        else:
+            st.dataframe(items_df, use_container_width=True, height=320)
+        st.stop()
     
     st.markdown("<div class='section-box'>", unsafe_allow_html=True)
     st.subheader("🍺 Recipe Datebase")
@@ -5111,6 +5160,17 @@ elif page == "Recipes":
 # -----------------------------
 elif page == "Production Orders":
     st.title("🏭 Production Management")
+
+
+    if is_viewer():
+        st.info('👀 Modo visualização: leitura apenas. Para criar/editar ordens de produção, faça login como admin.')
+        orders_df = data.get('production_orders', pd.DataFrame())
+        st.subheader('🏭 Production Orders')
+        if orders_df is None or orders_df.empty:
+            st.info('No production orders yet.')
+        else:
+            st.dataframe(orders_df, use_container_width=True, height=520)
+        st.stop()
     
     st.markdown("<div class='section-box'>", unsafe_allow_html=True)
     st.subheader("⚙️ Production Planning & Tracking")
@@ -5686,6 +5746,17 @@ elif page == "Production Orders":
 # -----------------------------
 elif page == "Calendar":
     st.title("📅 Production Calendar")
+
+
+    if is_viewer():
+        st.info('👀 Modo visualização: leitura apenas. Para adicionar/editar eventos, faça login como admin.')
+        events_df = data.get('calendar_events', pd.DataFrame())
+        st.subheader('📅 Calendar Events')
+        if events_df is None or events_df.empty:
+            st.info('No calendar events yet.')
+        else:
+            st.dataframe(events_df, use_container_width=True, height=520)
+        st.stop()
     
     tab_calendar, tab_events, tab_tasks = st.tabs([
         "📅 Calendar View",
