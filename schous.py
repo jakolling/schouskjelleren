@@ -166,6 +166,46 @@ def get_engine() -> Engine:
     # pool_pre_ping evita conexões “mortas”
     return create_engine(db_url, pool_pre_ping=True)
 
+
+# -----------------------------
+# PERFORMANCE HELPERS
+# -----------------------------
+
+def _get_db_version() -> int:
+    return int(st.session_state.get("db_version", 0) or 0)
+
+def bump_db_version() -> None:
+    st.session_state["db_version"] = _get_db_version() + 1
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_table_columns_cached(table_name: str, dialect: str) -> list[str]:
+    """Cache table columns to avoid repeated information_schema/PRAGMA hits."""
+    engine = get_engine()
+    cols: list[str] = []
+    try:
+        with engine.connect() as conn:
+            if dialect in {"postgresql", "postgres"}:
+                rows = conn.execute(
+                    sql_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() AND table_name = :t"
+                    ),
+                    {"t": table_name},
+                ).fetchall()
+                cols = [r[0] for r in rows]
+            else:
+                rows = conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()
+                cols = [r[1] for r in rows]
+    except Exception:
+        cols = []
+    return cols
+
+def get_table_columns(table_name: str) -> list[str]:
+    engine = get_engine()
+    dialect = engine.dialect.name.lower()
+    cols = _get_table_columns_cached(table_name, dialect)
+    return cols if cols else []
+
 def is_admin() -> bool:
     return st.session_state.get("auth_role") == "admin"
 
@@ -264,6 +304,8 @@ def init_database():
                 id_ingredient BIGSERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 category TEXT,
+                supplier_id BIGINT,
+                supplier_name TEXT,
                 supplier TEXT,
                 origin TEXT,
                 unit TEXT,
@@ -318,6 +360,31 @@ def init_database():
                 total_cost DOUBLE PRECISION,
                 purchase_date DATE,
                 notes TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+
+            # New (2026): purchase header + line items (purchase by order, not by item)
+            """CREATE TABLE IF NOT EXISTS purchase_orders (
+                id_purchase_order BIGSERIAL PRIMARY KEY,
+                transaction_type TEXT DEFAULT 'Purchase',
+                supplier TEXT,
+                order_number TEXT,
+                date DATE,
+                freight_total DOUBLE PRECISION DEFAULT 0,
+                notes TEXT,
+                recorded_by TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS purchase_order_items (
+                id_purchase_item BIGSERIAL PRIMARY KEY,
+                purchase_order_id BIGINT,
+                ingredient TEXT,
+                quantity DOUBLE PRECISION,
+                unit TEXT,
+                unit_price DOUBLE PRECISION,
+                freight_per_unit DOUBLE PRECISION,
+                effective_unit_cost DOUBLE PRECISION,
+                total_cost DOUBLE PRECISION,
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS production_orders (
@@ -405,6 +472,8 @@ def init_database():
                 id_ingredient INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 category TEXT,
+                supplier_id INTEGER,
+                supplier_name TEXT,
                 supplier TEXT,
                 origin TEXT,
                 unit TEXT,
@@ -459,6 +528,31 @@ def init_database():
                 total_cost REAL,
                 purchase_date DATE,
                 notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+
+            # New (2026): purchase header + line items (purchase by order, not by item)
+            """CREATE TABLE IF NOT EXISTS purchase_orders (
+                id_purchase_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_type TEXT DEFAULT 'Purchase',
+                supplier TEXT,
+                order_number TEXT,
+                date DATE,
+                freight_total REAL DEFAULT 0,
+                notes TEXT,
+                recorded_by TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS purchase_order_items (
+                id_purchase_item INTEGER PRIMARY KEY AUTOINCREMENT,
+                purchase_order_id INTEGER,
+                ingredient TEXT,
+                quantity REAL,
+                unit TEXT,
+                unit_price REAL,
+                freight_per_unit REAL,
+                effective_unit_cost REAL,
+                total_cost REAL,
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS production_orders (
@@ -538,15 +632,53 @@ def init_database():
     _ensure_columns(
         "ingredients",
         {
+            # Newer UI fields (keep legacy columns too)
+            "manufacturer": "TEXT",
             "category": "TEXT",
             "supplier": "TEXT",
+            "supplier_id": "BIGINT",
+            "supplier_name": "TEXT",
             "origin": "TEXT",
             "unit": "TEXT",
+            "stock": "DOUBLE PRECISION DEFAULT 0",
+            "unit_cost": "DOUBLE PRECISION DEFAULT 0",
+            "low_stock_threshold": "DOUBLE PRECISION DEFAULT 0",
+            "alpha_acid": "DOUBLE PRECISION DEFAULT 0",
+            "lot_number": "TEXT",
+            "expiry_date": "DATE",
+            "last_updated": "TIMESTAMPTZ",
             "cost_per_unit": "DOUBLE PRECISION",
             "quantity_in_stock": "DOUBLE PRECISION",
             "reorder_level": "DOUBLE PRECISION",
             "notes": "TEXT",
             "status": "TEXT",
+        },
+    )
+
+    # Purchase-by-order tables
+    _ensure_columns(
+        "purchase_orders",
+        {
+            "transaction_type": "TEXT",
+            "supplier": "TEXT",
+            "order_number": "TEXT",
+            "date": "DATE",
+            "freight_total": "DOUBLE PRECISION DEFAULT 0",
+            "notes": "TEXT",
+            "recorded_by": "TEXT",
+        },
+    )
+    _ensure_columns(
+        "purchase_order_items",
+        {
+            "purchase_order_id": "BIGINT",
+            "ingredient": "TEXT",
+            "quantity": "DOUBLE PRECISION",
+            "unit": "TEXT",
+            "unit_price": "DOUBLE PRECISION",
+            "freight_per_unit": "DOUBLE PRECISION",
+            "effective_unit_cost": "DOUBLE PRECISION",
+            "total_cost": "DOUBLE PRECISION",
         },
     )
 
@@ -665,6 +797,23 @@ def init_database():
         },
     )
 
+    # Suppliers: keep schema compatible across older deploys
+    _ensure_columns(
+        "suppliers",
+        {
+            "name": "TEXT",
+            "contact_person": "TEXT",
+            "phone": "TEXT",
+            "email": "TEXT",
+            "address": "TEXT",
+            "city": "TEXT",
+            "country": "TEXT",
+            "website": "TEXT",
+            "notes": "TEXT",
+            "status": "TEXT",
+        },
+    )
+
 
 def query_to_df(query: str, params: dict | None = None) -> pd.DataFrame:
     """Executa SELECT e retorna DateFrame."""
@@ -678,7 +827,11 @@ def execute_query(query: str, params: dict | None = None):
     engine = get_engine()
     with engine.begin() as conn:
         result = conn.execute(sql_text(query), params or {})
-        return result.rowcount
+    # cache-bust for reads
+    bump_db_version()
+    return result.rowcount
+
+
 
 def get_table_data(table_name: str) -> pd.DataFrame:
     return query_to_df(f"SELECT * FROM {table_name}")
@@ -703,23 +856,9 @@ def insert_data(table_name: str, data_dict: dict):
     require_admin_action()
     engine = get_engine()
     dialect = engine.dialect.name.lower()
-
-    # Fetch actual columns from DB
-    actual_cols: list[str] = []
+    # Fetch actual columns (cached)
     try:
-        with engine.connect() as conn:
-            if dialect in {"postgresql", "postgres"}:
-                rows = conn.execute(
-                    sql_text(
-                        "SELECT column_name FROM information_schema.columns "
-                        "WHERE table_schema = current_schema() AND table_name = :t"
-                    ),
-                    {"t": table_name},
-                ).fetchall()
-                actual_cols = [r[0] for r in rows]
-            else:
-                rows = conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()
-                actual_cols = [r[1] for r in rows]
+        actual_cols = get_table_columns_cached(table_name)
     except Exception:
         actual_cols = list(data_dict.keys())
 
@@ -747,6 +886,7 @@ def insert_data(table_name: str, data_dict: dict):
             with engine.begin() as conn:
                 res = conn.execute(sql_text(sql), filtered)
                 row = res.fetchone()
+                bump_db_version()
                 return row[0] if row else None
         except Exception as e:
             # retry without RETURNING (some schemas/PKs may differ)
@@ -754,6 +894,7 @@ def insert_data(table_name: str, data_dict: dict):
             try:
                 with engine.begin() as conn:
                     conn.execute(sql_text(sql2), filtered)
+                    bump_db_version()
                 return None
             except Exception as e2:
                 # Friendly, safe error message for admins (Streamlit redacts the original)
@@ -787,9 +928,11 @@ def insert_data(table_name: str, data_dict: dict):
             res = conn.execute(sql_text(sql), filtered)
             # SQLite may provide lastrowid
             try:
-                return res.lastrowid
+                rid = res.lastrowid
             except Exception:
-                return None
+                rid = None
+            bump_db_version()
+            return rid
 
 def update_data(table_name: str, data_dict: dict, where_clause: str, where_params: dict):
     """Update rows (admin only). Filters unknown columns and coerces numpy/pandas scalars."""
@@ -798,21 +941,9 @@ def update_data(table_name: str, data_dict: dict, where_clause: str, where_param
     where_params = where_params or {}
 
     engine = get_engine()
-
-    # Fetch actual columns from DB to avoid "UndefinedColumn" errors
-    dialect = engine.url.get_backend_name() if engine and engine.url else ""
-    actual_cols = []
-    try:
-        if dialect in {"postgresql", "postgres"}:
-            q = """SELECT column_name FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = :t"""
-            with engine.begin() as conn:
-                actual_cols = [r[0] for r in conn.execute(sql_text(q), {"t": table_name}).fetchall()]
-        else:
-            with engine.begin() as conn:
-                actual_cols = [r[1] for r in conn.execute(sql_text(f"PRAGMA table_info({table_name})")).fetchall()]
-    except Exception:
-        actual_cols = list(data_dict.keys())
+    # Fetch actual columns (cached) to avoid "UndefinedColumn" errors
+    dialect = engine.dialect.name.lower()
+    actual_cols = get_table_columns_cached(table_name, dialect) or list(data_dict.keys())
 
     # Keep only columns that exist
     filtered_updates = {k: _to_python_scalar(v) for k, v in data_dict.items() if k in set(actual_cols)}
@@ -828,7 +959,8 @@ def update_data(table_name: str, data_dict: dict, where_clause: str, where_param
     try:
         with engine.begin() as conn:
             res = conn.execute(sql_text(sql), params)
-            return res.rowcount
+            bump_db_version()
+        return res.rowcount
     except Exception as e:
         # If Postgres says a column doesn't exist, auto-add it as TEXT and retry once.
         orig = getattr(e, "orig", None)
@@ -841,7 +973,8 @@ def update_data(table_name: str, data_dict: dict, where_clause: str, where_param
                 _ensure_columns(table_name, {missing_col: "TEXT"})
                 with engine.begin() as conn:
                     res = conn.execute(sql_text(sql), params)
-                    return res.rowcount
+                    bump_db_version()
+            return res.rowcount
 
         # Show a safe error message (Streamlit otherwise redacts)
         st.error(f"Database error: {type(orig).__name__ if orig is not None else type(e).__name__}: {msg}")
@@ -854,20 +987,37 @@ def delete_data(table_name: str, where_clause: str, where_params: dict):
     engine = get_engine()
     with engine.begin() as conn:
         res = conn.execute(sql_text(sql), where_params or {})
-        return res.rowcount
+    bump_db_version()
+    return res.rowcount
 
-def get_all_data():
-    """Carrega todos os dados do banco em um dicionário de DateFrames.
-    Sem cache: quando o usuário abre o app (em qualquer lugar), ele vê o banco atualizado.
-    """
+def _get_all_data_uncached() -> dict[str, pd.DataFrame]:
+    """Loads all tables from DB (no cache)."""
     table_names = [
-        'ingredients', 'purchases', 'suppliers', 'recipes', 'recipe_items',
+        'ingredients',
+        # legacy (kept for backwards compatibility)
+        'purchases',
+        # purchase-by-order (preferred)
+        'purchase_orders', 'purchase_order_items',
+        'suppliers', 'recipes', 'recipe_items',
         'breweries', 'equipment', 'production_orders', 'calendar_events', 'team_members'
     ]
-    data = {}
+    data: dict[str, pd.DataFrame] = {}
     for table in table_names:
         data[table] = get_table_data(table)
     return data
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _get_all_data_cached(db_version: int) -> dict[str, pd.DataFrame]:
+    # db_version is only used to bust cache when writes happen
+    return _get_all_data_uncached()
+
+def get_all_data() -> dict[str, pd.DataFrame]:
+    """Cached all-tables snapshot.
+
+    This keeps the UI snappy when switching tabs / selectboxes, while still updating
+    quickly after writes (we bump db_version on every successful write).
+    """
+    return _get_all_data_cached(_get_db_version())
 
 # -----------------------------
 # FUNÇÕES DE MIGRAÇÃO E BACKUP
@@ -941,6 +1091,199 @@ def update_stock_from_purchase(ingredient_name, quantity):
         {"quantity": quantity, "ingredient_name": ingredient_name}
     )
 
+
+def update_stock_and_cost_from_purchase(ingredient_name: str, quantity: float, effective_unit_cost: float):
+    """Atualiza estoque + custo unitário (média ponderada) após uma compra.
+
+    O effective_unit_cost já deve incluir o rateio do frete por unidade.
+    """
+    try:
+        current = query_to_df(
+            "SELECT COALESCE(stock, 0) AS stock, COALESCE(unit_cost, 0) AS unit_cost FROM ingredients WHERE name = :n",
+            {"n": ingredient_name},
+        )
+        if current.empty:
+            # fallback: só atualiza estoque
+            return update_stock_from_purchase(ingredient_name, quantity)
+
+        cur_stock = float(current.iloc[0]["stock"] or 0)
+        cur_cost = float(current.iloc[0]["unit_cost"] or 0)
+        new_stock = cur_stock + float(quantity)
+
+        # média ponderada por estoque
+        if new_stock > 0:
+            new_cost = ((cur_stock * cur_cost) + (float(quantity) * float(effective_unit_cost))) / new_stock
+        else:
+            new_cost = float(effective_unit_cost)
+
+        return execute_query(
+            """UPDATE ingredients
+               SET stock = stock + :q,
+                   unit_cost = :c,
+                   last_updated = CURRENT_TIMESTAMP
+               WHERE name = :n""",
+            {"q": float(quantity), "c": float(new_cost), "n": ingredient_name},
+        )
+    except Exception:
+        # never block purchase flow
+        return update_stock_from_purchase(ingredient_name, quantity)
+
+
+
+def save_purchase_order_fast(
+    transaction_type: str,
+    supplier: str,
+    order_number: str,
+    po_date: date,
+    freight_total: float,
+    notes: str,
+    recorded_by: str,
+    preview_rows: list[dict],
+) -> int:
+    """Persist a purchase order + items in a single transaction (much faster).
+
+    - Inserts header and all items with executemany
+    - Updates ingredient stock and (for purchases) unit_cost by weighted average
+    """
+    require_admin_action()
+    engine = get_engine()
+    dialect = engine.dialect.name.lower()
+
+    header = {
+        "transaction_type": transaction_type,
+        "supplier": supplier,
+        "order_number": order_number,
+        "date": po_date,
+        "freight_total": float(freight_total) if transaction_type == "Purchase" else 0.0,
+        "notes": notes,
+        "recorded_by": recorded_by,
+    }
+
+    with engine.begin() as conn:
+        if dialect in {"postgresql", "postgres"}:
+            res = conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO purchase_orders (transaction_type, supplier, order_number, date, freight_total, notes, recorded_by)
+                    VALUES (:transaction_type, :supplier, :order_number, :date, :freight_total, :notes, :recorded_by)
+                    RETURNING id_purchase_order
+                    """
+                ),
+                header,
+            )
+            po_id = int(res.scalar_one())
+        else:
+            res = conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO purchase_orders (transaction_type, supplier, order_number, date, freight_total, notes, recorded_by)
+                    VALUES (:transaction_type, :supplier, :order_number, :date, :freight_total, :notes, :recorded_by)
+                    """
+                ),
+                header,
+            )
+            po_id = int(getattr(res, "lastrowid", 0) or 0)
+
+        items_payload = []
+        for row in preview_rows:
+            items_payload.append(
+                {
+                    "purchase_order_id": po_id,
+                    "ingredient": str(row["Ingredient"]),
+                    "quantity": float(row["Quantity"]),
+                    "unit": str(row.get("Unit", "") or ""),
+                    "unit_price": float(row["Unit Price"]),
+                    "freight_per_unit": float(row["Freight / Unit"]),
+                    "effective_unit_cost": float(row["Effective Unit Cost"]),
+                    "total_cost": float(row["Line Total"]),
+                }
+            )
+
+        if items_payload:
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO purchase_order_items (
+                        purchase_order_id, ingredient, quantity, unit,
+                        unit_price, freight_per_unit, effective_unit_cost, total_cost
+                    ) VALUES (
+                        :purchase_order_id, :ingredient, :quantity, :unit,
+                        :unit_price, :freight_per_unit, :effective_unit_cost, :total_cost
+                    )
+                    """
+                ),
+                items_payload,
+            )
+
+        # --- Stock / cost updates ---
+        # group by ingredient (in case user repeated an item)
+        agg = {}
+        for it in items_payload:
+            name = it["ingredient"]
+            a = agg.setdefault(name, {"qty": 0.0, "cost_total": 0.0})
+            a["qty"] += float(it["quantity"])
+            a["cost_total"] += float(it["quantity"]) * float(it["effective_unit_cost"])
+
+        names = list(agg.keys())
+        if names:
+            # fetch current stock/cost in a single query
+            params = {f"n{i}": n for i, n in enumerate(names)}
+            in_clause = ", ".join([f":n{i}" for i in range(len(names))])
+            cur_rows = conn.execute(
+                sql_text(
+                    f"SELECT name, COALESCE(stock,0) AS stock, COALESCE(unit_cost,0) AS unit_cost FROM ingredients WHERE name IN ({in_clause})"
+                ),
+                params,
+            ).fetchall()
+            cur_map = {r[0]: (float(r[1] or 0), float(r[2] or 0)) for r in cur_rows}
+
+            updates = []
+            for name in names:
+                cur_stock, cur_cost = cur_map.get(name, (0.0, 0.0))
+                add_qty = float(agg[name]["qty"])
+
+                if transaction_type == "Purchase":
+                    add_cost_total = float(agg[name]["cost_total"])
+                    new_stock = cur_stock + add_qty
+                    if new_stock > 0:
+                        new_cost = ((cur_stock * cur_cost) + add_cost_total) / new_stock
+                    else:
+                        new_cost = (add_cost_total / add_qty) if add_qty > 0 else cur_cost
+                    updates.append({"n": name, "q": add_qty, "c": float(new_cost)})
+                else:
+                    # Non-purchase transactions reduce stock
+                    updates.append({"n": name, "q": -add_qty, "c": cur_cost})
+
+            if updates:
+                if transaction_type == "Purchase":
+                    conn.execute(
+                        sql_text(
+                            """
+                            UPDATE ingredients
+                               SET stock = COALESCE(stock,0) + :q,
+                                   unit_cost = :c,
+                                   last_updated = CURRENT_TIMESTAMP
+                             WHERE name = :n
+                            """
+                        ),
+                        updates,
+                    )
+                else:
+                    conn.execute(
+                        sql_text(
+                            """
+                            UPDATE ingredients
+                               SET stock = COALESCE(stock,0) + :q,
+                                   last_updated = CURRENT_TIMESTAMP
+                             WHERE name = :n
+                            """
+                        ),
+                        [{"n": u["n"], "q": u["q"]} for u in updates],
+                    )
+
+    bump_db_version()
+    return po_id
+
 def update_stock_from_usage(ingredient_name, quantity):
     """Atualiza o estoque após uso em produção"""
     return execute_query(
@@ -958,11 +1301,15 @@ def check_ingredient_usage(ingredient_id):
 
 def check_supplier_usage(supplier_name):
     """Verifica se um fornecedor tem compras associadas"""
+    # Support both legacy purchases and the new purchase-by-order model
     result = query_to_df(
-        "SELECT COUNT(*) as count FROM purchases WHERE supplier = :supplier_name",
-        {"supplier_name": supplier_name}
+        """SELECT
+               (SELECT COUNT(*) FROM purchases WHERE supplier = :supplier_name) +
+               (SELECT COUNT(*) FROM purchase_orders WHERE supplier = :supplier_name)
+               AS count""",
+        {"supplier_name": supplier_name},
     )
-    return result.iloc[0]['count'] > 0
+    return (not result.empty) and (result.iloc[0]["count"] > 0)
 
 # -----------------------------
 # UI CONFIG
@@ -1081,11 +1428,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+
+@st.cache_resource(show_spinner=False)
+def ensure_db_initialized() -> bool:
+    """Run schema creation/migrations once per process for speed."""
+    init_database()
+    return True
 # -----------------------------
 # INICIALIZAÇÃO
 # -----------------------------
 # Inicializar banco de dados (cria tabelas se não existirem)
-init_database()
+ensure_db_initialized()
 
 # Carregar dados do banco
 data = get_all_data()
@@ -1284,7 +1638,7 @@ if st.session_state.delete_confirmation["type"] in ["ingredient", "supplier", "b
 # Navegação
 # -----------------------------
 page = st.sidebar.radio("Navigation", [
-    "Dashboard", "Breweries", "Ingredients", "Purchases", "Suppliers", 
+    "Dashboard", "Breweries", "Ingredients", "Purchases", 
     "Recipes", "Production Orders", "Calendar"
 ], key="page")
 st.sidebar.markdown("---")
@@ -2607,55 +2961,180 @@ elif page == "Ingredients":
             key="ing_action"
         )
         
+
         if action == "Add New Ingredient":
+            # Supplier selection is managed OUTSIDE the ingredient form
+            # (Streamlit forbids st.button inside st.form)
+            suppliers_df = data.get("suppliers", pd.DataFrame())
+            supplier_options = (
+                suppliers_df["name"].dropna().astype(str).tolist() if not suppliers_df.empty else []
+            )
+
+            selected_supplier = st.selectbox(
+                "Supplier*",
+                ["Select Supplier"] + supplier_options,
+                key="new_ing_supplier_select",
+            )
+
+            if st.button("➕ Add new supplier", key="new_ing_add_supplier_btn", use_container_width=True):
+                st.session_state["new_ing_show_add_supplier"] = True
+
+            if st.session_state.get("new_ing_show_add_supplier"):
+                st.markdown("**Add new supplier**")
+                with st.form("new_ing_add_supplier_form", clear_on_submit=True):
+                    sup_name = st.text_input("Supplier Name*", key="new_ing_new_sup_name")
+                    contact_person = st.text_input("Contact Person", key="new_ing_new_sup_contact")
+                    email = st.text_input("Email", key="new_ing_new_sup_email")
+                    phone = st.text_input("Phone", key="new_ing_new_sup_phone")
+                    notes_sup = st.text_area("Notes", key="new_ing_new_sup_notes")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        submitted_sup = st.form_submit_button(
+                            "Save supplier", type="primary", use_container_width=True
+                        )
+                    with col_b:
+                        cancelled_sup = st.form_submit_button("Cancel", use_container_width=True)
+
+                if submitted_sup:
+                    if not sup_name:
+                        st.error("Supplier name is required!")
+                    else:
+                        # Avoid duplicates (case-insensitive)
+                        if (
+                            not suppliers_df.empty
+                            and (suppliers_df["name"].astype(str).str.lower() == str(sup_name).lower()).any()
+                        ):
+                            canonical = suppliers_df.loc[
+                                suppliers_df["name"].astype(str).str.lower() == str(sup_name).lower(),
+                                "name",
+                            ].iloc[0]
+                            st.session_state["new_ing_supplier_select"] = str(canonical)
+                        else:
+                            insert_data(
+                                "suppliers",
+                                {
+                                    "name": sup_name,
+                                    "contact_person": contact_person,
+                                    "email": email,
+                                    "phone": phone,
+                                    "notes": notes_sup,
+                                },
+                            )
+                            st.session_state["new_ing_supplier_select"] = str(sup_name)
+
+                        st.session_state["new_ing_show_add_supplier"] = False
+                        data = get_all_data()
+                        st.success(f"✅ Supplier '{sup_name}' added!")
+                        st.rerun()
+
+                if cancelled_sup:
+                    st.session_state["new_ing_show_add_supplier"] = False
+                    st.rerun()
+
+            # Ingredient details form (ONLY st.form_submit_button inside)
             with st.form("add_ingredient_form", clear_on_submit=True):
                 col_form1, col_form2 = st.columns(2)
-                
+
                 with col_form1:
                     ing_name = st.text_input("Ingredient Name*", key="new_ing_name")
                     manufacturer = st.text_input("Manufacturer", key="new_ing_manufacturer")
-                    
+
                     category_options = [
-                        "Fermentable", "Yeast", "Hops", "Fruit", "Spice",
-                        "Packaging", "Brewing Salt", "Process Adjunct", "Gas", "Other"
+                        "Grain",
+                        "Malt Extract",
+                        "Hops",
+                        "Yeast",
+                        "Sugar",
+                        "Water Treatment",
+                        "Spices",
+                        "Fruits",
+                        "Other",
                     ]
                     category = st.selectbox("Category*", category_options, key="new_ing_category")
-                    
+
                     unit_options = ["kg", "g", "lb", "oz", "L", "mL", "pkg", "unit"]
                     unit = st.selectbox("Unit*", unit_options, key="new_ing_unit")
-                    
-                    stock = st.number_input("Initial Stock*", min_value=0.0, value=0.0, step=0.1, key="new_ing_stock")
-                
+
+                    stock = st.number_input(
+                        "Initial Stock*", min_value=0.0, value=0.0, step=0.1, key="new_ing_stock"
+                    )
+
                 with col_form2:
-                    unit_cost = st.number_input("Unit Cost*", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="new_ing_cost")
-                    low_stock_threshold = st.number_input("Low Stock Threshold*", min_value=0.0, value=10.0, step=0.1, key="new_ing_threshold")
-                    
-                    # Campos adicionais
-                    alpha_acid = st.number_input("Alpha Acid % (for hops)", min_value=0.0, max_value=100.0, value=0.0, step=0.1, key="new_ing_alpha")
-                    lot_number = st.text_input("Lot/Batch Number", key="new_ing_lot")
-                    expiry_date = st.date_input("Expiry Date (optional)", key="new_ing_expiry")
-                
+                    low_stock_threshold = st.number_input(
+                        "Low Stock Threshold*",
+                        min_value=0.0,
+                        value=10.0,
+                        step=0.1,
+                        key="new_ing_threshold",
+                    )
+
+                # Additional fields (inside the form, outside columns)
+                alpha_acid = st.number_input(
+                    "Alpha Acid % (for hops)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=0.0,
+                    step=0.1,
+                    key="new_ing_alpha",
+                )
+                lot_number = st.text_input("Lot/Batch Number", key="new_ing_lot")
+                expiry_date = st.date_input("Expiry Date (optional)", key="new_ing_expiry")
                 notes = st.text_area("Notes", key="new_ing_notes")
-                
-                submitted = st.form_submit_button("➕ Add Ingredient", type="primary", use_container_width=True)
+
+                submitted = st.form_submit_button(
+                    "➕ Add Ingredient", type="primary", use_container_width=True
+                )
+
                 if submitted:
-                    if not ing_name or unit_cost <= 0:
-                        st.error("Ingredient name and unit cost are required!")
+                    if not ing_name or (selected_supplier == "Select Supplier"):
+                        st.error("Ingredient name and supplier are required!")
                     else:
+                        # Resolve supplier_id from suppliers table (best effort)
+                        suppliers_df2 = data.get("suppliers", pd.DataFrame())
+                        sid = None
+                        if (
+                            not suppliers_df2.empty
+                            and selected_supplier
+                            and selected_supplier != "Select Supplier"
+                        ):
+                            id_col = (
+                                "id_supplier"
+                                if "id_supplier" in suppliers_df2.columns
+                                else ("id" if "id" in suppliers_df2.columns else None)
+                            )
+                            if id_col:
+                                try:
+                                    sid = int(
+                                        suppliers_df2.loc[
+                                            suppliers_df2["name"].astype(str) == str(selected_supplier),
+                                            id_col,
+                                        ].iloc[0]
+                                    )
+                                except Exception:
+                                    sid = None
+
                         new_ingredient = {
                             "name": ing_name,
                             "manufacturer": manufacturer,
                             "category": category,
                             "unit": unit,
                             "stock": stock,
-                            "unit_cost": unit_cost,
+                            # Prices/costs are calculated from Purchases (incl. freight allocation)
+                            "unit_cost": 0.0,
                             "low_stock_threshold": low_stock_threshold,
                             "alpha_acid": alpha_acid if category == "Hops" else 0.0,
                             "lot_number": lot_number,
                             "expiry_date": expiry_date if expiry_date else None,
-                            "notes": notes
+                            "supplier_id": sid,
+                            "supplier_name": None
+                            if selected_supplier == "Select Supplier"
+                            else str(selected_supplier),
+                            "supplier": None
+                            if selected_supplier == "Select Supplier"
+                            else str(selected_supplier),
+                            "notes": notes,
                         }
-                        
+
                         insert_data("ingredients", new_ingredient)
                         data = get_all_data()
                         st.success(f"✅ Ingredient '{ing_name}' added successfully!")
@@ -2682,10 +3161,10 @@ elif page == "Ingredients":
                         new_manufacturer = st.text_input("Manufacturer", value=ing_data.get("manufacturer", ""), key="edit_ing_manufacturer")
                         
                         category_options = [
-                        "Fermentable", "Yeast", "Hops", "Fruit", "Spice",
-                        "Packaging", "Brewing Salt", "Process Adjunct", "Gas", "Other"
-                    ]
-                        current_category = ing_data.get("category", "Fermentable")
+                            "Grain", "Malt Extract", "Hops", "Yeast", "Sugar", 
+                            "Water Treatment", "Spices", "Fruits", "Other"
+                        ]
+                        current_category = ing_data.get("category", "Grain")
                         new_category = st.selectbox("Category", category_options, 
                                                   index=category_options.index(current_category) if current_category in category_options else 0,
                                                   key="edit_ing_category")
@@ -2701,13 +3180,26 @@ elif page == "Ingredients":
                                                   min_value=0.0, step=0.1, key="edit_ing_stock")
                     
                     with col_edit2:
-                        new_unit_cost = st.number_input("Unit Cost", 
-                                                      value=float(ing_data.get("unit_cost", 0)), 
-                                                      min_value=0.0, step=0.01, format="%.2f", key="edit_ing_cost")
-                        new_threshold = st.number_input("Low Stock Threshold", 
-                                                      value=float(ing_data.get("low_stock_threshold", 10)), 
-                                                      min_value=0.0, step=0.1, key="edit_ing_threshold")
-                        
+                        # Unit cost is calculated from Purchases (incl. freight allocation)
+                        current_cost = float(ing_data.get("unit_cost", 0) or 0)
+                        st.metric("Current Unit Cost (calculated)", f"${current_cost:,.4f}")
+
+                        # Supplier relationship
+                        suppliers_df = data.get("suppliers", pd.DataFrame())
+                        supplier_options = suppliers_df["name"].dropna().astype(str).tolist() if not suppliers_df.empty else []
+                        current_supplier = str(ing_data.get("supplier_name") or ing_data.get("supplier") or "")
+                        sup_choices = ["Select Supplier"] + supplier_options
+                        sup_index = sup_choices.index(current_supplier) if current_supplier in sup_choices else 0
+                        new_supplier = st.selectbox("Supplier", sup_choices, index=sup_index, key="edit_ing_supplier")
+
+                        new_threshold = st.number_input(
+                            "Low Stock Threshold",
+                            value=float(ing_data.get("low_stock_threshold", 10) or 0),
+                            min_value=0.0,
+                            step=0.1,
+                            key="edit_ing_threshold",
+                        )
+
                         # Campos específicos para lúpulo
                         if new_category == "Hops":
                             new_alpha = st.number_input("Alpha Acid %", 
@@ -2731,13 +3223,31 @@ elif page == "Ingredients":
                     with col_btn1:
                         if st.button("💾 Save Changes", use_container_width=True, key="save_ing_btn"):
                             # Atualizar dados
+                            # Resolve supplier_id (best effort)
+                            suppliers_df_edit = data.get("suppliers", pd.DataFrame())
+                            new_supplier_id = None
+                            if not suppliers_df_edit.empty and new_supplier and new_supplier != "Select Supplier":
+                                id_col = "id_supplier" if "id_supplier" in suppliers_df_edit.columns else ("id" if "id" in suppliers_df_edit.columns else None)
+                                if id_col:
+                                    try:
+                                        new_supplier_id = int(
+                                            suppliers_df_edit.loc[
+                                                suppliers_df_edit["name"].astype(str) == str(new_supplier),
+                                                id_col,
+                                            ].iloc[0]
+                                        )
+                                    except Exception:
+                                        new_supplier_id = None
+
                             updates = {
                                 "name": new_name,
                                 "manufacturer": new_manufacturer,
                                 "category": new_category,
                                 "unit": new_unit,
                                 "stock": new_stock,
-                                "unit_cost": new_unit_cost,
+                                "supplier_id": new_supplier_id,
+                                "supplier_name": None if new_supplier == "Select Supplier" else str(new_supplier),
+                                "supplier": None if new_supplier == "Select Supplier" else str(new_supplier),
                                 "low_stock_threshold": new_threshold,
                                 "alpha_acid": new_alpha,
                                 "lot_number": new_lot,
@@ -2969,476 +3479,660 @@ elif page == "Purchases":
     
     with tab_new:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-        st.subheader("🛍️ Record New Purchase")
-        
-        # Formulário de compra
-        col_pur1, col_pur2 = st.columns(2)
-        
-        with col_pur1:
-            # Selecionar tipo de transação
+        st.subheader("🧾 Record Purchase (by Order)")
+        st.caption(
+            "Supplier + order number first, then add multiple items. "
+            "The *freight total* is automatically allocated per unit across all items and included in the effective unit cost."
+        )
+
+        ingredients_df = data.get("ingredients", pd.DataFrame())
+        suppliers_df = data.get("suppliers", pd.DataFrame())
+
+        # --- Header ---
+        col_h1, col_h2, col_h3 = st.columns(3)
+        with col_h1:
             transaction_type = st.selectbox(
                 "Transaction Type*",
                 ["Purchase", "Return", "Adjustment", "Sample", "Other"],
-                key="purchase_type"
+                key="po_type",
             )
-            
-            # Selecionar ingrediente
-            ingredients_df = data.get("ingredients", pd.DataFrame())
-            if not ingredients_df.empty:
-                ingredient_options = ingredients_df["name"].tolist()
-                selected_ingredient = st.selectbox(
-                    "Ingredient*",
-                    ingredient_options,
-                    key="purchase_ingredient"
-                )
-                
-                # Mostrar informações atuais do ingrediente
-                if selected_ingredient:
-                    ing_info = ingredients_df[ingredients_df["name"] == selected_ingredient].iloc[0]
-                    st.info(f"""
-                    **Current Stock:** {ing_info['stock']} {ing_info['unit']}  
-                    **Low Stock Threshold:** {ing_info.get('low_stock_threshold', 'N/A')} {ing_info['unit']}  
-                    **Unit Cost:** ${ing_info['unit_cost']:.2f}
-                    """)
-            else:
-                st.warning("⚠️ No ingredients available. Please add ingredients first.")
-                selected_ingredient = None
-            
-            # Quantity e unidade
-            quantity = st.number_input("Quantity*", min_value=0.01, value=1.0, step=0.1, key="purchase_quantity")
-            
-            if selected_ingredient:
-                ing_info = ingredients_df[ingredients_df["name"] == selected_ingredient].iloc[0]
-                unit = st.text_input("Unit", value=ing_info['unit'], disabled=True, key="purchase_unit")
-            else:
-                unit = st.text_input("Unit*", key="purchase_unit_free")
-        
-        with col_pur2:
-            # Fornecedor
-            suppliers_df = data.get("suppliers", pd.DataFrame())
-            if not suppliers_df.empty:
-                supplier_options = suppliers_df["name"].tolist()
-                supplier = st.selectbox(
-                    "Supplier*",
-                    ["Select Supplier"] + supplier_options,
-                    key="purchase_supplier"
-                )
-            else:
-                supplier = st.text_input("Supplier*", key="purchase_supplier_text")
-            
-            # Informações de cost
-            unit_cost = st.number_input("Unit Cost*", min_value=0.0, value=0.0, step=0.01, format="%.2f", key="purchase_unit_cost")
-            
-            # Calcular custo total automaticamente
-            total_cost = quantity * unit_cost
-            st.metric("Total Cost", f"${total_cost:.2f}")
-            
-            # Número do pedido
-            order_number = st.text_input("Order/Purchase Number", key="purchase_order")
-            
-            # Date
-            purchase_date = st.date_input("Purchase Date", datetime.now().date(), key="purchase_date")
-            
-            # É um pedido de estoque baixo?
-            is_low_stock_order = st.checkbox("Low Stock Replenishment", key="purchase_low_stock")
-        
-        # Campos adicionais
-        col_pur3, col_pur4 = st.columns(2)
-        with col_pur3:
-            manufacturer = st.text_input("Manufacturer (if different)", key="purchase_manufacturer")
-            package = st.selectbox(
-                "Package Type",
-                ["Sack", "Bag", "Box", "Drum", "Canister", "Bottle", "Other"],
-                key="purchase_package"
+        with col_h2:
+            supplier_options = (
+                suppliers_df["name"].dropna().astype(str).tolist() if not suppliers_df.empty else []
             )
-        with col_pur4:
-            lot_number = st.text_input("Lot/Batch Number", key="purchase_lot")
-            expiry_date = st.date_input("Expiry Date (optional)", key="purchase_expiry")
-        
-        notes = st.text_area("Notes", placeholder="Any additional notes about this purchase...", key="purchase_notes")
-        
-        # Botão de ação
-        if st.button("💾 Record Purchase", type="primary", use_container_width=True, key="record_purchase_btn"):
-            if not selected_ingredient or unit_cost <= 0 or quantity <= 0:
-                st.error("Please fill all required fields (Ingredient, Unit Cost, Quantity)")
-            else:
-                # Criar registro de compra
-                new_purchase = {
-                    "transaction_type": transaction_type,
-                    "ingredient": selected_ingredient,
-                    "manufacturer": manufacturer if manufacturer else ingredients_df[ingredients_df["name"] == selected_ingredient]["manufacturer"].iloc[0],
-                    "supplier": supplier,
-                    "quantity": quantity,
-                    "unit": unit,
-                    "total_cost": total_cost,
-                    "unit_cost": unit_cost,
-                    "order_number": order_number,
-                    "date": purchase_date,
-                    "notes": notes,
-                    "package": package,
-                    "lot_number": lot_number,
-                    "expiry_date": expiry_date if expiry_date else None,
-                    "is_low_stock_order": 1 if is_low_stock_order else 0,
-                    "recorded_by": "User"
-                }
-                
-                # Add à tabela de compras
-                insert_data("purchases", new_purchase)
-                
-                # Atualizar estoque
-                if transaction_type == "Purchase":
-                    update_stock_from_purchase(selected_ingredient, quantity)
-                
-                # Atualizar dados
-                data = get_all_data()
-                st.success(f"✅ Purchase recorded successfully! Order #{order_number if order_number else 'N/A'}")
-                st.rerun()
-        
-        # Ações rápidas
+
+            supplier = st.selectbox(
+                "Supplier*",
+                ["Select Supplier"] + supplier_options,
+                key="po_supplier",
+            )
+
+            # Supplier management happens through Purchases
+            if st.button("➕ Add new supplier", key="po_add_supplier_btn", use_container_width=True):
+                st.session_state["po_show_add_supplier"] = True
+
+            if st.session_state.get("po_show_add_supplier"):
+                st.markdown("**Add new supplier**")
+                with st.form("po_add_supplier_form", clear_on_submit=True):
+                    sup_name = st.text_input("Supplier Name*", key="po_new_sup_name")
+                    contact_person = st.text_input("Contact Person", key="po_new_sup_contact")
+                    email = st.text_input("Email", key="po_new_sup_email")
+                    phone = st.text_input("Phone", key="po_new_sup_phone")
+                    notes = st.text_area("Notes", key="po_new_sup_notes")
+                    submitted = st.form_submit_button("Save supplier", type="primary", use_container_width=True)
+
+                if submitted:
+                    if not sup_name:
+                        st.error("Supplier name is required!")
+                    else:
+                        # If supplier already exists, just select it
+                        if suppliers_df is not None and not suppliers_df.empty and (suppliers_df["name"].astype(str).str.lower() == str(sup_name).lower()).any():
+                            # Pick the canonical stored name
+                            canonical = suppliers_df.loc[
+                                suppliers_df["name"].astype(str).str.lower() == str(sup_name).lower(),
+                                "name",
+                            ].iloc[0]
+                            st.session_state["po_supplier"] = str(canonical)
+                        else:
+                            insert_data(
+                                "suppliers",
+                                {
+                                    "name": sup_name,
+                                    "contact_person": contact_person,
+                                    "email": email,
+                                    "phone": phone,
+                                    "notes": notes,
+                                },
+                            )
+                            st.session_state["po_supplier"] = str(sup_name)
+
+                        st.session_state["po_show_add_supplier"] = False
+                        data = get_all_data()
+                        st.success(f"✅ Supplier '{sup_name}' added!")
+                        st.rerun()
+
+                if st.button("Cancel", key="po_cancel_add_supplier", use_container_width=True):
+                    st.session_state["po_show_add_supplier"] = False
+                    st.rerun()
+        with col_h3:
+
+            order_number = st.text_input("Order / Purchase Number", key="po_order_number")
+
+        col_h4, col_h5 = st.columns(2)
+        with col_h4:
+            po_date = st.date_input("Purchase Date", datetime.now().date(), key="po_date")
+        with col_h5:
+            freight_total = st.number_input(
+                "Freight Total",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                format="%.2f",
+                disabled=(transaction_type != "Purchase"),
+                key="po_freight_total",
+            )
+        notes = st.text_area("Notes", placeholder="Any additional notes for this order…", key="po_notes")
+
         st.markdown("---")
-        st.subheader("⚡ Quick Actions")
-        
-        col_q1, col_q2, col_q3 = st.columns(3)
-        with col_q1:
-            if st.button("📋 Create Purchase Order", use_container_width=True, key="quick_po"):
-                st.info("Purchase order template will be generated")
-        with col_q2:
-            if st.button("🔄 Stock Adjustment", use_container_width=True, key="quick_adjust"):
-                st.info("Redirecting to stock adjustment")
-        with col_q3:
-            if st.button("📦 Low Stock Report", use_container_width=True, key="quick_report"):
-                st.info("Generating low stock report")
+        st.subheader("🧺 Items")
+
+        if ingredients_df.empty:
+            st.warning("⚠️ No ingredients available. Please add ingredients first.")
+        else:
+            # Filter ingredients by supplier relationship
+            eligible_df = ingredients_df.copy()
+
+            if supplier and supplier != "Select Supplier" and not suppliers_df.empty:
+                # Try to resolve supplier id from suppliers table
+                id_col = "id_supplier" if "id_supplier" in suppliers_df.columns else ("id" if "id" in suppliers_df.columns else None)
+                supplier_id = None
+                if id_col:
+                    try:
+                        supplier_id = int(
+                            suppliers_df.loc[suppliers_df["name"].astype(str) == str(supplier), id_col].iloc[0]
+                        )
+                    except Exception:
+                        supplier_id = None
+
+                # Backward-compatible matching: supplier_id OR supplier_name OR legacy supplier text
+                mask = pd.Series([False] * len(eligible_df), index=eligible_df.index)
+
+                if supplier_id is not None and "supplier_id" in eligible_df.columns:
+                    try:
+                        mask = mask | (eligible_df["supplier_id"].astype(object) == supplier_id)
+                        mask = mask | (eligible_df["supplier_id"].astype(str) == str(supplier_id))
+                    except Exception:
+                        pass
+
+                if "supplier_name" in eligible_df.columns:
+                    try:
+                        mask = mask | (eligible_df["supplier_name"].astype(str).str.lower() == str(supplier).lower())
+                    except Exception:
+                        pass
+
+                if "supplier" in eligible_df.columns:
+                    try:
+                        mask = mask | (eligible_df["supplier"].astype(str).str.lower() == str(supplier).lower())
+                    except Exception:
+                        pass
+
+                eligible_df = eligible_df[mask]
+
+            if supplier and supplier != "Select Supplier" and eligible_df.empty:
+                st.warning("⚠️ This supplier has no linked ingredients yet. Add ingredients and link them to this supplier first.")
+
+            ingredient_options = sorted(eligible_df["name"].dropna().astype(str).tolist())
+
+            # Keep a local working table in session state
+            if "po_items_df" not in st.session_state:
+                st.session_state.po_items_df = pd.DataFrame(
+                    [{"Ingredient": "", "Quantity": 1.0, "Unit Price": 0.0}]
+                )
+
+            edited_items = st.data_editor(
+                st.session_state.po_items_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Ingredient": st.column_config.SelectboxColumn(
+                        "Ingredient",
+                        options=[""] + ingredient_options,
+                        required=False,
+                    ),
+                    "Quantity": st.column_config.NumberColumn(
+                        "Quantity",
+                        min_value=0.0,
+                        step=0.1,
+                        format="%.3f",
+                        required=False,
+                    ),
+                    "Unit Price": st.column_config.NumberColumn(
+                        "Unit Price",
+                        min_value=0.0,
+                        step=0.01,
+                        format="%.2f",
+                        required=False,
+                    ),
+                },
+                key="po_items_editor",
+            )
+
+            st.session_state.po_items_df = edited_items
+
+            # --- Preview / freight allocation ---
+            items = edited_items.copy()
+            items = items.fillna({"Ingredient": "", "Quantity": 0.0, "Unit Price": 0.0})
+            items = items[(items["Ingredient"].astype(str).str.len() > 0) & (items["Quantity"] > 0)]
+
+            total_qty = float(items["Quantity"].sum()) if len(items) else 0.0
+            freight_per_unit = (float(freight_total) / total_qty) if (transaction_type == "Purchase" and total_qty > 0) else 0.0
+
+            preview_rows = []
+            for _, r in items.iterrows():
+                ing = str(r["Ingredient"])
+                qty = float(r["Quantity"])
+                unit_price = float(r["Unit Price"])
+                unit = ""
+                try:
+                    unit = str(ingredients_df[ingredients_df["name"] == ing].iloc[0].get("unit", ""))
+                except Exception:
+                    unit = ""
+                eff_unit_cost = unit_price + freight_per_unit
+                preview_rows.append(
+                    {
+                        "Ingredient": ing,
+                        "Quantity": qty,
+                        "Unit": unit,
+                        "Unit Price": unit_price,
+                        "Freight / Unit": freight_per_unit,
+                        "Effective Unit Cost": eff_unit_cost,
+                        "Line Total": qty * eff_unit_cost,
+                    }
+                )
+
+            if preview_rows:
+                preview_df = pd.DataFrame(preview_rows)
+
+                col_p1, col_p2, col_p3 = st.columns(3)
+                with col_p1:
+                    st.metric("Total Units", f"{total_qty:,.3f}")
+                with col_p2:
+                    st.metric("Freight / Unit", f"${freight_per_unit:,.4f}")
+                with col_p3:
+                    st.metric("Order Total", f"${preview_df['Line Total'].sum():,.2f}")
+
+                st.dataframe(preview_df, use_container_width=True, height=300)
+            else:
+                st.info("Add at least one item (Ingredient + Quantity) to preview the allocation.")
+
+            # --- Save ---
+            if st.button("💾 Record Purchase Order", type="primary", use_container_width=True, key="po_save_btn"):
+                if (not supplier) or (supplier == "Select Supplier"):
+                    st.error("Please select a supplier.")
+                elif not preview_rows:
+                    st.error("Please add at least one valid item.")
+                else:
+                    po_id = save_purchase_order_fast(
+                        transaction_type=transaction_type,
+                        supplier=supplier,
+                        order_number=order_number,
+                        po_date=po_date,
+                        freight_total=float(freight_total),
+                        notes=notes,
+                        recorded_by="User",
+                        preview_rows=preview_rows,
+                    )
+
+                    # Reset editor
+                    st.session_state.po_items_df = pd.DataFrame(
+                        [{"Ingredient": "", "Quantity": 1.0, "Unit Price": 0.0}]
+                    )
+                    data = get_all_data()
+                    st.success(f"✅ Order saved! #{order_number if order_number else po_id}")
+                    st.rerun()
         
         st.markdown("</div>", unsafe_allow_html=True)
     
     with tab_history:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📜 Purchase History")
-        
-        purchases_df = data.get("purchases", pd.DataFrame())
-        if not purchases_df.empty:
-            # Filtros avançados
+
+        # Prefer purchase-by-order tables
+        orders_df = data.get("purchase_orders", pd.DataFrame())
+        items_df = data.get("purchase_order_items", pd.DataFrame())
+        legacy_purchases_df = data.get("purchases", pd.DataFrame())
+
+        if not orders_df.empty and not items_df.empty:
+            # Build a line-level dataframe (items + header)
+            merged = items_df.merge(
+                orders_df,
+                left_on="purchase_order_id",
+                right_on="id_purchase_order",
+                how="left",
+                suffixes=("_item", ""),
+            )
+            merged["date"] = pd.to_datetime(merged["date"], errors="coerce")
+
+            # Filters
             col_hist1, col_hist2, col_hist3 = st.columns(3)
-            
             with col_hist1:
                 hist_type = st.selectbox(
                     "Transaction Type",
-                    ["All"] + sorted(purchases_df["transaction_type"].dropna().unique().tolist()),
-                    key="hist_type_filter"
+                    ["All"] + sorted(merged["transaction_type"].dropna().unique().tolist()),
+                    key="hist_type_filter",
                 )
-            
             with col_hist2:
                 hist_ingredient = st.selectbox(
                     "Ingredient",
-                    ["All"] + sorted(purchases_df["ingredient"].dropna().unique().tolist()),
-                    key="hist_ing_filter_main"
+                    ["All"] + sorted(merged["ingredient"].dropna().unique().tolist()),
+                    key="hist_ing_filter_main",
                 )
-            
             with col_hist3:
                 hist_supplier = st.selectbox(
                     "Supplier",
-                    ["All"] + sorted(purchases_df["supplier"].dropna().unique().tolist()),
-                    key="hist_supplier_filter"
+                    ["All"] + sorted(merged["supplier"].dropna().unique().tolist()),
+                    key="hist_supplier_filter",
                 )
-            
-            # Filtro de data
+
             date_col1, date_col2 = st.columns(2)
             with date_col1:
-                start_date = st.date_input("Start Date", 
-                                         datetime.now().date() - timedelta(days=30),
-                                         key="hist_start_date")
+                start_date = st.date_input(
+                    "Start Date",
+                    datetime.now().date() - timedelta(days=30),
+                    key="hist_start_date",
+                )
             with date_col2:
-                end_date = st.date_input("End Date", 
-                                       datetime.now().date(),
-                                       key="hist_end_date")
-            
-            # Aplicar filtros
-            filtered_purchases = purchases_df.copy()
-            
-            if "date" in filtered_purchases.columns:
-                filtered_purchases["date"] = pd.to_datetime(filtered_purchases["date"])
-                filtered_purchases = filtered_purchases[
-                    (filtered_purchases["date"] >= pd.Timestamp(start_date)) &
-                    (filtered_purchases["date"] <= pd.Timestamp(end_date))
+                end_date = st.date_input(
+                    "End Date",
+                    datetime.now().date(),
+                    key="hist_end_date",
+                )
+
+            filtered = merged.copy()
+            if pd.notna(filtered["date"]).any():
+                filtered = filtered[
+                    (filtered["date"] >= pd.Timestamp(start_date))
+                    & (filtered["date"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1))
                 ]
-            
             if hist_type != "All":
-                filtered_purchases = filtered_purchases[filtered_purchases["transaction_type"] == hist_type]
-            
+                filtered = filtered[filtered["transaction_type"] == hist_type]
             if hist_ingredient != "All":
-                filtered_purchases = filtered_purchases[filtered_purchases["ingredient"] == hist_ingredient]
-            
+                filtered = filtered[filtered["ingredient"] == hist_ingredient]
             if hist_supplier != "All":
-                filtered_purchases = filtered_purchases[filtered_purchases["supplier"] == hist_supplier]
-            
-            # Estatísticas
+                filtered = filtered[filtered["supplier"] == hist_supplier]
+
+            # Stats
             st.markdown("---")
             st.subheader("📊 Summary Statistics")
-            
             col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
             with col_stat1:
-                total_transactions = len(filtered_purchases)
-                st.metric("Total Transactions", total_transactions)
+                total_orders = filtered["purchase_order_id"].nunique()
+                st.metric("Total Orders", int(total_orders))
             with col_stat2:
-                total_quantity = filtered_purchases["quantity"].sum()
-                st.metric("Total Quantity", f"{total_quantity:,.1f}")
+                total_lines = len(filtered)
+                st.metric("Total Line Items", int(total_lines))
             with col_stat3:
-                total_cost = filtered_purchases["total_cost"].sum()
-                st.metric("Total Cost", f"${total_cost:,.2f}")
+                total_quantity = float(filtered["quantity"].sum()) if "quantity" in filtered.columns else 0.0
+                st.metric("Total Quantity", f"{total_quantity:,.3f}")
             with col_stat4:
-                avg_cost_per_transaction = total_cost / total_transactions if total_transactions > 0 else 0
-                st.metric("Avg. per Transaction", f"${avg_cost_per_transaction:,.2f}")
-            
-            # Tabela de histórico
+                total_cost = float(filtered["total_cost"].sum()) if "total_cost" in filtered.columns else 0.0
+                st.metric("Total Cost", f"${total_cost:,.2f}")
+
             st.markdown("---")
-            st.subheader("📋 Detailed History")
-            
-            # Preparar dados para exibição
-            display_cols = ["date", "transaction_type", "ingredient", "supplier", 
-                          "quantity", "unit", "unit_cost", "total_cost", "order_number", "notes"]
-            
-            display_df = filtered_purchases[display_cols].copy()
-            display_df["date"] = pd.to_datetime(display_df["date"]).dt.date
-            display_df["unit_cost"] = display_df["unit_cost"].apply(lambda x: f"${x:.2f}")
-            display_df["total_cost"] = display_df["total_cost"].apply(lambda x: f"${x:.2f}")
-            
-            st.dataframe(
-                display_df.rename(columns={
-                    "date": "Date",
-                    "transaction_type": "Type",
-                    "ingredient": "Ingredient",
-                    "supplier": "Supplier",
-                    "quantity": "Quantity",
-                    "unit": "Unit",
-                    "unit_cost": "Unit Cost",
-                    "total_cost": "Total Cost",
-                    "order_number": "Order #",
-                    "notes": "Notes"
-                }),
-                use_container_width=True,
-                height=400
-            )
-            
-            # Opções de exportação
-            col_exp1, col_exp2 = st.columns(2)
-            with col_exp1:
-                csv = display_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Export as CSV",
-                    data=csv,
-                    file_name="purchase_history.csv",
-                    mime="text/csv",
-                    key="export_purchase_csv"
+            st.subheader("🧾 Orders")
+
+            # Order summary table
+            order_summary = (
+                filtered.groupby(["purchase_order_id", "date", "transaction_type", "supplier", "order_number", "freight_total"], dropna=False)
+                .agg(
+                    items=("ingredient", "count"),
+                    order_total=("total_cost", "sum"),
                 )
-            with col_exp2:
-                # Gráfico de tendências
-                if st.button("📈 Show Trends", use_container_width=True, key="show_trends"):
-                    # Agrupar por mês
-                    trends = filtered_purchases.copy()
-                    trends["date"] = pd.to_datetime(trends["date"])
-                    trends["month"] = trends["date"].dt.to_period("M")
-                    monthly_trends = trends.groupby("month").agg({
-                        "total_cost": "sum"
-                    }).reset_index()
-                    monthly_trends["month"] = monthly_trends["month"].astype(str)
-                    
-                    # Add contagem de compras separadamente
-                    purchase_counts = trends.groupby("month").size().reset_index()
-                    purchase_counts.columns = ["month", "Number of Purchases"]
-                    
-                    # Combinar
-                    monthly_trends = pd.merge(monthly_trends, purchase_counts, on="month")
-                    monthly_trends.columns = ["Month", "Total Spending", "Number of Purchases"]
-                    
-                    fig_trend = make_subplots(
-                        rows=2, cols=1,
-                        subplot_titles=("Monthly Purchase Cost", "Monthly Purchase Quantity")
-                    )
-                    
-                    fig_trend.add_trace(
-                        go.Bar(
-                            x=monthly_trends["Month"],
-                            y=monthly_trends["Total Spending"],
-                            name="Cost",
-                            marker_color="#4caf50"
+                .reset_index()
+            )
+            order_summary["date"] = pd.to_datetime(order_summary["date"], errors="coerce").dt.date
+            order_summary = order_summary.sort_values(by=["date", "purchase_order_id"], ascending=False)
+
+            st.dataframe(
+                order_summary.rename(
+                    columns={
+                        "purchase_order_id": "Order ID",
+                        "date": "Date",
+                        "transaction_type": "Type",
+                        "supplier": "Supplier",
+                        "order_number": "Order #",
+                        "freight_total": "Freight Total",
+                        "items": "# Items",
+                        "order_total": "Order Total",
+                    }
+                ),
+                use_container_width=True,
+                height=280,
+            )
+
+            # Expanders with items
+            st.markdown("---")
+            st.subheader("📦 Order Details")
+            for _, o in order_summary.head(25).iterrows():
+                oid = o["purchase_order_id"]
+                title = f"{o.get('Date', o.get('date'))} • {o.get('supplier', '')} • #{o.get('order_number', oid)}"
+                with st.expander(title, expanded=False):
+                    sub = filtered[filtered["purchase_order_id"] == oid].copy()
+                    sub["date"] = pd.to_datetime(sub["date"], errors="coerce").dt.date
+                    show_cols = [
+                        "ingredient",
+                        "quantity",
+                        "unit",
+                        "unit_price",
+                        "freight_per_unit",
+                        "effective_unit_cost",
+                        "total_cost",
+                    ]
+                    sub2 = sub[show_cols].copy()
+                    st.dataframe(
+                        sub2.rename(
+                            columns={
+                                "ingredient": "Ingredient",
+                                "quantity": "Quantity",
+                                "unit": "Unit",
+                                "unit_price": "Unit Price",
+                                "freight_per_unit": "Freight/Unit",
+                                "effective_unit_cost": "Effective Unit Cost",
+                                "total_cost": "Line Total",
+                            }
                         ),
-                        row=1, col=1
+                        use_container_width=True,
+                        height=240,
                     )
-                    
-                    fig_trend.add_trace(
-                        go.Bar(
-                            x=monthly_trends["Month"],
-                            y=monthly_trends["Number of Purchases"],
-                            name="Quantity",
-                            marker_color="#2196f3"
-                        ),
-                        row=2, col=1
-                    )
-                    
-                    fig_trend.update_layout(height=600, showlegend=False)
-                    st.plotly_chart(fig_trend, use_container_width=True)
-        
+
+            # Export line level
+            st.markdown("---")
+            csv = filtered.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Export filtered line items (CSV)",
+                data=csv,
+                file_name="purchase_order_items.csv",
+                mime="text/csv",
+                key="export_po_items_csv",
+            )
+
+        elif not legacy_purchases_df.empty:
+            st.info("Showing legacy purchase history (single-item purchases).")
+            st.dataframe(legacy_purchases_df, use_container_width=True, height=450)
         else:
-            st.info("No purchase history available. Record your first purchase in the 'New Purchase' tab.")
+            st.info("No purchase history available yet. Record your first purchase in the 'New Purchase' tab.")
         
         st.markdown("</div>", unsafe_allow_html=True)
-    
+
     with tab_suppliers:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-        st.subheader("🏭 Supplier Management")
-        
-        # Add/Edit Fornecedor
-        col_sup1, col_sup2 = st.columns(2)
-        
-        with col_sup1:
-            sup_action = st.radio(
-                "Action",
-                ["Add New Supplier", "View/Edit Suppliers"],
-                horizontal=True,
-                key="supplier_action"
-            )
-        
-        if sup_action == "Add New Supplier":
-            with st.form("add_supplier_form", clear_on_submit=True):
-                st.markdown("---")
-                st.subheader("➕ Add New Supplier")
-                
-                col_sup_form1, col_sup_form2 = st.columns(2)
-                
-                with col_sup_form1:
-                    sup_name = st.text_input("Supplier Name*", key="new_sup_name")
-                    contact_name = st.text_input("Contact Person", key="new_sup_contact")
-                    email = st.text_input("Email", key="new_sup_email")
-                    phone = st.text_input("Phone", key="new_sup_phone")
-                
-                with col_sup_form2:
-                    address = st.text_input("Address", key="new_sup_address")
-                    city = st.text_input("City", key="new_sup_city")
-                    country = st.text_input("Country", value="Norway", key="new_sup_country")
-                    website = st.text_input("Website", key="new_sup_website")
-                
-                # Tipos de produtos fornecidos
-                product_types = st.multiselect(
-                    "Product Types Supplied",
-                    ["Grains", "Hops", "Yeast", "Equipment", "Packaging", "Chemicals", "Other"],
-                    key="new_sup_products"
+        st.subheader("🏭 Suppliers")
+        st.caption("Manage suppliers here. Ingredients are linked to a supplier, and Purchases can only include items from the selected supplier.")
+
+        suppliers_df = data.get("suppliers", pd.DataFrame()).copy()
+
+        # Normalize id column (SQLite/Postgres)
+        sup_id_col = None
+        for cand in ["id_supplier", "id"]:
+            if cand in suppliers_df.columns:
+                sup_id_col = cand
+                break
+
+        # --- List ---
+        if suppliers_df.empty:
+            st.info("No suppliers yet. Add your first supplier below.")
+        else:
+            col_l1, col_l2 = st.columns([2, 1])
+            with col_l1:
+                q = st.text_input("Search suppliers", key="sup_search", placeholder="Type a name, contact, email...")
+            with col_l2:
+                status_filter = st.selectbox(
+                    "Status",
+                    ["All"] + sorted(suppliers_df.get("status", pd.Series(dtype=str)).dropna().astype(str).unique().tolist()),
+                    key="sup_status_filter",
                 )
-                
-                notes = st.text_area("Notes", key="new_sup_notes")
-                
-                submitted = st.form_submit_button("➕ Add Supplier", type="primary", use_container_width=True)
-                if submitted:
-                    if not sup_name:
-                        st.error("Supplier name is required!")
-                    else:
-                        new_supplier = {
+
+            view_df = suppliers_df.copy()
+            if q:
+                ql = q.lower()
+                hay = (
+                    view_df.get("name", "").astype(str)
+                    + " " + view_df.get("contact_person", "").astype(str)
+                    + " " + view_df.get("email", "").astype(str)
+                    + " " + view_df.get("phone", "").astype(str)
+                ).str.lower()
+                view_df = view_df[hay.str.contains(ql, na=False)]
+            if status_filter != "All" and "status" in view_df.columns:
+                view_df = view_df[view_df["status"].astype(str) == status_filter]
+
+            show_cols = [c for c in [sup_id_col, "name", "contact_person", "email", "phone", "status", "notes"] if c and c in view_df.columns]
+            st.dataframe(
+                view_df[show_cols].rename(
+                    columns={
+                        sup_id_col: "ID" if sup_id_col else "ID",
+                        "name": "Supplier",
+                        "contact_person": "Contact Person",
+                        "email": "Email",
+                        "phone": "Phone",
+                        "status": "Status",
+                        "notes": "Notes",
+                    }
+                ),
+                use_container_width=True,
+                height=280,
+            )
+
+        st.markdown("---")
+        st.subheader("➕ Add supplier")
+        with st.form("sup_add_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                sup_name = st.text_input("Supplier Name*", key="sup_add_name")
+                contact_person = st.text_input("Contact Person", key="sup_add_contact")
+            with c2:
+                email = st.text_input("Email", key="sup_add_email")
+                phone = st.text_input("Phone", key="sup_add_phone")
+            with c3:
+                status = st.selectbox("Status", ["Active", "Inactive"], key="sup_add_status")
+                website = st.text_input("Website", key="sup_add_website")
+
+            address = st.text_input("Address", key="sup_add_address")
+            col_city, col_country = st.columns(2)
+            with col_city:
+                city = st.text_input("City", key="sup_add_city")
+            with col_country:
+                country = st.text_input("Country", key="sup_add_country")
+            notes = st.text_area("Notes", key="sup_add_notes")
+            add_ok = st.form_submit_button("Save supplier", type="primary", use_container_width=True)
+
+        if add_ok:
+            if not sup_name:
+                st.error("Supplier name is required!")
+            else:
+                # Basic uniqueness by case-insensitive name
+                existing = (
+                    suppliers_df.get("name", pd.Series(dtype=str)).dropna().astype(str).str.lower().tolist()
+                    if not suppliers_df.empty else []
+                )
+                if str(sup_name).lower() in existing:
+                    st.warning("Supplier already exists. Use the edit section below to update it.")
+                else:
+                    insert_data(
+                        "suppliers",
+                        {
                             "name": sup_name,
-                            "contact_name": contact_name,
+                            "contact_person": contact_person,
                             "email": email,
                             "phone": phone,
+                            "status": status,
+                            "website": website,
                             "address": address,
                             "city": city,
                             "country": country,
-                            "website": website,
-                            "product_types": ", ".join(product_types),
-                            "notes": notes
-                        }
-                        
-                        insert_data("suppliers", new_supplier)
+                            "notes": notes,
+                        },
+                    )
+                    st.success(f"✅ Supplier '{sup_name}' added!")
+                    data = get_all_data()
+                    st.rerun()
+
+        st.markdown("---")
+        st.subheader("✏️ Edit supplier")
+
+        suppliers_df = data.get("suppliers", pd.DataFrame()).copy()
+        if suppliers_df.empty:
+            st.info("Add a supplier first to edit it.")
+        else:
+            sup_names = suppliers_df["name"].dropna().astype(str).sort_values().tolist() if "name" in suppliers_df.columns else []
+            selected = st.selectbox("Select supplier", ["Select..."] + sup_names, key="sup_edit_select")
+
+            if selected and selected != "Select...":
+                row = suppliers_df.loc[suppliers_df["name"].astype(str) == str(selected)].iloc[0]
+                supplier_pk = None
+                if "id_supplier" in suppliers_df.columns:
+                    supplier_pk = row.get("id_supplier")
+                elif "id" in suppliers_df.columns:
+                    supplier_pk = row.get("id")
+
+                with st.form("sup_edit_form", clear_on_submit=False):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        e_name = st.text_input("Supplier Name*", value=str(row.get("name", "")), key="sup_edit_name")
+                        e_contact = st.text_input("Contact Person", value=str(row.get("contact_person", "") or ""), key="sup_edit_contact")
+                    with c2:
+                        e_email = st.text_input("Email", value=str(row.get("email", "") or ""), key="sup_edit_email")
+                        e_phone = st.text_input("Phone", value=str(row.get("phone", "") or ""), key="sup_edit_phone")
+                    with c3:
+                        e_status = st.selectbox(
+                            "Status",
+                            ["Active", "Inactive"],
+                            index=0 if str(row.get("status", "Active")) == "Active" else 1,
+                            key="sup_edit_status",
+                        )
+                        e_website = st.text_input("Website", value=str(row.get("website", "") or ""), key="sup_edit_website")
+
+                    e_address = st.text_input("Address", value=str(row.get("address", "") or ""), key="sup_edit_address")
+                    col_city2, col_country2 = st.columns(2)
+                    with col_city2:
+                        e_city = st.text_input("City", value=str(row.get("city", "") or ""), key="sup_edit_city")
+                    with col_country2:
+                        e_country = st.text_input("Country", value=str(row.get("country", "") or ""), key="sup_edit_country")
+                    e_notes = st.text_area("Notes", value=str(row.get("notes", "") or ""), key="sup_edit_notes")
+
+                    edit_ok = st.form_submit_button("Update supplier", type="primary", use_container_width=True)
+
+                if edit_ok:
+                    if not e_name:
+                        st.error("Supplier name is required!")
+                    else:
+                        where_clause = "id_supplier = :id" if "id_supplier" in suppliers_df.columns else "id = :id"
+                        update_data(
+                            "suppliers",
+                            {
+                                "name": e_name,
+                                "contact_person": e_contact,
+                                "email": e_email,
+                                "phone": e_phone,
+                                "status": e_status,
+                                "website": e_website,
+                                "address": e_address,
+                                "city": e_city,
+                                "country": e_country,
+                                "notes": e_notes,
+                            },
+                            where_clause,
+                            {"id": supplier_pk},
+                        )
+                        st.success("✅ Supplier updated!")
                         data = get_all_data()
-                        st.success(f"✅ Supplier '{sup_name}' added successfully!")
                         st.rerun()
-        
-        else:  # View/Edit Suppliers
-            st.markdown("---")
-            st.subheader("📋 Existing Suppliers")
-            
-            suppliers_df = data.get("suppliers", pd.DataFrame())
-            if not suppliers_df.empty:
-                # Filtro de busca
-                search_supplier = st.text_input("Search Supplier", key="search_supplier")
-                
-                # Aplicar filtro
-                filtered_suppliers = suppliers_df.copy()
-                if search_supplier:
-                    filtered_suppliers = filtered_suppliers[
-                        filtered_suppliers["name"].str.contains(search_supplier, case=False, na=False)
-                    ]
-                
-                if len(filtered_suppliers) > 0:
-                    # Mostrar em cards
-                    for _, supplier in filtered_suppliers.iterrows():
-                        with st.expander(f"🏭 {supplier['name']}", expanded=False):
-                            col_info1, col_info2 = st.columns(2)
-                            
-                            with col_info1:
-                                st.write("**Contact Information**")
-                                if supplier.get("contact_name"):
-                                    st.write(f"👤 {supplier['contact_name']}")
-                                if supplier.get("email"):
-                                    st.write(f"📧 {supplier['email']}")
-                                if supplier.get("phone"):
-                                    st.write(f"📞 {supplier['phone']}")
-                                if supplier.get("website"):
-                                    st.write(f"🌐 {supplier['website']}")
-                            
-                            with col_info2:
-                                st.write("**Location**")
-                                if supplier.get("address"):
-                                    st.write(f"📍 {supplier['address']}")
-                                if supplier.get("city"):
-                                    st.write(f"🏙️ {supplier['city']}")
-                                if supplier.get("country"):
-                                    st.write(f"🇳🇴 {supplier['country']}")
-                            
-                            # Estatísticas do fornecedor (se houver dados de compras)
-                            purchases_df = data.get("purchases", pd.DataFrame())
-                            if not purchases_df.empty:
-                                supplier_purchases = purchases_df[purchases_df["supplier"] == supplier["name"]]
-                                if len(supplier_purchases) > 0:
-                                    st.markdown("---")
-                                    st.write("**Purchase Statistics**")
-                                    
-                                    col_stat1, col_stat2, col_stat3 = st.columns(3)
-                                    with col_stat1:
-                                        total_orders = len(supplier_purchases)
-                                        st.metric("Total Orders", total_orders)
-                                    with col_stat2:
-                                        total_spent = supplier_purchases["total_cost"].sum()
-                                        st.metric("Total Spent", f"${total_spent:.2f}")
-                                    with col_stat3:
-                                        last_order = supplier_purchases["date"].max()
-                                        if pd.notna(last_order):
-                                            st.metric("Last Order", str(last_order.date()))
-                            
-                            # Botões de ação
-                            col_btn1, col_btn2, col_btn3 = st.columns(3)
-                            with col_btn1:
-                                if st.button("✏️ Edit", key=f"edit_sup_{supplier['id_supplier']}", use_container_width=True):
-                                    st.session_state['edit_supplier'] = supplier['id_supplier']
-                            with col_btn2:
-                                if st.button("📞 Contact", key=f"contact_sup_{supplier['id_supplier']}", use_container_width=True):
-                                    st.info(f"Contacting {supplier['name']}...")
-                            with col_btn3:
-                                if st.button("🗑️ Delete", key=f"delete_sup_{supplier['id_supplier']}", use_container_width=True, type="secondary"):
-                                    # Verificar se há compras associadas
-                                    if check_supplier_usage(supplier["name"]):
-                                        st.error(f"Cannot delete {supplier['name']} - has associated purchases!")
-                                    else:
-                                        st.session_state.delete_confirmation = {"type": "supplier", "id": supplier['id_supplier'], "name": supplier['name']}
-                                        st.rerun()
-                else:
-                    st.info("No suppliers found with the search criteria.")
-            else:
-                st.info("No suppliers registered yet. Add your first supplier above.")
-        
+
+                # Delete (outside any form)
+                st.markdown("##### 🗑️ Delete")
+                st.warning("Deleting a supplier does not automatically update linked ingredients. Consider setting it to Inactive instead.")
+                confirm_del = st.checkbox("I understand the consequences", key="sup_delete_confirm")
+                if st.button("Delete supplier", key="sup_delete_btn", use_container_width=True, disabled=not confirm_del):
+                    where_clause = "id_supplier = :id" if "id_supplier" in suppliers_df.columns else "id = :id"
+                    delete_data("suppliers", where_clause, {"id": supplier_pk})
+                    st.success("✅ Supplier deleted!")
+                    data = get_all_data()
+                    st.rerun()
+
         st.markdown("</div>", unsafe_allow_html=True)
-    
+
     with tab_reports:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📊 Purchase Reports & Analytics")
-        
-        purchases_df = data.get("purchases", pd.DataFrame())
+
+        # Normalize purchases for analytics:
+        # Prefer the purchase-by-order model (effective_unit_cost already includes freight/unit).
+        orders_df = data.get("purchase_orders", pd.DataFrame())
+        items_df = data.get("purchase_order_items", pd.DataFrame())
+        if not orders_df.empty and not items_df.empty:
+            merged = items_df.merge(
+                orders_df,
+                left_on="purchase_order_id",
+                right_on="id_purchase_order",
+                how="left",
+                suffixes=("_item", ""),
+            )
+            purchases_df = pd.DataFrame(
+                {
+                    "transaction_type": merged.get("transaction_type"),
+                    "ingredient": merged.get("ingredient"),
+                    "supplier": merged.get("supplier"),
+                    "quantity": merged.get("quantity"),
+                    "unit": merged.get("unit"),
+                    "unit_cost": merged.get("effective_unit_cost"),
+                    "total_cost": merged.get("total_cost"),
+                    "order_number": merged.get("order_number"),
+                    "date": merged.get("date"),
+                    "notes": merged.get("notes"),
+                }
+            )
+        else:
+            purchases_df = data.get("purchases", pd.DataFrame())
         if not purchases_df.empty:
             # Reports disponíveis
             report_type = st.selectbox(
@@ -3711,56 +4405,6 @@ elif page == "Purchases":
             """)
         
         st.markdown("</div>", unsafe_allow_html=True)
-
-# -----------------------------
-# Suppliers Page (separada)
-# -----------------------------
-elif page == "Suppliers":
-    st.title("🏭 Suppliers Management")
-    
-    st.info("""
-    **Suppliers Management**  
-    You can manage suppliers in two ways:
-    
-    1. **Through the Purchases page** - Go to the 'Purchases' tab and select the 'Suppliers' sub-tab
-    2. **Directly here** - Use the options below
-    """)
-    
-    # Link rápido para a página Purchases
-    if st.button("🛒 Go to Purchases Page for Full Supplier Management", use_container_width=True):
-        page = "Purchases"
-        st.rerun()
-    
-    # Versão simplificada aqui
-    st.markdown("<div class='section-box'>", unsafe_allow_html=True)
-    st.subheader("📋 Quick Supplier List")
-    
-    suppliers_df = data.get("suppliers", pd.DataFrame())
-    if not suppliers_df.empty:
-        # Mostrar lista simples
-        for _, supplier in suppliers_df.iterrows():
-            col1, col2, col3 = st.columns([3, 2, 1])
-            with col1:
-                st.write(f"**{supplier['name']}**")
-                if supplier.get('contact_name'):
-                    st.write(f"Contact: {supplier['contact_name']}")
-            with col2:
-                if supplier.get('email'):
-                    st.write(f"📧 {supplier['email']}")
-                if supplier.get('phone'):
-                    st.write(f"📞 {supplier['phone']}")
-            with col3:
-                # Contar pedidos deste fornecedor
-                purchases_df = data.get("purchases", pd.DataFrame())
-                if not purchases_df.empty:
-                    supplier_orders = len(purchases_df[purchases_df["supplier"] == supplier["name"]])
-                    st.write(f"**{supplier_orders}** orders")
-            
-            st.markdown("---")
-    else:
-        st.info("No suppliers registered yet. Add suppliers through the Purchases page.")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
 
 # -----------------------------
 # Recipes Page
