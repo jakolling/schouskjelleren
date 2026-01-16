@@ -130,7 +130,7 @@ def require_login():
 
 
     # Public read-only mode (no login required)
-    view_mode = st.button("👀 ENTRAR EM MODO VISUALIZAÇÃO", use_container_width=True)
+    view_mode = st.button("👀 ENTER VISUALIZATION MODE", use_container_width=True)
     if view_mode:
         st.session_state["logged_in"] = True
         st.session_state["auth_user"] = "viewer"
@@ -1668,7 +1668,7 @@ page = st.sidebar.radio("Navigation", [
 st.sidebar.markdown("---")
 st.sidebar.info(f"👤 Role: {st.session_state.get('auth_role','viewer')}")
 if st.session_state.get('view_mode'):
-    st.sidebar.caption('👀 Visualização (somente leitura)')
+    st.sidebar.caption('👀 View-only mode')
 
 # -----------------------------
 # Dashboard Page
@@ -1927,7 +1927,7 @@ elif page == "Breweries":
 
 
     if is_viewer():
-        st.info('👀 Modo visualização: você pode navegar e gerar relatórios, mas não pode criar/editar/deletar nada.')
+        st.info('👀 View-only mode: you can browse and generate reports, but you can't create/edit/delete anything.')
         breweries_df = data.get('breweries', pd.DataFrame())
         equipment_df = data.get('equipment', pd.DataFrame())
         st.subheader('📍 Breweries')
@@ -2817,7 +2817,7 @@ elif page == "Ingredients":
 
 
     if is_viewer():
-        st.info('👀 Modo visualização: leitura apenas. Para editar ingredientes, faça login como admin.')
+        st.info('👀 View-only mode: read-only. To edit ingredients, log in as admin.')
         ingredients_df = data.get('ingredients', pd.DataFrame())
         if ingredients_df is None or ingredients_df.empty:
             st.info('No ingredients yet.')
@@ -3529,7 +3529,7 @@ elif page == "Purchases":
 
 
     if is_viewer():
-        st.info('👀 Modo visualização: leitura apenas. Para registrar compras/fornecedores, faça login como admin.')
+        st.info('👀 View-only mode: read-only. To record purchases/suppliers, log in as admin.')
         po = data.get('purchase_orders', pd.DataFrame())
         poi = data.get('purchase_order_items', pd.DataFrame())
         legacy = data.get('purchases', pd.DataFrame())
@@ -4590,7 +4590,7 @@ elif page == "Recipes":
 
 
     if is_viewer():
-        st.info('👀 Modo visualização: leitura apenas. Para criar/editar receitas, faça login como admin.')
+        st.info('👀 View-only mode: read-only. To create/edit recipes, log in as admin.')
         recipes_df = data.get('recipes', pd.DataFrame())
         items_df = data.get('recipe_items', pd.DataFrame())
         st.subheader('📖 Recipes')
@@ -5163,7 +5163,7 @@ elif page == "Production Orders":
 
 
     if is_viewer():
-        st.info('👀 Modo visualização: leitura apenas. Para criar/editar ordens de produção, faça login como admin.')
+        st.info('👀 View-only mode: read-only. To create/edit production orders, log in as admin.')
         orders_df = data.get('production_orders', pd.DataFrame())
         st.subheader('🏭 Production Orders')
         if orders_df is None or orders_df.empty:
@@ -5749,7 +5749,7 @@ elif page == "Calendar":
 
 
     if is_viewer():
-        st.info('👀 Modo visualização: leitura apenas. Para adicionar/editar eventos, faça login como admin.')
+        st.info('👀 View-only mode: read-only. To add/edit events, log in as admin.')
         events_df = data.get('calendar_events', pd.DataFrame())
         st.subheader('📅 Calendar Events')
         if events_df is None or events_df.empty:
