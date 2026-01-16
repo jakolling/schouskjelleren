@@ -1094,14 +1094,108 @@ def migrate_excel_to_sqlite(excel_file):
         return False
 
 def export_to_excel():
-    """Exporta todos os dados para Excel"""
+    """Export all tables to an Excel workbook.
+
+    Fixes common Excel export issues:
+    - Sheet names must be <= 31 chars and cannot contain: []:*?/ or backslash.
+    - Excel cannot store timezone-aware datetimes; we strip timezone info.
+    - Non-scalar values (dict/list/set/tuple/bytes) are stringified.
+    """
     output = io.BytesIO()
+
+    def _safe_sheet_name(name: str, used: set) -> str:
+        bad_chars = set('[]:*?/\\')
+        clean = ''.join('_' if c in bad_chars else c for c in str(name))
+        clean = (clean.strip() or 'Sheet')[:31]
+        base = clean
+        i = 1
+        while clean in used:
+            suffix = f"_{i}"
+            clean = (base[: max(0, 31 - len(suffix))] + suffix)
+            i += 1
+        used.add(clean)
+        return clean
+
+    def _sanitize_df(df: 'pd.DataFrame') -> 'pd.DataFrame':
+        import pandas as _pd
+        from pandas.api.types import (
+            is_datetime64tz_dtype,
+            is_datetime64_any_dtype,
+            is_timedelta64_dtype,
+        )
+
+        df2 = df.copy()
+        df2.columns = [str(c) for c in df2.columns]
+
+        for col in df2.columns:
+            s = df2[col]
+
+            # tz-aware datetimes -> naive
+            if is_datetime64tz_dtype(s):
+                try:
+                    df2[col] = s.dt.tz_convert(None)
+                except Exception:
+                    df2[col] = s.dt.tz_localize(None)
+                continue
+
+            # timedeltas -> string
+            if is_timedelta64_dtype(s):
+                df2[col] = s.astype(str)
+                continue
+
+            # object columns: strip tz-aware datetimes and stringify complex objects
+            if s.dtype == 'object':
+                # If it's actually datetime-like, coerce carefully
+                try:
+                    s_dt = _pd.to_datetime(s, errors='ignore')
+                    if is_datetime64_any_dtype(s_dt) and getattr(s_dt.dtype, 'tz', None) is not None:
+                        df2[col] = s_dt.dt.tz_convert(None)
+                        continue
+                except Exception:
+                    pass
+
+                def _stringify(v):
+                    if v is None:
+                        return v
+                    try:
+                        if _pd.isna(v):
+                            return v
+                    except Exception:
+                        pass
+
+                    if isinstance(v, (dict, list, set, tuple)):
+                        try:
+                            import json
+                            return json.dumps(v, ensure_ascii=False)
+                        except Exception:
+                            return str(v)
+                    if isinstance(v, (bytes, bytearray)):
+                        try:
+                            import base64
+                            return base64.b64encode(bytes(v)).decode('ascii')
+                        except Exception:
+                            return str(v)
+                    return v
+
+                df2[col] = s.map(_stringify)
+                continue
+
+            # datetime without tz: keep as is
+            if is_datetime64_any_dtype(s):
+                continue
+
+        return df2
+
+    used_sheet_names = set()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         data = get_all_data()
-        for table_name, df in data.items():
-            if not df.empty:
-                df.to_excel(writer, sheet_name=table_name, index=False)
-    
+        for table_name, df in (data or {}).items():
+            if df is None or df.empty:
+                continue
+            sheet = _safe_sheet_name(table_name, used_sheet_names)
+            df2 = _sanitize_df(df)
+            df2.to_excel(writer, sheet_name=sheet, index=False)
+
     output.seek(0)
     return output
 
