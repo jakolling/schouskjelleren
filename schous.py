@@ -28,7 +28,7 @@ import tempfile
 # - Configure usuários/senhas (hash bcrypt) e cookie em .streamlit/secrets.toml
 # - Configure DATABASE_URL (Postgres recomendado). Ex:
 #   DATABASE_URL="postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME"
-from sqlalchemy import create_engine, text as sql_text
+from sqlalchemy import create_engine, text as sql_text, inspect
 from sqlalchemy.engine import Engine
 
 
@@ -237,27 +237,51 @@ def get_table_columns_cached(table_name: str, dialect: str | None = None) -> lis
 
 
 def get_table_id_column(table_name: str, dialect: str | None = None) -> str:
-    """Returns the best-guess primary key column name for a table.
+    """Return the primary-key column name for a table (best effort).
 
-    We keep this small and defensive because the app supports legacy schemas
-    where tables use names like `id_ingredient` instead of `id`.
+    Why this exists: the app supports legacy/hand-edited schemas where PKs can be
+    `id`, `id_ingredient`, `ingredient_id`, etc. We try to detect the *real* PK
+    using SQLAlchemy's inspector first, then fall back to heuristics.
     """
+    engine = get_engine()
+
+    # 1) Ask the database for the PK (works on Postgres/SQLite when constraints exist)
+    try:
+        insp = inspect(engine)
+        pk = insp.get_pk_constraint(table_name) or {}
+        cols = pk.get('constrained_columns') or []
+        if cols:
+            return cols[0]
+    except Exception:
+        pass
+
+    # 2) Heuristics based on existing columns
     cols = get_table_columns_cached(table_name, dialect)
+    if not cols:
+        return 'id'
+
+    # Common explicit candidates
     for cand in (
-        "id",
-        "id_ingredient",
-        "id_supplier",
-        "id_brewery",
-        "id_recipe",
-        "id_receipt",
-        "id_order",
-        "id_purchase_order",
-        "id_purchase_item",
+        'id',
+        'id_ingredient', 'ingredient_id',
+        'id_supplier', 'supplier_id',
+        'id_brewery', 'brewery_id',
+        'id_recipe', 'recipe_id',
+        'id_receipt', 'receipt_id',
+        'id_order', 'order_id',
+        'id_purchase_order', 'purchase_order_id',
+        'id_purchase_item', 'purchase_item_id',
     ):
         if cand in cols:
             return cand
-    # Fallback (may still error if truly absent, but avoids crashing logic here)
-    return "id"
+
+    # 3) Last resort: first column that looks like a PK
+    for c in cols:
+        cl = c.lower()
+        if cl == 'id' or cl.endswith('_id') or cl.startswith('id_'):
+            return c
+
+    return 'id'
 
 def is_admin() -> bool:
     return st.session_state.get("auth_role") == "admin"
@@ -3372,34 +3396,52 @@ elif page == "Ingredients":
                                 updates["expiry_date"] = new_expiry if new_expiry else None
                             
                             id_col = get_table_id_column("ingredients")
-                            update_data("ingredients", updates, f"{id_col} = :id", {"id": ing_data["id"]})
+                            pk_value = ing_data.get(id_col) if isinstance(ing_data, dict) else None
+                            if pk_value is None:
+                                pk_value = ing_data.get("id") if isinstance(ing_data, dict) else None
+                            update_data("ingredients", updates, f"{id_col} = :id", {"id": pk_value})
                             data = get_all_data()
                             st.success(f"✅ Ingredient '{new_name}' updated successfully!")
                             st.rerun()
                     
                     with col_btn2:
                         if st.button("🗑️ Delete Ingredient", use_container_width=True, type="secondary", key="delete_ing_btn"):
+                            id_col = get_table_id_column("ingredients")
+                            pk_value = ing_data.get(id_col) if isinstance(ing_data, dict) else None
+                            if pk_value is None:
+                                pk_value = ing_data.get("id") if isinstance(ing_data, dict) else None
                             # Verificar se o ingrediente está em uso em receitas
-                            in_use = check_ingredient_usage(ing_data["id"])
+                            in_use = check_ingredient_usage(pk_value)
                             
                             if in_use:
                                 st.error("Cannot delete ingredient that is used in recipes! Remove it from recipes first.")
                             else:
-                                st.session_state.delete_confirmation = {"type": "ingredient", "id": ing_data["id"], "name": selected_ingredient}
+                                id_col = get_table_id_column("ingredients")
+                                pk_value = ing_data.get(id_col) if isinstance(ing_data, dict) else None
+                                if pk_value is None:
+                                    pk_value = ing_data.get("id") if isinstance(ing_data, dict) else None
+                                st.session_state.delete_confirmation = {"type": "ingredient", "id": pk_value, "name": selected_ingredient}
                                 st.rerun()
                     
                     with col_btn3:
                         if st.button("🔄 Reset Stock", use_container_width=True, key="reset_stock_btn"):
                             # Apenas resetar o estoque para 0
                             id_col = get_table_id_column("ingredients")
-                            update_data("ingredients", {"stock": 0}, f"{id_col} = :id", {"id": ing_data["id"]})
+                            pk_value = ing_data.get(id_col) if isinstance(ing_data, dict) else None
+                            if pk_value is None:
+                                pk_value = ing_data.get("id") if isinstance(ing_data, dict) else None
+                            update_data("ingredients", {"stock": 0}, f"{id_col} = :id", {"id": pk_value})
                             data = get_all_data()
                             st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
                             st.rerun()
 
                     # Inline delete confirmation (must appear directly below the Delete button)
+                    id_col = get_table_id_column("ingredients")
+                    current_ing_id = ing_data.get(id_col) if isinstance(ing_data, dict) else None
+                    if current_ing_id is None:
+                        current_ing_id = ing_data.get("id") if isinstance(ing_data, dict) else None
                     delete_conf = st.session_state.get("delete_confirmation", {"type": None})
-                    if delete_conf.get("type") == "ingredient" and delete_conf.get("id") == ing_data["id"]:
+                    if delete_conf.get("type") == "ingredient" and delete_conf.get("id") == current_ing_id:
                         st.markdown(f"""
                         <div class="delete-confirmation">
                             <h3>⚠️ Confirm Ingredient Deletion</h3>
@@ -3411,13 +3453,16 @@ elif page == "Ingredients":
                         c1, c2, c3 = st.columns([1, 1, 2])
                         with c1:
                             if st.button("✅ Yes, Delete", type="primary", use_container_width=True,
-                                         key=f"confirm_delete_ing_{ing_data['id']}"):
+                                         key=f"confirm_delete_ing_{current_ing_id}"):
                                 # Safety check: ingredient cannot be deleted if used in recipes
-                                if check_ingredient_usage(ing_data["id"]):
+                                if check_ingredient_usage(current_ing_id):
                                     st.error("Failed to delete ingredient. It may be used in recipes.")
                                 else:
                                     id_col = get_table_id_column("ingredients")
-                                    delete_data("ingredients", f"{id_col} = :id", {"id": ing_data["id"]})
+                                    pk_value = ing_data.get(id_col) if isinstance(ing_data, dict) else None
+                                    if pk_value is None:
+                                        pk_value = ing_data.get("id") if isinstance(ing_data, dict) else None
+                                    delete_data("ingredients", f"{id_col} = :id", {"id": pk_value})
                                     st.success(f"Ingredient '{delete_conf.get('name')}' deleted successfully!")
 
                                 st.session_state.delete_confirmation = {"type": None, "id": None, "name": None}
@@ -3426,7 +3471,7 @@ elif page == "Ingredients":
 
                         with c2:
                             if st.button("❌ Cancel", use_container_width=True,
-                                         key=f"cancel_delete_ing_{ing_data['id']}"):
+                                         key=f"cancel_delete_ing_{current_ing_id}"):
                                 st.session_state.delete_confirmation = {"type": None, "id": None, "name": None}
                                 st.rerun()
             else:
