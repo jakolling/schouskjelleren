@@ -3648,31 +3648,63 @@ elif page == "Purchases":
 
             # Unit dropdown options (from DB + some common units)
             base_units = ["kg", "g", "lb", "oz", "l", "ml", "unit", "pcs", "pack"]
+
+            def _po_pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+                """Pick a column name from df using case-insensitive matching."""
+                if df is None or getattr(df, "empty", True):
+                    return None
+                colmap = {str(c).lower(): c for c in df.columns}
+                for cand in candidates:
+                    key = str(cand).lower()
+                    if key in colmap:
+                        return colmap[key]
+                return None
+
             units_from_db = []
             try:
-                if "unit" in eligible_df.columns:
-                    units_from_db = (eligible_df["unit"].dropna().astype(str).str.strip().unique().tolist())
+                unit_col = _po_pick_col(eligible_df, ["unit", "uom", "unit_of_measure", "units"])
+                if unit_col:
+                    units_from_db = (
+                        eligible_df[unit_col]
+                        .dropna()
+                        .astype(str)
+                        .str.strip()
+                        .unique()
+                        .tolist()
+                    )
             except Exception:
                 units_from_db = []
+
             unit_options = sorted({u for u in (units_from_db + base_units) if str(u).strip()}, key=lambda x: str(x).lower())
 
             def _po_lookup_unit(ing_name: str) -> str:
-                """Best-effort: fetch default unit for an ingredient name from eligible_df/ingredients_df."""
+                """Fetch the registered unit for an ingredient (robust to legacy column names / casing)."""
                 name = str(ing_name or "").strip()
                 if not name:
                     return ""
-                # Prefer eligible_df (filtered by supplier), fall back to full ingredients_df
+
                 for df in (eligible_df, ingredients_df):
                     try:
-                        if df is None or df.empty or "name" not in df.columns or "unit" not in df.columns:
+                        if df is None or df.empty:
                             continue
-                        row = df.loc[df["name"].astype(str) == name]
+
+                        name_col = _po_pick_col(df, ["name", "ingredient", "ingredient_name"])
+                        unit_col = _po_pick_col(df, ["unit", "uom", "unit_of_measure", "units"])
+                        if not name_col or not unit_col:
+                            continue
+
+                        # First try exact match, then case-insensitive match
+                        row = df.loc[df[name_col].astype(str) == name]
+                        if row.empty:
+                            row = df.loc[df[name_col].astype(str).str.lower() == name.lower()]
+
                         if not row.empty:
-                            u = str(row.iloc[0].get("unit", "") or "").strip()
+                            u = str(row.iloc[0].get(unit_col, "") or "").strip()
                             if u:
                                 return u
                     except Exception:
                         continue
+
                 return ""
 
             # Keep purchase items in session state as a list of dicts (stable across Streamlit versions)
@@ -3684,19 +3716,33 @@ elif page == "Purchases":
             with col_a1:
                 new_ing = st.selectbox("Ingredient", ["Select ingredient..."] + ingredient_options, key="po_new_item_ing")
             default_unit = _po_lookup_unit(new_ing) if new_ing and new_ing != "Select ingredient..." else ""
-            # If unit is empty, auto-load from ingredient (so user doesn't have to re-select every time)
-            if default_unit and not st.session_state.get("po_new_item_unit", ""):
-                st.session_state["po_new_item_unit"] = default_unit
+            # Unit should come from the ingredient registry. When ingredient changes, sync the unit.
+            prev_ing = st.session_state.get("po_prev_new_ing")
+            if new_ing != prev_ing:
+                st.session_state["po_prev_new_ing"] = new_ing
+                # Prefer the ingredient's registered unit; otherwise keep whatever the user had selected.
+                if default_unit:
+                    st.session_state["po_new_item_unit"] = default_unit
+                    st.session_state["po_new_item_unit_sel"] = default_unit
             with col_a2:
                 new_qty = st.number_input("Quantity", min_value=0.0, value=float(st.session_state.get("po_new_item_qty", 1.0)), step=0.1, format="%.3f", key="po_new_item_qty")
             with col_a3:
-                unit_default = (st.session_state.get("po_new_item_unit", "") or default_unit or "").strip()
-                local_units = unit_options
-                if unit_default and unit_default not in local_units:
-                    local_units = sorted({unit_default, *local_units}, key=lambda x: str(x).lower())
-                unit_list = [""] + local_units
-                new_unit = st.selectbox("Unit", unit_list, index=(unit_list.index(unit_default) if unit_default in unit_list else 0), key="po_new_item_unit_sel")
-                st.session_state["po_new_item_unit"] = new_unit
+                # Unit comes from the ingredient's registered unit (from Ingredients).
+                unit_default = (default_unit or "").strip()
+                if unit_default:
+                    # Show as read-only to avoid mismatches; if you want overrides later we can add a toggle.
+                    st.text_input("Unit", value=unit_default, disabled=True, key="po_new_item_unit_ro")
+                    new_unit = unit_default
+                    st.session_state["po_new_item_unit"] = unit_default
+                else:
+                    # Fallback: if the ingredient has no registered unit, let the user pick.
+                    unit_default = (st.session_state.get("po_new_item_unit", "") or "").strip()
+                    local_units = unit_options
+                    if unit_default and unit_default not in local_units:
+                        local_units = sorted({unit_default, *local_units}, key=lambda x: str(x).lower())
+                    unit_list = [""] + local_units
+                    new_unit = st.selectbox("Unit", unit_list, index=(unit_list.index(unit_default) if unit_default in unit_list else 0), key="po_new_item_unit_sel")
+                    st.session_state["po_new_item_unit"] = new_unit
             with col_a4:
                 new_price = st.number_input("Unit Price", min_value=0.0, value=float(st.session_state.get("po_new_item_price", 0.0)), step=0.01, format="%.2f", key="po_new_item_price")
             with col_a5:
@@ -3709,7 +3755,10 @@ elif page == "Purchases":
                     st.error("Quantity must be greater than 0.")
                 else:
                     unit_to_save = (new_unit or default_unit or "").strip()
-                    st.session_state.po_items.append({
+                    if not unit_to_save:
+                        st.error("This ingredient has no registered unit yet. Please set a unit in Ingredients (recommended) or pick one here.")
+                    else:
+                        st.session_state.po_items.append({
                         "Ingredient": str(new_ing),
                         "Quantity": float(new_qty),
                         "Unit": str(unit_to_save),
@@ -3735,12 +3784,16 @@ elif page == "Purchases":
                     ing_val = c1.selectbox("Ingredient", ingredient_options, index=(ingredient_options.index(ing_cur) if ing_cur in ingredient_options else 0), key=f"po_item_ing_{i}")
                     qty_val = c2.number_input("Qty", min_value=0.0, value=float(item.get("Quantity", 0.0) or 0.0), step=0.1, format="%.3f", key=f"po_item_qty_{i}")
                     default_u = _po_lookup_unit(ing_val)
-                    unit_cur = str(item.get("Unit", "") or default_u or "").strip()
-                    local_units = unit_options
-                    if unit_cur and unit_cur not in local_units:
-                        local_units = sorted({unit_cur, *local_units}, key=lambda x: str(x).lower())
-                    unit_list = [""] + local_units
-                    unit_val = c3.selectbox("Unit", unit_list, index=(unit_list.index(unit_cur) if unit_cur in unit_list else 0), key=f"po_item_unit_{i}")
+                    if default_u:
+                        c3.text_input("Unit", value=str(default_u), disabled=True, key=f"po_item_unit_ro_{i}")
+                        unit_val = str(default_u)
+                    else:
+                        unit_cur = str(item.get("Unit", "") or "").strip()
+                        local_units = unit_options
+                        if unit_cur and unit_cur not in local_units:
+                            local_units = sorted({unit_cur, *local_units}, key=lambda x: str(x).lower())
+                        unit_list = [""] + local_units
+                        unit_val = c3.selectbox("Unit", unit_list, index=(unit_list.index(unit_cur) if unit_cur in unit_list else 0), key=f"po_item_unit_{i}")
                     price_val = c4.number_input("Unit Price", min_value=0.0, value=float(item.get("Unit Price", 0.0) or 0.0), step=0.01, format="%.2f", key=f"po_item_price_{i}")
                     if c5.button("🗑️", key=f"po_item_rm_{i}", use_container_width=True):
                         remove_idx = i
