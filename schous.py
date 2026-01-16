@@ -387,6 +387,17 @@ def init_database():
                 total_cost DOUBLE PRECISION,
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )""",
+            """CREATE TABLE IF NOT EXISTS ingredient_inventory_layers (
+                id_layer BIGSERIAL PRIMARY KEY,
+                ingredient TEXT NOT NULL,
+                received_date DATE,
+                source_type TEXT,
+                source_id BIGINT,
+                qty_received DOUBLE PRECISION,
+                qty_remaining DOUBLE PRECISION,
+                unit_cost DOUBLE PRECISION,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
             """CREATE TABLE IF NOT EXISTS production_orders (
                 id_order BIGSERIAL PRIMARY KEY,
                 id_recipe TEXT,
@@ -555,6 +566,17 @@ def init_database():
                 total_cost REAL,
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
+            """CREATE TABLE IF NOT EXISTS ingredient_inventory_layers (
+                id_layer INTEGER PRIMARY KEY AUTOINCREMENT,
+                ingredient TEXT NOT NULL,
+                received_date DATE,
+                source_type TEXT,
+                source_id INTEGER,
+                qty_received REAL,
+                qty_remaining REAL,
+                unit_cost REAL,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
             """CREATE TABLE IF NOT EXISTS production_orders (
                 id_order INTEGER PRIMARY KEY AUTOINCREMENT,
                 id_recipe TEXT,
@@ -679,6 +701,20 @@ def init_database():
             "freight_per_unit": "DOUBLE PRECISION",
             "effective_unit_cost": "DOUBLE PRECISION",
             "total_cost": "DOUBLE PRECISION",
+        },
+    )
+
+
+    _ensure_columns(
+        "ingredient_inventory_layers",
+        {
+            "ingredient": "TEXT",
+            "received_date": "DATE",
+            "source_type": "TEXT",
+            "source_id": "BIGINT",
+            "qty_received": "DOUBLE PRECISION",
+            "qty_remaining": "DOUBLE PRECISION",
+            "unit_cost": "DOUBLE PRECISION",
         },
     )
 
@@ -1083,6 +1119,277 @@ def export_to_excel():
 
 # -----------------------------
 # FUNÇÕES ESPECÍFICAS DO NEGÓCIO
+
+
+# -----------------------------
+# FIFO INVENTORY HELPERS (2026)
+# -----------------------------
+
+def _db_now_date() -> date:
+    try:
+        return datetime.now().date()
+    except Exception:
+        return date.today()
+
+
+def _ensure_layers_table() -> None:
+    """Defensive: make sure the layers table exists even if init_database order changes."""
+    try:
+        init_database()
+    except Exception:
+        pass
+
+
+def _get_layers_sql(order_by: str = "received_date ASC, id_layer ASC") -> str:
+    return (
+        "SELECT id_layer, ingredient, received_date, source_type, source_id, "
+        "COALESCE(qty_received,0) AS qty_received, COALESCE(qty_remaining,0) AS qty_remaining, unit_cost "
+        "FROM ingredient_inventory_layers WHERE ingredient = :ing "
+        f"ORDER BY {order_by}"
+    )
+
+
+def get_inventory_layers(ingredient_name: str) -> pd.DataFrame:
+    _ensure_layers_table()
+    return query_to_df(_get_layers_sql(), {"ing": ingredient_name})
+
+
+def _conn_dialect(conn) -> str:
+    try:
+        return conn.engine.dialect.name.lower()
+    except Exception:
+        try:
+            return get_engine().dialect.name.lower()
+        except Exception:
+            return ""
+
+
+def _insert_layer(conn, ingredient: str, qty: float, unit_cost: float | None, received_date: date | None, source_type: str, source_id: int | None):
+    received_date = received_date or _db_now_date()
+    payload = {
+        "ingredient": str(ingredient),
+        "received_date": received_date,
+        "source_type": str(source_type or ""),
+        "source_id": int(source_id) if source_id is not None else None,
+        "qty_received": float(qty),
+        "qty_remaining": float(qty),
+        "unit_cost": None if unit_cost is None else float(unit_cost),
+    }
+    conn.execute(
+        sql_text(
+            """
+            INSERT INTO ingredient_inventory_layers
+                (ingredient, received_date, source_type, source_id, qty_received, qty_remaining, unit_cost)
+            VALUES
+                (:ingredient, :received_date, :source_type, :source_id, :qty_received, :qty_remaining, :unit_cost)
+            """
+        ),
+        payload,
+    )
+
+
+def _fill_null_cost_layers(conn, ingredient: str, unit_cost: float) -> int:
+    """Set unit_cost for any remaining layers that still have NULL cost.
+
+    This is how we implement: opening stock has no price, and it adopts the *next purchase* price.
+    We only fill NULLs (never overwrite an existing cost).
+    """
+    res = conn.execute(
+        sql_text(
+            """
+            UPDATE ingredient_inventory_layers
+               SET unit_cost = :c
+             WHERE ingredient = :ing
+               AND unit_cost IS NULL
+               AND COALESCE(qty_remaining,0) > 0
+            """
+        ),
+        {"ing": ingredient, "c": float(unit_cost)},
+    )
+    try:
+        return int(getattr(res, "rowcount", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _consume_fifo(conn, ingredient: str, qty: float) -> dict:
+    """Consume qty from oldest layers first. Returns dict with total_cost + flags."""
+    qty_to_consume = float(qty)
+    if qty_to_consume <= 0:
+        return {"qty": 0.0, "total_cost": 0.0, "missing_cost": False}
+
+    layers = conn.execute(sql_text(_get_layers_sql()), {"ing": ingredient}).fetchall()
+    total_cost = 0.0
+    missing_cost = False
+
+    for (id_layer, ing, received_date, source_type, source_id, qty_received, qty_remaining, unit_cost) in layers:
+        if qty_to_consume <= 0:
+            break
+        remaining = float(qty_remaining or 0.0)
+        if remaining <= 0:
+            continue
+        take = remaining if remaining <= qty_to_consume else qty_to_consume
+        new_rem = remaining - take
+
+        # cost
+        if unit_cost is None:
+            missing_cost = True
+            layer_cost = 0.0
+        else:
+            layer_cost = float(unit_cost) * take
+        total_cost += layer_cost
+
+        conn.execute(
+            sql_text(
+                "UPDATE ingredient_inventory_layers SET qty_remaining = :r WHERE id_layer = :id"
+            ),
+            {"r": float(new_rem), "id": int(id_layer)},
+        )
+        qty_to_consume -= take
+
+    return {"qty": float(qty) - qty_to_consume, "total_cost": float(total_cost), "missing_cost": bool(missing_cost), "short": qty_to_consume > 1e-9}
+
+
+def _estimate_fifo_cost(conn, ingredient: str, qty: float) -> dict:
+    """Estimate FIFO cost without mutating the database."""
+    qty_to = float(qty)
+    if qty_to <= 0:
+        return {"total_cost": 0.0, "avg_unit_cost": 0.0, "missing_cost": False, "short": False}
+
+    rows = conn.execute(sql_text(_get_layers_sql()), {"ing": ingredient}).fetchall()
+    total_cost = 0.0
+    used = 0.0
+    missing_cost = False
+
+    for (id_layer, ing, received_date, source_type, source_id, qty_received, qty_remaining, unit_cost) in rows:
+        if qty_to <= 0:
+            break
+        remaining = float(qty_remaining or 0.0)
+        if remaining <= 0:
+            continue
+        take = remaining if remaining <= qty_to else qty_to
+        if unit_cost is None:
+            missing_cost = True
+            # If we still have NULL-cost layers, try to use the *next known cost* (replacement cost).
+            # This keeps estimates meaningful while you are still doing opening stock adjustments.
+            # Strategy: look ahead for the next non-null cost.
+            next_cost = None
+            for (_, _, _, _, _, _, next_rem, next_uc) in rows:
+                if next_uc is not None and float(next_rem or 0) > 0:
+                    next_cost = float(next_uc)
+                    break
+            if next_cost is None:
+                next_cost = 0.0
+            total_cost += next_cost * take
+        else:
+            total_cost += float(unit_cost) * take
+        used += take
+        qty_to -= take
+
+    avg = (total_cost / used) if used > 0 else 0.0
+    return {"total_cost": float(total_cost), "avg_unit_cost": float(avg), "missing_cost": bool(missing_cost), "short": qty_to > 1e-9}
+
+def estimate_fifo_cost(ingredient_name: str, qty: float) -> dict:
+    """Estimate FIFO cost without changing inventory.
+
+    If there is opening stock with NULL cost and a future/present purchase layer exists,
+    this uses that next known cost as replacement for the estimate.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        return _estimate_fifo_cost(conn, ingredient_name, float(qty))
+
+
+
+def _recompute_ingredient_rollup(conn, ingredient: str) -> None:
+    """Sync ingredients.stock + ingredients.unit_cost from layers.
+
+    unit_cost behavior:
+      - If there are any remaining NULL-cost layers, set unit_cost = next known purchase cost (replacement).
+      - Otherwise, set unit_cost = weighted average of remaining layers.
+
+    (Beer costing itself uses FIFO directly.)
+    """
+    rows = conn.execute(sql_text(_get_layers_sql()), {"ing": ingredient}).fetchall()
+    stock = 0.0
+    has_null = False
+    total_value = 0.0
+    total_qty_costed = 0.0
+
+    next_known_cost = None
+    for (id_layer, ing, received_date, source_type, source_id, qty_received, qty_remaining, unit_cost) in rows:
+        rem = float(qty_remaining or 0.0)
+        if rem <= 0:
+            continue
+        stock += rem
+        if unit_cost is None:
+            has_null = True
+        else:
+            total_value += float(unit_cost) * rem
+            total_qty_costed += rem
+            if next_known_cost is None:
+                next_known_cost = float(unit_cost)
+
+    if has_null and next_known_cost is not None:
+        unit_cost_roll = float(next_known_cost)
+    else:
+        unit_cost_roll = float(total_value / total_qty_costed) if total_qty_costed > 0 else 0.0
+
+    conn.execute(
+        sql_text(
+            """
+            UPDATE ingredients
+               SET stock = :s,
+                   unit_cost = :c,
+                   last_updated = CURRENT_TIMESTAMP
+             WHERE name = :n
+            """
+        ),
+        {"s": float(stock), "c": float(unit_cost_roll), "n": str(ingredient)},
+    )
+
+
+def adjust_opening_stock_fifo(ingredient: str, new_stock: float, as_of: date | None = None):
+    """When you manually set Current Stock (opening balance), reflect it as FIFO layers.
+
+    - If stock increases: create an Opening layer with NULL cost.
+    - If stock decreases: consume FIFO (oldest layers first).
+
+    This keeps your opening stock valued at the *next purchase* price.
+    """
+    require_admin_action()
+    engine = get_engine()
+    as_of = as_of or _db_now_date()
+
+    with engine.begin() as conn:
+        cur = conn.execute(sql_text("SELECT COALESCE(stock,0) FROM ingredients WHERE name = :n"), {"n": ingredient}).scalar()
+        cur_stock = float(cur or 0.0)
+        target = float(new_stock or 0.0)
+        delta = target - cur_stock
+
+        if abs(delta) < 1e-9:
+            return
+
+        if delta > 0:
+            _insert_layer(conn, ingredient, delta, None, as_of, "Opening", None)
+        else:
+            _consume_fifo(conn, ingredient, abs(delta))
+
+        _recompute_ingredient_rollup(conn, ingredient)
+
+def rename_ingredient_fifo(old_name: str, new_name: str) -> None:
+    """Rename ingredient in FIFO layers table (keeps costing history consistent)."""
+    require_admin_action()
+    if not old_name or not new_name or old_name == new_name:
+        return
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text("UPDATE ingredient_inventory_layers SET ingredient = :new WHERE ingredient = :old"),
+            {"old": str(old_name), "new": str(new_name)},
+        )
+    bump_db_version()
+
 # -----------------------------
 def update_stock_from_purchase(ingredient_name, quantity):
     """Atualiza o estoque após uma compra"""
@@ -1093,37 +1400,24 @@ def update_stock_from_purchase(ingredient_name, quantity):
 
 
 def update_stock_and_cost_from_purchase(ingredient_name: str, quantity: float, effective_unit_cost: float):
-    """Atualiza estoque + custo unitário (média ponderada) após uma compra.
+    """Atualiza estoque usando FIFO (layers) após uma compra.
 
-    O effective_unit_cost já deve incluir o rateio do frete por unidade.
+    Regras:
+    - Cada compra cria uma *layer* nova com custo conhecido.
+    - Se existir estoque de abertura (layer com custo NULL), ele adota o custo da *próxima compra*.
     """
     try:
-        current = query_to_df(
-            "SELECT COALESCE(stock, 0) AS stock, COALESCE(unit_cost, 0) AS unit_cost FROM ingredients WHERE name = :n",
-            {"n": ingredient_name},
-        )
-        if current.empty:
-            # fallback: só atualiza estoque
-            return update_stock_from_purchase(ingredient_name, quantity)
-
-        cur_stock = float(current.iloc[0]["stock"] or 0)
-        cur_cost = float(current.iloc[0]["unit_cost"] or 0)
-        new_stock = cur_stock + float(quantity)
-
-        # média ponderada por estoque
-        if new_stock > 0:
-            new_cost = ((cur_stock * cur_cost) + (float(quantity) * float(effective_unit_cost))) / new_stock
-        else:
-            new_cost = float(effective_unit_cost)
-
-        return execute_query(
-            """UPDATE ingredients
-               SET stock = stock + :q,
-                   unit_cost = :c,
-                   last_updated = CURRENT_TIMESTAMP
-               WHERE name = :n""",
-            {"q": float(quantity), "c": float(new_cost), "n": ingredient_name},
-        )
+        require_admin_action()
+        engine = get_engine()
+        with engine.begin() as conn:
+            # 1) Add purchase layer
+            _insert_layer(conn, ingredient_name, float(quantity), float(effective_unit_cost), _db_now_date(), "Purchase", None)
+            # 2) Opening stock (NULL-cost) adopts the next purchase cost
+            _fill_null_cost_layers(conn, ingredient_name, float(effective_unit_cost))
+            # 3) Rollup
+            _recompute_ingredient_rollup(conn, ingredient_name)
+        bump_db_version()
+        return True
     except Exception:
         # never block purchase flow
         return update_stock_from_purchase(ingredient_name, quantity)
@@ -1225,7 +1519,26 @@ def save_purchase_order_fast(
             a["cost_total"] += float(it["quantity"]) * float(it["effective_unit_cost"])
 
         names = list(agg.keys())
+
+        # --- FIFO layers updates ---
+        # Each purchase becomes a new layer. Any opening stock (unit_cost NULL) adopts the *next purchase* price.
         if names:
+            for name in names:
+                add_qty = float(agg[name]["qty"])
+                if transaction_type == "Purchase":
+                    # Create one layer per ingredient per PO (aggregate lines within the same PO)
+                    avg_cost = float(agg[name]["cost_total"] / add_qty) if add_qty > 0 else 0.0
+                    _insert_layer(conn, name, add_qty, avg_cost, po_date, "PurchaseOrder", po_id)
+                    _fill_null_cost_layers(conn, name, avg_cost)
+                else:
+                    # Non-purchase: reduce stock via FIFO
+                    _consume_fifo(conn, name, add_qty)
+
+            # Sync ingredients rollup from layers (overrides weighted-average logic below)
+            for name in names:
+                _recompute_ingredient_rollup(conn, name)
+
+        if False and names:
             # fetch current stock/cost in a single query
             params = {f"n{i}": n for i, n in enumerate(names)}
             in_clause = ", ".join([f":n{i}" for i in range(len(names))])
@@ -1285,11 +1598,24 @@ def save_purchase_order_fast(
     return po_id
 
 def update_stock_from_usage(ingredient_name, quantity):
-    """Atualiza o estoque após uso em produção"""
-    return execute_query(
-        "UPDATE ingredients SET stock = stock - :quantity, last_updated = CURRENT_TIMESTAMP WHERE name = :ingredient_name",
-        {"quantity": quantity, "ingredient_name": ingredient_name}
-    )
+    """Atualiza o estoque após uso em produção (FIFO).
+
+    Deduz das layers mais antigas primeiro.
+    """
+    try:
+        require_admin_action()
+        engine = get_engine()
+        with engine.begin() as conn:
+            _consume_fifo(conn, ingredient_name, float(quantity))
+            _recompute_ingredient_rollup(conn, ingredient_name)
+        bump_db_version()
+        return True
+    except Exception:
+        # fallback (legacy)
+        return execute_query(
+            "UPDATE ingredients SET stock = stock - :quantity, last_updated = CURRENT_TIMESTAMP WHERE name = :ingredient_name",
+            {"quantity": quantity, "ingredient_name": ingredient_name}
+        )
 
 def check_ingredient_usage(ingredient_id):
     """Verifica se um ingrediente está em uso em receitas"""
@@ -3117,7 +3443,7 @@ elif page == "Ingredients":
                             "manufacturer": manufacturer,
                             "category": category,
                             "unit": unit,
-                            "stock": stock,
+                            "stock": 0.0,
                             # Prices/costs are calculated from Purchases (incl. freight allocation)
                             "unit_cost": 0.0,
                             "low_stock_threshold": low_stock_threshold,
@@ -3135,6 +3461,12 @@ elif page == "Ingredients":
                         }
 
                         insert_data("ingredients", new_ingredient)
+                        # If you are initializing stock (opening balance), create a NULL-cost opening layer (FIFO)
+                        if stock and float(stock) > 0:
+                            try:
+                                adjust_opening_stock_fifo(ing_name, float(stock))
+                            except Exception:
+                                pass
                         data = get_all_data()
                         st.success(f"✅ Ingredient '{ing_name}' added successfully!")
                         st.rerun()
@@ -3243,7 +3575,6 @@ elif page == "Ingredients":
                                 "manufacturer": new_manufacturer,
                                 "category": new_category,
                                 "unit": new_unit,
-                                "stock": new_stock,
                                 "supplier_id": new_supplier_id,
                                 "supplier_name": None if new_supplier == "Select Supplier" else str(new_supplier),
                                 "supplier": None if new_supplier == "Select Supplier" else str(new_supplier),
@@ -3257,6 +3588,14 @@ elif page == "Ingredients":
                                 updates["expiry_date"] = new_expiry if new_expiry else None
                             
                             update_data("ingredients", updates, "id = :id", {"id": ing_data["id"]})
+                            # Keep FIFO layers consistent (opening stock has no cost until next purchase)
+                            try:
+                                old_name = str(ing_data.get("name") or selected_ingredient)
+                                if old_name != str(new_name):
+                                    rename_ingredient_fifo(old_name, str(new_name))
+                                adjust_opening_stock_fifo(str(new_name), float(new_stock))
+                            except Exception:
+                                pass
                             data = get_all_data()
                             st.success(f"✅ Ingredient '{new_name}' updated successfully!")
                             st.rerun()
@@ -3275,7 +3614,7 @@ elif page == "Ingredients":
                     with col_btn3:
                         if st.button("🔄 Reset Stock", use_container_width=True, key="reset_stock_btn"):
                             # Apenas resetar o estoque para 0
-                            update_data("ingredients", {"stock": 0}, "id = :id", {"id": ing_data["id"]})
+                            adjust_opening_stock_fifo(selected_ingredient, 0.0)
                             data = get_all_data()
                             st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
                             st.rerun()
@@ -4650,10 +4989,13 @@ elif page == "Recipes":
                 
                 with col_ing3:
                     if selected_ingredient and quantity > 0:
-                        # Mostrar custo estimado
-                        unit_cost = ing_info.get('unit_cost', 0)
-                        total_cost = unit_cost * quantity
-                        st.write(f"**Cost:** ${total_cost:.2f}")
+                        # Mostrar custo estimado (FIFO)
+                        est = estimate_fifo_cost(str(selected_ingredient), float(quantity))
+                        unit_cost = float(est.get('avg_unit_cost', 0) or 0)
+                        total_cost = float(est.get('total_cost', 0) or 0)
+                        st.write(f"**Cost (FIFO):** ${total_cost:.2f}")
+                        if est.get('missing_cost'):
+                            st.info("ℹ️ This ingredient has opening stock without a purchase price yet. The estimate uses the next known purchase cost (replacement) when available.")
                         
                         # Verificar estoque
                         stock = ing_info.get('stock', 0)
