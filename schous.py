@@ -1745,7 +1745,7 @@ def handle_delete_confirmation():
             st.rerun()
 
 # Verificar se há confirmação pendente
-if st.session_state.delete_confirmation["type"] in ["ingredient", "supplier", "brewery"]:
+if st.session_state.delete_confirmation["type"] in ["supplier", "brewery"]:
     handle_delete_confirmation()
 
 # -----------------------------
@@ -3396,6 +3396,39 @@ elif page == "Ingredients":
                             data = get_all_data()
                             st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
                             st.rerun()
+
+                    # Inline delete confirmation (must appear directly below the Delete button)
+                    delete_conf = st.session_state.get("delete_confirmation", {"type": None})
+                    if delete_conf.get("type") == "ingredient" and delete_conf.get("id") == ing_data["id"]:
+                        st.markdown(f"""
+                        <div class="delete-confirmation">
+                            <h3>⚠️ Confirm Ingredient Deletion</h3>
+                            <p>Are you sure you want to delete <strong>'{delete_conf.get('name')}'</strong>?</p>
+                            <p>This action cannot be undone.</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        c1, c2, c3 = st.columns([1, 1, 2])
+                        with c1:
+                            if st.button("✅ Yes, Delete", type="primary", use_container_width=True,
+                                         key=f"confirm_delete_ing_{ing_data['id']}"):
+                                # Safety check: ingredient cannot be deleted if used in recipes
+                                if check_ingredient_usage(ing_data["id"]):
+                                    st.error("Failed to delete ingredient. It may be used in recipes.")
+                                else:
+                                    id_col = get_table_id_column("ingredients")
+                                    delete_data("ingredients", f"{id_col} = :id", {"id": ing_data["id"]})
+                                    st.success(f"Ingredient '{delete_conf.get('name')}' deleted successfully!")
+
+                                st.session_state.delete_confirmation = {"type": None, "id": None, "name": None}
+                                data = get_all_data()
+                                st.rerun()
+
+                        with c2:
+                            if st.button("❌ Cancel", use_container_width=True,
+                                         key=f"cancel_delete_ing_{ing_data['id']}"):
+                                st.session_state.delete_confirmation = {"type": None, "id": None, "name": None}
+                                st.rerun()
             else:
                 st.info("No ingredients available to edit.")
         
