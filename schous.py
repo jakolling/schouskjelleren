@@ -1927,7 +1927,7 @@ elif page == "Breweries":
 
 
     if is_viewer():
-        st.info('👀 View-only mode: you can browse and generate reports, but you can't create/edit/delete anything.')
+        st.info("👀 View-only mode: you can browse and generate reports, but you can't create/edit/delete anything.")
         breweries_df = data.get('breweries', pd.DataFrame())
         equipment_df = data.get('equipment', pd.DataFrame())
         st.subheader('📍 Breweries')
