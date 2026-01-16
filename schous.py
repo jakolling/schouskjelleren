@@ -17,6 +17,7 @@ import calendar
 import re
 import os
 import tempfile
+from typing import Optional
 
 # -----------------------------
 # AUTH + CONFIGURAÇÃO DO BANCO DE DADOS (Multiusuário)
@@ -1066,6 +1067,91 @@ def delete_data(table_name: str, where_clause: str, where_params: dict):
         res = conn.execute(sql_text(sql), where_params or {})
     bump_db_version()
     return res.rowcount
+
+
+# --- Ingredient hard-delete hygiene ---
+# If you delete an ingredient, you almost always also want it gone from “stock” views.
+# Older schemas store movements/purchases by ingredient NAME (text), not by FK id.
+# So we do a best-effort purge of dependent rows when the user confirms deletion.
+
+def _table_exists(table_name: str) -> bool:
+    try:
+        engine = get_engine()
+        return inspect(engine).has_table(table_name)
+    except Exception:
+        return False
+
+
+def _table_columns(table_name: str) -> list[str]:
+    try:
+        engine = get_engine()
+        d = engine.dialect.name.lower()
+        # Prefer cached column lookup when available
+        try:
+            cols = get_table_columns_cached(table_name, d)
+        except Exception:
+            cols = []
+        if cols:
+            return cols
+        return get_table_columns(table_name)
+    except Exception:
+        return []
+
+
+def purge_ingredient_references(ingredient_id, ingredient_name: str | None) -> int:
+    """Best-effort purge of rows in other tables that reference an ingredient.
+
+    This is meant for *initial setup/cleanup* workflows, where deleting an ingredient
+    should also remove it from stock history / purchase items.
+
+    Returns number of deleted rows (best effort).
+    """
+    require_admin_action()
+
+    deleted = 0
+    name = (ingredient_name or '').strip()
+
+    # Tables we may need to clean up (many deployments won't have all of them)
+    candidate_tables = [
+        'purchases',
+        'purchase_order_items',
+        'ingredient_inventory_layers',
+        'inventory_layers',
+        'stock_movements',
+        'inventory_transactions',
+    ]
+
+    # Common column names we’ve seen across schemas
+    id_cols = ['ingredient_id', 'id_ingredient', 'ingredientid']
+    name_cols = ['ingredient', 'ingredient_name', 'name']
+
+    for tbl in candidate_tables:
+        if not _table_exists(tbl):
+            continue
+        cols = set(c.lower() for c in _table_columns(tbl))
+
+        # Delete by FK id where possible
+        if ingredient_id is not None:
+            for c in id_cols:
+                if c in cols:
+                    try:
+                        deleted += delete_data(tbl, f"{c} = :iid", {'iid': ingredient_id})
+                    except Exception:
+                        pass
+                    break
+
+        # Delete by ingredient text name (legacy schemas)
+        if name:
+            for c in name_cols:
+                if c in cols:
+                    # For purchase_order_items, a 'name' column may refer to the item name; still ok.
+                    try:
+                        deleted += delete_data(tbl, f"{c} = :nm", {'nm': name})
+                    except Exception:
+                        pass
+                    break
+
+    return deleted
 
 def _get_all_data_uncached() -> dict[str, pd.DataFrame]:
     """Loads all tables from DB (no cache)."""
@@ -3462,6 +3548,8 @@ elif page == "Ingredients":
                                     pk_value = ing_data.get(id_col) if isinstance(ing_data, dict) else None
                                     if pk_value is None:
                                         pk_value = ing_data.get("id") if isinstance(ing_data, dict) else None
+                                    # Also purge any orphaned stock/purchase rows so the ingredient truly disappears from stock views
+                                    purge_ingredient_references(pk_value, delete_conf.get("name"))
                                     delete_data("ingredients", f"{id_col} = :id", {"id": pk_value})
                                     st.success(f"Ingredient '{delete_conf.get('name')}' deleted successfully!")
 
