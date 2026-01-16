@@ -3784,39 +3784,60 @@ elif page == "Purchases":
             items = items[(items["Ingredient"].astype(str).str.len() > 0) & (items["Quantity"] > 0)]
 
             total_qty = float(items["Quantity"].sum()) if len(items) else 0.0
-            freight_per_unit = (float(freight_total) / total_qty) if (transaction_type == "Purchase" and total_qty > 0) else 0.0
+
+            # Supplier order confirmations typically total as:
+            #   subtotal = sum(qty * unit_price)
+            #   order_total = subtotal + freight_total
+            # For inventory valuation we still need an allocated freight per line.
+            # Allocating by subtotal works across mixed units (kg, unit, etc.).
+            subtotal = float((items["Quantity"] * items["Unit Price"]).sum()) if len(items) else 0.0
+            freight_total_float = float(freight_total) if freight_total else 0.0
 
             preview_rows = []
             for _, r in items.iterrows():
                 ing = str(r["Ingredient"])
                 qty = float(r["Quantity"])
                 unit_price = float(r["Unit Price"])
+
                 # Unit is sourced from the ingredient registry during entry.
                 # Use it directly to avoid schema/name mismatches.
                 unit = str(r.get("Unit", "") or "")
-                eff_unit_cost = unit_price + freight_per_unit
+
+                line_subtotal = qty * unit_price
+                if transaction_type == "Purchase" and subtotal > 0:
+                    allocated_freight = freight_total_float * (line_subtotal / subtotal)
+                else:
+                    allocated_freight = 0.0
+
+                freight_per_unit_line = (allocated_freight / qty) if qty > 0 else 0.0
+                eff_unit_cost = unit_price + freight_per_unit_line
+
                 preview_rows.append(
                     {
                         "Ingredient": ing,
                         "Quantity": qty,
                         "Unit": unit,
                         "Unit Price": unit_price,
-                        "Freight / Unit": freight_per_unit,
+                        "Line Subtotal": line_subtotal,
+                        "Allocated Freight": allocated_freight,
+                        "Freight / Unit": freight_per_unit_line,
                         "Effective Unit Cost": eff_unit_cost,
-                        "Line Total": qty * eff_unit_cost,
+                        "Line Total": line_subtotal + allocated_freight,
                     }
                 )
 
             if preview_rows:
                 preview_df = pd.DataFrame(preview_rows)
 
-                col_p1, col_p2, col_p3 = st.columns(3)
+                col_p1, col_p2, col_p3, col_p4 = st.columns(4)
                 with col_p1:
                     st.metric("Total Units", f"{total_qty:,.3f}")
                 with col_p2:
-                    st.metric("Freight / Unit", f"${freight_per_unit:,.4f}")
+                    st.metric("Subtotal", f"${subtotal:,.2f}")
                 with col_p3:
-                    st.metric("Order Total", f"${preview_df['Line Total'].sum():,.2f}")
+                    st.metric("Freight", f"${freight_total_float:,.2f}")
+                with col_p4:
+                    st.metric("Order Total", f"${(subtotal + freight_total_float):,.2f}")
 
                 st.dataframe(preview_df, use_container_width=True, height=300)
             else:
