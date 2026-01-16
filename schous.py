@@ -32,6 +32,25 @@ from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
 
+def format_money(value, currency_symbol="$", decimals=2, decimal_comma=True):
+    """Format numeric currency values for UI.
+
+    - decimals: number of decimal places
+    - decimal_comma: if True, use comma as decimal separator (e.g., 12,60)
+    """
+    if value is None:
+        return f"{currency_symbol}—"
+    try:
+        x=float(value)
+    except Exception:
+        return f"{currency_symbol}—"
+    s=f"{x:,.{decimals}f}"
+    if decimal_comma:
+        # swap thousands/decimal separators: 1,234.56 -> 1.234,56
+        s=s.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{currency_symbol}{s}"
+
+
 def render_status_badge(status: str | None) -> str:
     """Return a small HTML badge for statuses like Active/Inactive/Planned/Completed."""
     s = (status or "").strip()
@@ -215,6 +234,30 @@ def get_table_columns_cached(table_name: str, dialect: str | None = None) -> lis
     d = (dialect or engine.dialect.name).lower()
     cols = _get_table_columns_cached(table_name, d)
     return cols if cols else []
+
+
+def get_table_id_column(table_name: str, dialect: str | None = None) -> str:
+    """Returns the best-guess primary key column name for a table.
+
+    We keep this small and defensive because the app supports legacy schemas
+    where tables use names like `id_ingredient` instead of `id`.
+    """
+    cols = get_table_columns_cached(table_name, dialect)
+    for cand in (
+        "id",
+        "id_ingredient",
+        "id_supplier",
+        "id_brewery",
+        "id_recipe",
+        "id_receipt",
+        "id_order",
+        "id_purchase_order",
+        "id_purchase_item",
+    ):
+        if cand in cols:
+            return cand
+    # Fallback (may still error if truly absent, but avoids crashing logic here)
+    return "id"
 
 def is_admin() -> bool:
     return st.session_state.get("auth_role") == "admin"
@@ -1302,12 +1345,72 @@ def update_stock_from_usage(ingredient_name, quantity):
     )
 
 def check_ingredient_usage(ingredient_id):
-    """Verifica se um ingrediente está em uso em receitas"""
-    result = query_to_df(
-        "SELECT COUNT(*) as count FROM recipe_items WHERE id_ingredient = :ingredient_id",
-        {"ingredient_id": ingredient_id}
-    )
-    return result.iloc[0]['count'] > 0
+    """Verifica se um ingrediente está em uso em receitas.
+
+    Esta função precisa ser compatível com diferentes esquemas:
+    - Alguns bancos guardam o vínculo por id (ex.: id_ingredient / ingredient_id).
+    - Outros guardam apenas o nome do ingrediente em recipe_items (ingredient_name).
+
+    A ideia aqui é **não quebrar** o app quando o esquema não tem a coluna esperada.
+    """
+
+    try:
+        engine = get_engine()
+        dialect = getattr(engine.dialect, "name", "").lower() or None
+
+        # Se a tabela nem existir ainda, não está em uso.
+        recipe_cols = get_table_columns_cached("recipe_items", dialect)
+        if not recipe_cols:
+            return False
+
+        # 1) Esquema por ID
+        if "id_ingredient" in recipe_cols:
+            df = query_to_df(
+                "SELECT COUNT(*) AS count FROM recipe_items WHERE id_ingredient = :ingredient_id",
+                {"ingredient_id": ingredient_id},
+            )
+            return (not df.empty) and (int(df.iloc[0]["count"]) > 0)
+
+        if "ingredient_id" in recipe_cols:
+            df = query_to_df(
+                "SELECT COUNT(*) AS count FROM recipe_items WHERE ingredient_id = :ingredient_id",
+                {"ingredient_id": ingredient_id},
+            )
+            return (not df.empty) and (int(df.iloc[0]["count"]) > 0)
+
+        # 2) Esquema por nome (recipe_items.ingredient_name)
+        if "ingredient_name" in recipe_cols:
+            ing_cols = get_table_columns_cached("ingredients", dialect) or []
+            # Descobrir qual coluna é o ID no schema atual
+            # Prefer a coluna real do schema (normalmente id_ingredient). Só usa `id` se existir mesmo.
+            ing_id_col = (
+                "id_ingredient" if "id_ingredient" in ing_cols else ("id" if "id" in ing_cols else None)
+            )
+            if not ing_id_col:
+                return False
+
+            ing_df = query_to_df(
+                f"SELECT name FROM ingredients WHERE {ing_id_col} = :id",
+                {"id": ingredient_id},
+            )
+            if ing_df.empty:
+                return False
+            ing_name = str(ing_df.iloc[0]["name"])
+
+            df = query_to_df(
+                "SELECT COUNT(*) AS count FROM recipe_items WHERE ingredient_name = :name",
+                {"name": ing_name},
+            )
+            return (not df.empty) and (int(df.iloc[0]["count"]) > 0)
+
+        # Sem coluna compatível -> assume não usado
+        return False
+
+    except Exception:
+        # Se houver algum problema de schema/SQL, evita crash ao deletar.
+        # Melhor ser conservador? Aqui escolho 'não usado' para não travar o app.
+        # Se preferir bloquear deletar quando der erro, troque para `return True`.
+        return False
 
 def check_supplier_usage(supplier_name):
     """Verifica se um fornecedor tem compras associadas"""
@@ -1613,7 +1716,8 @@ def handle_delete_confirmation():
                 if check_ingredient_usage(delete_id):
                     st.error("Failed to delete ingredient. It may be used in recipes.")
                 else:
-                    delete_data("ingredients", "id = :id", {"id": delete_id})
+                    id_col = get_table_id_column("ingredients")
+                    delete_data("ingredients", f"{id_col} = :id", {"id": delete_id})
                     st.success(f"Ingredient '{delete_name}' deleted successfully!")
             
             elif delete_type == "supplier":
@@ -3192,7 +3296,7 @@ elif page == "Ingredients":
                     with col_edit2:
                         # Unit cost is calculated from Purchases (incl. freight allocation)
                         current_cost = float(ing_data.get("unit_cost", 0) or 0)
-                        st.metric("Current Unit Cost (calculated)", f"${current_cost:,.4f}")
+                        st.metric("Current Unit Cost (calculated)", format_money(current_cost, currency_symbol="$", decimals=2, decimal_comma=True))
 
                         # Supplier relationship
                         suppliers_df = data.get("suppliers", pd.DataFrame())
@@ -3267,7 +3371,8 @@ elif page == "Ingredients":
                             if 'new_expiry' in locals():
                                 updates["expiry_date"] = new_expiry if new_expiry else None
                             
-                            update_data("ingredients", updates, "id = :id", {"id": ing_data["id"]})
+                            id_col = get_table_id_column("ingredients")
+                            update_data("ingredients", updates, f"{id_col} = :id", {"id": ing_data["id"]})
                             data = get_all_data()
                             st.success(f"✅ Ingredient '{new_name}' updated successfully!")
                             st.rerun()
@@ -3286,7 +3391,8 @@ elif page == "Ingredients":
                     with col_btn3:
                         if st.button("🔄 Reset Stock", use_container_width=True, key="reset_stock_btn"):
                             # Apenas resetar o estoque para 0
-                            update_data("ingredients", {"stock": 0}, "id = :id", {"id": ing_data["id"]})
+                            id_col = get_table_id_column("ingredients")
+                            update_data("ingredients", {"stock": 0}, f"{id_col} = :id", {"id": ing_data["id"]})
                             data = get_all_data()
                             st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
                             st.rerun()
@@ -3708,7 +3814,7 @@ elif page == "Purchases":
                 with col_p1:
                     st.metric("Total Units", f"{total_qty:,.3f}")
                 with col_p2:
-                    st.metric("Freight / Unit", f"${freight_per_unit:,.4f}")
+                    st.metric("Freight / Unit", format_money(freight_per_unit, currency_symbol="$", decimals=2, decimal_comma=True))
                 with col_p3:
                     st.metric("Order Total", f"${preview_df['Line Total'].sum():,.2f}")
 
