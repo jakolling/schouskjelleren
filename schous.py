@@ -3040,14 +3040,13 @@ elif page == "Ingredients":
                     manufacturer = st.text_input("Manufacturer", key="new_ing_manufacturer")
 
                     category_options = [
-                        "Grain",
-                        "Malt Extract",
+                        "Fermentable",
                         "Hops",
                         "Yeast",
-                        "Sugar",
-                        "Water Treatment",
-                        "Spices",
-                        "Fruits",
+                        "Fruit",
+                        "Spice",
+                        "Brewing Salt",
+                        "Packaging",
                         "Other",
                     ]
                     category = st.selectbox("Category*", category_options, key="new_ing_category")
@@ -3161,10 +3160,10 @@ elif page == "Ingredients":
                         new_manufacturer = st.text_input("Manufacturer", value=ing_data.get("manufacturer", ""), key="edit_ing_manufacturer")
                         
                         category_options = [
-                            "Grain", "Malt Extract", "Hops", "Yeast", "Sugar", 
-                            "Water Treatment", "Spices", "Fruits", "Other"
+                            "Fermentable", "Hops", "Yeast", "Fruit", "Spice", 
+                            "Brewing Salt", "Packaging", "Other"
                         ]
-                        current_category = ing_data.get("category", "Grain")
+                        current_category = ing_data.get("category", "Fermentable")
                         new_category = st.selectbox("Category", category_options, 
                                                   index=category_options.index(current_category) if current_category in category_options else 0,
                                                   key="edit_ing_category")
