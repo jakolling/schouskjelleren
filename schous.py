@@ -5546,6 +5546,27 @@ elif page == "Production":
     eq_type_col = _col(equipment_df, 'type')
     eq_cap_col = _col(equipment_df, 'capacity_liters', 'capacity')
 
+    def _brewhouse_system_options():
+        """Return equipment names suitable as brewhouse / brewing system."""
+        if equipment_df is None or equipment_df.empty or not eq_name_col:
+            return []
+        df = equipment_df.copy()
+        if eq_type_col and eq_type_col in df.columns:
+            t = df[eq_type_col].astype(str).str.lower()
+            mask = (
+                t.str.contains('brewhouse', na=False)
+                | t.str.contains('brew', na=False)
+                | t.str.contains('system', na=False)
+                | t.str.contains('pilot', na=False)
+            )
+            cand = df[mask]
+            if cand.empty:
+                cand = df
+        else:
+            cand = df
+        return sorted(pd.unique(cand[eq_name_col].astype(str)))
+
+
     # Helpers
     def _is_active_batch_status(s: str | None) -> bool:
         s = (s or '').strip().lower()
@@ -5608,7 +5629,16 @@ elif page == "Production":
                         with c2:
                             brewery_options = breweries_df[brewery_name_col].astype(str).tolist() if breweries_df is not None and not breweries_df.empty and brewery_name_col else []
                             brewery_name = st.selectbox('Brewery / location', brewery_options, index=0 if brewery_options else None)
-                            brewhouse = st.text_input('Brewhouse / system', placeholder='e.g., Pilot system')
+                            brewhouse_opts = _brewhouse_system_options()
+                            brewhouse_choice = st.selectbox(
+                                'Brewhouse / system',
+                                [''] + brewhouse_opts + (['(Custom...)'] if brewhouse_opts else ['(Custom...)']),
+                                index=0,
+                            )
+                            if brewhouse_choice == '(Custom...)':
+                                brewhouse = st.text_input('Custom brewhouse / system', placeholder='e.g., Pilot system')
+                            else:
+                                brewhouse = brewhouse_choice
                             batch_code = st.text_input('Batch code (optional)', placeholder='e.g., A-2026-001')
                         notes = st.text_area('Notes')
                         submit = st.form_submit_button('Create order', type='primary', use_container_width=True)
@@ -5704,494 +5734,488 @@ elif page == "Production":
                 c4.metric('Vessel', current_vessel or '-')
 
                 st.markdown('---')
-
-                # Timeline
-                st.subheader("Timeline")
-                if events_df is None or events_df.empty:
-                    st.caption("No events yet.")
+                # Tabs: View vs Actions
+                if is_admin():
+                    view_tab, actions_tab = st.tabs(["View", "Actions"])
                 else:
-                    e_bid = _col(events_df, 'batch_id')
-                    e_date = _col(events_df, 'event_date')
-                    if e_bid:
-                        ev = events_df[events_df[e_bid] == batch_id].copy()
-                        if not ev.empty:
-                            if e_date:
-                                try:
-                                    ev[e_date] = pd.to_datetime(ev[e_date], errors='coerce')
-                                    ev = ev.sort_values(e_date)
-                                except Exception:
-                                    pass
-                            st.dataframe(ev[[c for c in ev.columns if c not in ('created_date',)]], use_container_width=True)
-                        else:
-                            st.caption("No events for this batch.")
+                    view_tab, = st.tabs(["View"])
+                    actions_tab = None
 
-                # Actions
-                st.markdown('---')
-                st.subheader("Actions")
-
-                action = st.selectbox("Add action", [
-                    'Brew', 'Dry Hop', 'Add Adjunct', 'Conditioning', 'Transfer', 'Kegging', 'Finish Batch'
-                ], key=f'action_type_{batch_id}')
-
-                # ---- BREW ----
-                if action == 'Brew':
-                    if not is_admin():
-                        st.info("Admin only.")
+                with view_tab:
+                    st.subheader("Timeline")
+                    if events_df is None or events_df.empty:
+                        st.caption("No events yet.")
                     else:
-                        # Equipment options
-                        eq_names = equipment_df[eq_name_col].astype(str).tolist() if equipment_df is not None and not equipment_df.empty and eq_name_col else []
-                        fermenter_opts = eq_names
-                        if eq_type_col and equipment_df is not None and not equipment_df.empty:
-                            fm = equipment_df[equipment_df[eq_type_col].astype(str).str.lower().str.contains('ferment', na=False)]
-                            fermenter_opts = fm[eq_name_col].astype(str).tolist() if not fm.empty else eq_names
-
-                        with st.form(f'brew_action_{batch_id}', clear_on_submit=True):
-                            c1, c2, c3 = st.columns(3)
-                            with c1:
-                                brew_date = st.date_input('Brew date', date.today())
-                                actual_volume = st.number_input('Actual volume (L)', min_value=0.0, value=float(planned_vol or 0), step=1.0)
-                            with c2:
-                                fermenter = st.selectbox('Fermenter', fermenter_opts if fermenter_opts else [''], index=0)
-                                brewery = st.text_input('Brewery / location', value=str(selected_batch.get('brewery_id','') or ''))
-                            with c3:
-                                notes = st.text_area('Notes', height=90)
-
-                            st.markdown('**Confirm ingredient consumption (one by one)**')
-                            rid = str(selected_batch.get(b_recipe_id_col) or '')
-                            scale = _recipe_scale_factor(rid, float(actual_volume))
-
-                            ri_recipe_col = _col(recipe_items_df, 'recipe_id', 'id_recipe')
-                            ri_ing_col = _col(recipe_items_df, 'ingredient_name', 'ingredient')
-                            ri_qty_col = _col(recipe_items_df, 'quantity')
-                            ri_unit_col = _col(recipe_items_df, 'unit')
-
-                            items = recipe_items_df.copy() if recipe_items_df is not None else pd.DataFrame()
-                            if not items.empty and ri_recipe_col and rid:
-                                items = items[items[ri_recipe_col].astype(str) == str(rid)]
-
-                            confirmations = []
-                            if items.empty:
-                                st.warning("No recipe items found for this recipe.")
+                        e_bid = _col(events_df, 'batch_id')
+                        e_date = _col(events_df, 'event_date')
+                        if e_bid:
+                            ev = events_df[events_df[e_bid] == batch_id].copy()
+                            if not ev.empty:
+                                if e_date:
+                                    try:
+                                        ev[e_date] = pd.to_datetime(ev[e_date], errors='coerce')
+                                        ev = ev.sort_values(e_date)
+                                    except Exception:
+                                        pass
+                                st.dataframe(ev[[c for c in ev.columns if c not in ('created_date',)]], use_container_width=True)
                             else:
-                                for i, row in enumerate(items.to_dict('records')):
-                                    ingn = str(row.get(ri_ing_col) or '')
-                                    base_qty = float(row.get(ri_qty_col) or 0)
-                                    unit = str(row.get(ri_unit_col) or '')
-                                    scaled_qty = base_qty * float(scale)
-                                    checked = st.checkbox(f"{ingn}: {scaled_qty:g} {unit}", value=True, key=f"brew_ing_{batch_id}_{i}")
-                                    confirmations.append((checked, ingn, float(scaled_qty), unit))
+                                st.caption("No events for this batch.")
 
-                            submit = st.form_submit_button('Record Brew', type='primary', use_container_width=True)
-
-                        if submit:
-                            require_admin_action()
-                            if not fermenter:
-                                st.error('Please select a fermenter.')
-                            elif not _vessel_is_free(fermenter, batch_id):
-                                st.error('This fermenter is already occupied by another active batch.')
-                            elif not _vessel_capacity_ok(fermenter, float(actual_volume)):
-                                st.error('Selected fermenter capacity is lower than the batch volume.')
+                    st.markdown('---')
+                    st.subheader("Material consumption")
+                    if cons_df is None or cons_df.empty:
+                        st.caption("No consumption records yet.")
+                    else:
+                        c_bid = _col(cons_df, 'batch_id')
+                        if c_bid:
+                            cview = cons_df[cons_df[c_bid] == batch_id].copy()
+                            if not cview.empty:
+                                st.dataframe(cview[[c for c in cview.columns if c not in ('created_date',)]], use_container_width=True)
                             else:
-                                # Create event
-                                ev_id = insert_data('production_events', {
-                                    'batch_id': batch_id,
-                                    'event_type': 'Brew',
-                                    'event_date': pd.Timestamp(brew_date),
-                                    'from_vessel': '',
-                                    'to_vessel': fermenter,
-                                    'notes': notes,
-                                    'created_by': st.session_state.get('auth_user', 'admin'),
-                                    'meta': json.dumps({'action': 'Brew'}, ensure_ascii=False),
-                                })
+                                st.caption("No consumption records for this batch.")
 
-                                # Consume ingredients
-                                total_cost = 0.0
-                                for checked, ingn, qty, unit in confirmations:
-                                    if not checked or not ingn or qty <= 0:
-                                        continue
-                                    unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
-                                    line_cost = float(qty) * float(unit_cost or 0)
-                                    total_cost += line_cost
-                                    adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty))
-                                    insert_data('production_consumptions', {
+                    st.markdown('---')
+                    st.subheader("Kegging runs")
+                    if keg_runs_df is None or keg_runs_df.empty:
+                        st.caption("No kegging runs yet.")
+                    else:
+                        k_bid = _col(keg_runs_df, 'batch_id')
+                        if k_bid:
+                            kview = keg_runs_df[keg_runs_df[k_bid] == batch_id].copy()
+                            if not kview.empty:
+                                st.dataframe(kview[[c for c in kview.columns if c not in ('created_date',)]], use_container_width=True)
+                            else:
+                                st.caption("No kegging runs for this batch.")
+
+                if actions_tab is not None:
+                    with actions_tab:
+                        st.subheader("Actions")
+
+                        action = st.selectbox("Add action", [
+                            'Brew', 'Dry Hop', 'Add Adjunct', 'Conditioning', 'Transfer', 'Kegging', 'Finish Batch'
+                        ], key=f'action_type_{batch_id}')
+
+                        # ---- BREW ----
+                        if action == 'Brew':
+                            # Equipment options
+                            eq_names = equipment_df[eq_name_col].astype(str).tolist() if equipment_df is not None and not equipment_df.empty and eq_name_col else []
+                            fermenter_opts = eq_names
+                            if eq_type_col and equipment_df is not None and not equipment_df.empty:
+                                fm = equipment_df[equipment_df[eq_type_col].astype(str).str.lower().str.contains('ferment', na=False)]
+                                fermenter_opts = fm[eq_name_col].astype(str).tolist() if not fm.empty else eq_names
+
+                            with st.form(f'brew_action_{batch_id}', clear_on_submit=True):
+                                c1, c2, c3 = st.columns(3)
+                                with c1:
+                                    brew_date = st.date_input('Brew date', date.today())
+                                    actual_volume = st.number_input('Actual volume (L)', min_value=0.0, value=float(planned_vol or 0), step=1.0)
+                                with c2:
+                                    fermenter = st.selectbox('Fermenter', fermenter_opts if fermenter_opts else [''], index=0)
+                                    brewery = st.text_input('Brewery / location', value=str(selected_batch.get('brewery_id','') or ''))
+                                with c3:
+                                    notes = st.text_area('Notes', height=90)
+
+                                st.markdown('**Confirm ingredient consumption (one by one)**')
+                                rid = str(selected_batch.get(b_recipe_id_col) or '')
+                                scale = _recipe_scale_factor(rid, float(actual_volume))
+
+                                ri_recipe_col = _col(recipe_items_df, 'recipe_id', 'id_recipe')
+                                ri_ing_col = _col(recipe_items_df, 'ingredient_name', 'ingredient')
+                                ri_qty_col = _col(recipe_items_df, 'quantity')
+                                ri_unit_col = _col(recipe_items_df, 'unit')
+
+                                items = recipe_items_df.copy() if recipe_items_df is not None else pd.DataFrame()
+                                if not items.empty and ri_recipe_col and rid:
+                                    items = items[items[ri_recipe_col].astype(str) == str(rid)]
+
+                                confirmations = []
+                                if items.empty:
+                                    st.warning("No recipe items found for this recipe.")
+                                else:
+                                    for i, row in enumerate(items.to_dict('records')):
+                                        ingn = str(row.get(ri_ing_col) or '')
+                                        base_qty = float(row.get(ri_qty_col) or 0)
+                                        unit = str(row.get(ri_unit_col) or '')
+                                        scaled_qty = base_qty * float(scale)
+                                        checked = st.checkbox(f"{ingn}: {scaled_qty:g} {unit}", value=True, key=f"brew_ing_{batch_id}_{i}")
+                                        confirmations.append((checked, ingn, float(scaled_qty), unit))
+
+                                submit = st.form_submit_button('Record Brew', type='primary', use_container_width=True)
+
+                            if submit:
+                                require_admin_action()
+                                if not fermenter:
+                                    st.error('Please select a fermenter.')
+                                elif not _vessel_is_free(fermenter, batch_id):
+                                    st.error('This fermenter is already occupied by another active batch.')
+                                elif not _vessel_capacity_ok(fermenter, float(actual_volume)):
+                                    st.error('Selected fermenter capacity is lower than the batch volume.')
+                                else:
+                                    # Create event
+                                    ev_id = insert_data('production_events', {
                                         'batch_id': batch_id,
-                                        'prod_event_id': int(ev_id) if ev_id is not None else None,
-                                        'ingredient_id': '',
-                                        'ingredient_name': ingn,
-                                        'quantity': float(qty),
-                                        'unit': unit0 or unit,
-                                        'unit_cost': float(unit_cost or 0),
-                                        'total_cost': float(line_cost),
-                                        'meta': json.dumps({'event': 'Brew'}, ensure_ascii=False),
+                                        'event_type': 'Brew',
+                                        'event_date': pd.Timestamp(brew_date),
+                                        'from_vessel': '',
+                                        'to_vessel': fermenter,
+                                        'notes': notes,
+                                        'created_by': st.session_state.get('auth_user', 'admin'),
+                                        'meta': json.dumps({'action': 'Brew'}, ensure_ascii=False),
                                     })
 
-                                update_data('production_batches', {
-                                    'status': 'In Progress',
-                                    'stage': 'Fermenting',
-                                    'current_vessel': fermenter,
-                                    'volume_remaining_l': float(actual_volume),
-                                }, f"{b_id_col} = :id", {'id': batch_id})
+                                    # Consume ingredients
+                                    total_cost = 0.0
+                                    for checked, ingn, qty, unit in confirmations:
+                                        if not checked or not ingn or qty <= 0:
+                                            continue
+                                        unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
+                                        line_cost = float(qty) * float(unit_cost or 0)
+                                        total_cost += line_cost
+                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty))
+                                        insert_data('production_consumptions', {
+                                            'batch_id': batch_id,
+                                            'prod_event_id': int(ev_id) if ev_id is not None else None,
+                                            'ingredient_id': '',
+                                            'ingredient_name': ingn,
+                                            'quantity': float(qty),
+                                            'unit': unit0 or unit,
+                                            'unit_cost': float(unit_cost or 0),
+                                            'total_cost': float(line_cost),
+                                            'meta': json.dumps({'event': 'Brew'}, ensure_ascii=False),
+                                        })
 
-                                st.success(f"✅ Brew recorded. Materials cost logged: {total_cost:.2f}")
-                                st.rerun()
+                                    update_data('production_batches', {
+                                        'status': 'In Progress',
+                                        'stage': 'Fermenting',
+                                        'current_vessel': fermenter,
+                                        'volume_remaining_l': float(actual_volume),
+                                    }, f"{b_id_col} = :id", {'id': batch_id})
 
-                # ---- DRY HOP / ADJUNCT ----
-                if action in {'Dry Hop', 'Add Adjunct'}:
-                    if not is_admin():
-                        st.info("Admin only.")
-                    else:
-                        is_dryhop = (action == 'Dry Hop')
-                        st.caption("Consumes ingredients from stock and logs an event.")
+                                    st.success(f"✅ Brew recorded. Materials cost logged: {total_cost:.2f}")
+                                    st.rerun()
 
-                        ing_name_col = _col(ingredients_df, 'name')
-                        ing_cat_col = _col(ingredients_df, 'category')
-                        options = []
-                        if ingredients_df is not None and not ingredients_df.empty and ing_name_col:
-                            if is_dryhop and ing_cat_col:
-                                m = ingredients_df[ingredients_df[ing_cat_col].astype(str).str.lower().str.contains('hop', na=False)]
-                                options = m[ing_name_col].astype(str).tolist() if not m.empty else ingredients_df[ing_name_col].astype(str).tolist()
-                            else:
-                                options = ingredients_df[ing_name_col].astype(str).tolist()
+                        # ---- DRY HOP / ADJUNCT ----
+                        if action in {'Dry Hop', 'Add Adjunct'}:
+                            is_dryhop = (action == 'Dry Hop')
+                            st.caption("Consumes ingredients from stock and logs an event.")
 
-                        with st.form(f'addition_action_{batch_id}_{action}', clear_on_submit=True):
-                            d = st.date_input('Date', date.today())
-                            notes = st.text_area('Notes', height=80)
-                            st.markdown('**Additions**')
-                            lines = []
-                            for i in range(5):
-                                cc1, cc2 = st.columns([3, 1])
-                                with cc1:
-                                    ing = st.selectbox(f"Ingredient {i+1}", [''] + options, index=0, key=f"add_{batch_id}_{action}_{i}")
-                                with cc2:
-                                    qty = st.number_input("Qty", min_value=0.0, value=0.0, step=0.1, key=f"add_qty_{batch_id}_{action}_{i}")
-                                if ing and qty > 0:
-                                    unit, _ = get_ingredient_unit_and_cost(get_all_data(), ing)
-                                    lines.append((ing, float(qty), unit or ''))
+                            ing_name_col = _col(ingredients_df, 'name')
+                            ing_cat_col = _col(ingredients_df, 'category')
+                            options = []
+                            if ingredients_df is not None and not ingredients_df.empty and ing_name_col:
+                                if is_dryhop and ing_cat_col:
+                                    m = ingredients_df[ingredients_df[ing_cat_col].astype(str).str.lower().str.contains('hop', na=False)]
+                                    options = m[ing_name_col].astype(str).tolist() if not m.empty else ingredients_df[ing_name_col].astype(str).tolist()
+                                else:
+                                    options = ingredients_df[ing_name_col].astype(str).tolist()
 
-                            submit = st.form_submit_button(f"Record {action}", type='primary', use_container_width=True)
+                            with st.form(f'addition_action_{batch_id}_{action}', clear_on_submit=True):
+                                d = st.date_input('Date', date.today())
+                                notes = st.text_area('Notes', height=80)
+                                st.markdown('**Additions**')
+                                lines = []
+                                for i in range(5):
+                                    cc1, cc2 = st.columns([3, 1])
+                                    with cc1:
+                                        ing = st.selectbox(f"Ingredient {i+1}", [''] + options, index=0, key=f"add_{batch_id}_{action}_{i}")
+                                    with cc2:
+                                        qty = st.number_input("Qty", min_value=0.0, value=0.0, step=0.1, key=f"add_qty_{batch_id}_{action}_{i}")
+                                    if ing and qty > 0:
+                                        unit, _ = get_ingredient_unit_and_cost(get_all_data(), ing)
+                                        lines.append((ing, float(qty), unit or ''))
 
-                        if submit:
-                            require_admin_action()
-                            if not lines:
-                                st.error('Please add at least one ingredient line.')
-                            else:
-                                ev_id = insert_data('production_events', {
+                                submit = st.form_submit_button(f"Record {action}", type='primary', use_container_width=True)
+
+                            if submit:
+                                require_admin_action()
+                                if not lines:
+                                    st.error('Please add at least one ingredient line.')
+                                else:
+                                    ev_id = insert_data('production_events', {
+                                        'batch_id': batch_id,
+                                        'event_type': action,
+                                        'event_date': pd.Timestamp(d),
+                                        'from_vessel': current_vessel,
+                                        'to_vessel': current_vessel,
+                                        'notes': notes,
+                                        'created_by': st.session_state.get('auth_user', 'admin'),
+                                        'meta': json.dumps({'action': action}, ensure_ascii=False),
+                                    })
+                                    total_cost = 0.0
+                                    for ing, qty, unit in lines:
+                                        unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ing)
+                                        line_cost = float(qty) * float(unit_cost or 0)
+                                        total_cost += line_cost
+                                        adjust_stock_for_ingredient(get_all_data(), ing, -float(qty))
+                                        insert_data('production_consumptions', {
+                                            'batch_id': batch_id,
+                                            'prod_event_id': int(ev_id) if ev_id is not None else None,
+                                            'ingredient_id': '',
+                                            'ingredient_name': ing,
+                                            'quantity': float(qty),
+                                            'unit': unit0 or unit,
+                                            'unit_cost': float(unit_cost or 0),
+                                            'total_cost': float(line_cost),
+                                            'meta': json.dumps({'event': action}, ensure_ascii=False),
+                                        })
+
+                                    st.success(f"✅ {action} recorded. Cost logged: {total_cost:.2f}")
+                                    st.rerun()
+
+                        # ---- CONDITIONING ----
+                        if action == 'Conditioning':
+                            with st.form(f'conditioning_{batch_id}', clear_on_submit=True):
+                                d = st.date_input('Date', date.today())
+                                target_temp = st.number_input('Target temperature (°C)', value=2.0, step=0.5)
+                                notes = st.text_area('Notes', height=80)
+                                submit = st.form_submit_button('Record Conditioning', type='primary', use_container_width=True)
+
+                            if submit:
+                                require_admin_action()
+                                insert_data('production_events', {
                                     'batch_id': batch_id,
-                                    'event_type': action,
+                                    'event_type': 'Conditioning',
                                     'event_date': pd.Timestamp(d),
                                     'from_vessel': current_vessel,
                                     'to_vessel': current_vessel,
                                     'notes': notes,
                                     'created_by': st.session_state.get('auth_user', 'admin'),
-                                    'meta': json.dumps({'action': action}, ensure_ascii=False),
-                                })
-                                total_cost = 0.0
-                                for ing, qty, unit in lines:
-                                    unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ing)
-                                    line_cost = float(qty) * float(unit_cost or 0)
-                                    total_cost += line_cost
-                                    adjust_stock_for_ingredient(get_all_data(), ing, -float(qty))
-                                    insert_data('production_consumptions', {
-                                        'batch_id': batch_id,
-                                        'prod_event_id': int(ev_id) if ev_id is not None else None,
-                                        'ingredient_id': '',
-                                        'ingredient_name': ing,
-                                        'quantity': float(qty),
-                                        'unit': unit0 or unit,
-                                        'unit_cost': float(unit_cost or 0),
-                                        'total_cost': float(line_cost),
-                                        'meta': json.dumps({'event': action}, ensure_ascii=False),
-                                    })
-
-                                st.success(f"✅ {action} recorded. Cost logged: {total_cost:.2f}")
-                                st.rerun()
-
-                # ---- CONDITIONING ----
-                if action == 'Conditioning':
-                    if not is_admin():
-                        st.info("Admin only.")
-                    else:
-                        with st.form(f'conditioning_{batch_id}', clear_on_submit=True):
-                            d = st.date_input('Date', date.today())
-                            target_temp = st.number_input('Target temperature (°C)', value=2.0, step=0.5)
-                            notes = st.text_area('Notes', height=80)
-                            submit = st.form_submit_button('Record Conditioning', type='primary', use_container_width=True)
-
-                        if submit:
-                            require_admin_action()
-                            insert_data('production_events', {
-                                'batch_id': batch_id,
-                                'event_type': 'Conditioning',
-                                'event_date': pd.Timestamp(d),
-                                'from_vessel': current_vessel,
-                                'to_vessel': current_vessel,
-                                'notes': notes,
-                                'created_by': st.session_state.get('auth_user', 'admin'),
-                                'meta': json.dumps({'target_temp_c': float(target_temp)}, ensure_ascii=False),
-                            })
-                            update_data('production_batches', {
-                                'stage': 'Conditioning',
-                            }, f"{b_id_col} = :id", {'id': batch_id})
-                            st.success('✅ Conditioning recorded.')
-                            st.rerun()
-
-                # ---- TRANSFER ----
-                if action == 'Transfer':
-                    if not is_admin():
-                        st.info("Admin only.")
-                    else:
-                        eq_names = equipment_df[eq_name_col].astype(str).tolist() if equipment_df is not None and not equipment_df.empty and eq_name_col else []
-                        with st.form(f'transfer_{batch_id}', clear_on_submit=True):
-                            d = st.date_input('Date', date.today())
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                from_v = st.text_input('From vessel', value=current_vessel)
-                            with c2:
-                                to_v = st.selectbox('To vessel', [''] + eq_names, index=0)
-                            notes = st.text_area('Notes', height=80)
-                            submit = st.form_submit_button('Record Transfer', type='primary', use_container_width=True)
-
-                        if submit:
-                            require_admin_action()
-                            if not to_v:
-                                st.error('Please select a destination vessel.')
-                            elif not _vessel_is_free(to_v, batch_id):
-                                st.error('Destination vessel is occupied by another active batch.')
-                            elif not _vessel_capacity_ok(to_v, float(remaining_vol)):
-                                st.error('Destination vessel capacity is lower than the remaining volume.')
-                            else:
-                                insert_data('production_events', {
-                                    'batch_id': batch_id,
-                                    'event_type': 'Transfer',
-                                    'event_date': pd.Timestamp(d),
-                                    'from_vessel': from_v,
-                                    'to_vessel': to_v,
-                                    'notes': notes,
-                                    'created_by': st.session_state.get('auth_user', 'admin'),
-                                    'meta': json.dumps({'action': 'Transfer'}, ensure_ascii=False),
+                                    'meta': json.dumps({'target_temp_c': float(target_temp)}, ensure_ascii=False),
                                 })
                                 update_data('production_batches', {
-                                    'current_vessel': to_v,
+                                    'stage': 'Conditioning',
                                 }, f"{b_id_col} = :id", {'id': batch_id})
-                                st.success('✅ Transfer recorded.')
+                                st.success('✅ Conditioning recorded.')
                                 st.rerun()
 
-                # ---- KEGGING (via Composite Product) ----
-                if action == 'Kegging':
-                    if not is_admin():
-                        st.info("Admin only.")
-                    else:
-                        if composites_df is None or composites_df.empty:
-                            st.warning('No composite products found. Create one in Products → Composite Products.')
-                        else:
-                            cid_col = _col(composites_df, 'id_composite', 'id')
-                            cname_col = _col(composites_df, 'name')
-                            c_recipe_name_col = _col(composites_df, 'recipe_name')
-                            c_out_unit_col = _col(composites_df, 'output_unit')
-
-                            comp_records = composites_df.to_dict('records')
-
-                            def _comp_label(r):
-                                return f"{r.get(cname_col,'')} (#{r.get(cid_col,'')})"
-
-                            with st.form(f'kegging_{batch_id}', clear_on_submit=True):
+                        # ---- TRANSFER ----
+                        if action == 'Transfer':
+                            eq_names = equipment_df[eq_name_col].astype(str).tolist() if equipment_df is not None and not equipment_df.empty and eq_name_col else []
+                            with st.form(f'transfer_{batch_id}', clear_on_submit=True):
                                 d = st.date_input('Date', date.today())
-                                comp = st.selectbox('Composite product', comp_records, format_func=_comp_label)
-                                units_out = st.number_input('Units produced', min_value=1.0, value=10.0, step=1.0)
-                                warehouse = st.text_input('Warehouse', value='Main')
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    from_v = st.text_input('From vessel', value=current_vessel)
+                                with c2:
+                                    to_v = st.selectbox('To vessel', [''] + eq_names, index=0)
                                 notes = st.text_area('Notes', height=80)
-                                submit = st.form_submit_button('Record Kegging', type='primary', use_container_width=True)
+                                submit = st.form_submit_button('Record Transfer', type='primary', use_container_width=True)
 
                             if submit:
                                 require_admin_action()
-                                comp_id = int(comp.get(cid_col))
-                                comp_name = str(comp.get(cname_col) or '')
-                                comp_recipe_name = str(comp.get(c_recipe_name_col) or '')
-
-                                # Safety: ensure same beer
-                                if comp_recipe_name and str(selected_batch.get(b_recipe_name_col) or '') and comp_recipe_name != str(selected_batch.get(b_recipe_name_col) or ''):
-                                    st.error('This composite product is for a different beer/recipe than the selected batch.')
+                                if not to_v:
+                                    st.error('Please select a destination vessel.')
+                                elif not _vessel_is_free(to_v, batch_id):
+                                    st.error('Destination vessel is occupied by another active batch.')
+                                elif not _vessel_capacity_ok(to_v, float(remaining_vol)):
+                                    st.error('Destination vessel capacity is lower than the remaining volume.')
                                 else:
-                                    # Load BOM
-                                    icid = _col(composite_items_df, 'composite_id')
-                                    ctype = _col(composite_items_df, 'component_type')
-                                    cname = _col(composite_items_df, 'component_name')
-                                    cqty = _col(composite_items_df, 'quantity')
-                                    cunit = _col(composite_items_df, 'unit')
+                                    insert_data('production_events', {
+                                        'batch_id': batch_id,
+                                        'event_type': 'Transfer',
+                                        'event_date': pd.Timestamp(d),
+                                        'from_vessel': from_v,
+                                        'to_vessel': to_v,
+                                        'notes': notes,
+                                        'created_by': st.session_state.get('auth_user', 'admin'),
+                                        'meta': json.dumps({'action': 'Transfer'}, ensure_ascii=False),
+                                    })
+                                    update_data('production_batches', {
+                                        'current_vessel': to_v,
+                                    }, f"{b_id_col} = :id", {'id': batch_id})
+                                    st.success('✅ Transfer recorded.')
+                                    st.rerun()
 
-                                    bom = composite_items_df[composite_items_df[icid] == comp_id] if composite_items_df is not None and not composite_items_df.empty and icid else pd.DataFrame()
-                                    if bom.empty:
-                                        st.error('Composite product BOM is empty.')
+                        # ---- KEGGING (via Composite Product) ----
+                        if action == 'Kegging':
+                            if composites_df is None or composites_df.empty:
+                                st.warning('No composite products found. Create one in Products → Composite Products.')
+                            else:
+                                cid_col = _col(composites_df, 'id_composite', 'id')
+                                cname_col = _col(composites_df, 'name')
+                                c_recipe_name_col = _col(composites_df, 'recipe_name')
+                                c_out_unit_col = _col(composites_df, 'output_unit')
+
+                                comp_records = composites_df.to_dict('records')
+
+                                def _comp_label(r):
+                                    return f"{r.get(cname_col,'')} (#{r.get(cid_col,'')})"
+
+                                with st.form(f'kegging_{batch_id}', clear_on_submit=True):
+                                    d = st.date_input('Date', date.today())
+                                    comp = st.selectbox('Composite product', comp_records, format_func=_comp_label)
+                                    units_out = st.number_input('Units produced', min_value=1.0, value=10.0, step=1.0)
+                                    warehouse = st.text_input('Warehouse', value='Main')
+                                    notes = st.text_area('Notes', height=80)
+                                    submit = st.form_submit_button('Record Kegging', type='primary', use_container_width=True)
+
+                                if submit:
+                                    require_admin_action()
+                                    comp_id = int(comp.get(cid_col))
+                                    comp_name = str(comp.get(cname_col) or '')
+                                    comp_recipe_name = str(comp.get(c_recipe_name_col) or '')
+
+                                    # Safety: ensure same beer
+                                    if comp_recipe_name and str(selected_batch.get(b_recipe_name_col) or '') and comp_recipe_name != str(selected_batch.get(b_recipe_name_col) or ''):
+                                        st.error('This composite product is for a different beer/recipe than the selected batch.')
                                     else:
-                                        # Beer liters per unit
-                                        beer_row = bom[bom[ctype].astype(str).str.lower() == 'beer'] if ctype else pd.DataFrame()
-                                        if beer_row.empty:
-                                            st.error('Composite product must include a Beer component.')
+                                        # Load BOM
+                                        icid = _col(composite_items_df, 'composite_id')
+                                        ctype = _col(composite_items_df, 'component_type')
+                                        cname = _col(composite_items_df, 'component_name')
+                                        cqty = _col(composite_items_df, 'quantity')
+                                        cunit = _col(composite_items_df, 'unit')
+
+                                        bom = composite_items_df[composite_items_df[icid] == comp_id] if composite_items_df is not None and not composite_items_df.empty and icid else pd.DataFrame()
+                                        if bom.empty:
+                                            st.error('Composite product BOM is empty.')
                                         else:
-                                            try:
-                                                beer_l_per_unit = float(beer_row.iloc[0][cqty] or 0)
-                                            except Exception:
-                                                beer_l_per_unit = 0
-
-                                            liters_needed = float(units_out) * float(beer_l_per_unit)
-                                            if liters_needed > float(remaining_vol) + 1e-9:
-                                                st.error('Not enough beer volume remaining in the batch for this kegging run.')
+                                            # Beer liters per unit
+                                            beer_row = bom[bom[ctype].astype(str).str.lower() == 'beer'] if ctype else pd.DataFrame()
+                                            if beer_row.empty:
+                                                st.error('Composite product must include a Beer component.')
                                             else:
-                                                # Validate packaging stock
-                                                pkg_rows = bom[bom[ctype].astype(str).str.lower() == 'ingredient'] if ctype else pd.DataFrame()
-                                                missing = []
-                                                for _, r in pkg_rows.iterrows():
-                                                    ingn = str(r.get(cname) or '')
-                                                    per_unit = float(r.get(cqty) or 0)
-                                                    need = per_unit * float(units_out)
-                                                    # find current stock
-                                                    ing_df2 = get_all_data().get('ingredients', pd.DataFrame())
-                                                    ncol = _col(ing_df2, 'name')
-                                                    scol = _col(ing_df2, 'stock', 'quantity_in_stock')
-                                                    if not (ncol and scol) or ing_df2.empty:
-                                                        continue
-                                                    m = ing_df2[ing_df2[ncol].astype(str) == ingn]
-                                                    if m.empty:
-                                                        continue
-                                                    try:
-                                                        stock = float(m.iloc[0][scol] or 0)
-                                                    except Exception:
-                                                        stock = 0
-                                                    if stock + 1e-9 < need:
-                                                        missing.append(f"{ingn} (need {need:g})")
+                                                try:
+                                                    beer_l_per_unit = float(beer_row.iloc[0][cqty] or 0)
+                                                except Exception:
+                                                    beer_l_per_unit = 0
 
-                                                if missing:
-                                                    st.error('Not enough packaging stock: ' + ', '.join(missing))
+                                                liters_needed = float(units_out) * float(beer_l_per_unit)
+                                                if liters_needed > float(remaining_vol) + 1e-9:
+                                                    st.error('Not enough beer volume remaining in the batch for this kegging run.')
                                                 else:
-                                                    # Log event
-                                                    ev_id = insert_data('production_events', {
-                                                        'batch_id': batch_id,
-                                                        'event_type': 'Kegging',
-                                                        'event_date': pd.Timestamp(d),
-                                                        'from_vessel': current_vessel,
-                                                        'to_vessel': current_vessel,
-                                                        'notes': notes,
-                                                        'created_by': st.session_state.get('auth_user', 'admin'),
-                                                        'meta': json.dumps({'composite_id': comp_id, 'composite_name': comp_name, 'units': float(units_out)}, ensure_ascii=False),
-                                                    })
-
-                                                    # Consume packaging + log
-                                                    total_pack_cost = 0.0
+                                                    # Validate packaging stock
+                                                    pkg_rows = bom[bom[ctype].astype(str).str.lower() == 'ingredient'] if ctype else pd.DataFrame()
+                                                    missing = []
                                                     for _, r in pkg_rows.iterrows():
                                                         ingn = str(r.get(cname) or '')
                                                         per_unit = float(r.get(cqty) or 0)
                                                         need = per_unit * float(units_out)
-                                                        unit = str(r.get(cunit) or '')
-                                                        unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
-                                                        line_cost = float(need) * float(unit_cost or 0)
-                                                        total_pack_cost += line_cost
-                                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(need))
-                                                        insert_data('production_consumptions', {
+                                                        # find current stock
+                                                        ing_df2 = get_all_data().get('ingredients', pd.DataFrame())
+                                                        ncol = _col(ing_df2, 'name')
+                                                        scol = _col(ing_df2, 'stock', 'quantity_in_stock')
+                                                        if not (ncol and scol) or ing_df2.empty:
+                                                            continue
+                                                        m = ing_df2[ing_df2[ncol].astype(str) == ingn]
+                                                        if m.empty:
+                                                            continue
+                                                        try:
+                                                            stock = float(m.iloc[0][scol] or 0)
+                                                        except Exception:
+                                                            stock = 0
+                                                        if stock + 1e-9 < need:
+                                                            missing.append(f"{ingn} (need {need:g})")
+
+                                                    if missing:
+                                                        st.error('Not enough packaging stock: ' + ', '.join(missing))
+                                                    else:
+                                                        # Log event
+                                                        ev_id = insert_data('production_events', {
                                                             'batch_id': batch_id,
-                                                            'prod_event_id': int(ev_id) if ev_id is not None else None,
-                                                            'ingredient_id': '',
-                                                            'ingredient_name': ingn,
-                                                            'quantity': float(need),
-                                                            'unit': unit0 or unit,
-                                                            'unit_cost': float(unit_cost or 0),
-                                                            'total_cost': float(line_cost),
-                                                            'meta': json.dumps({'event': 'Kegging', 'composite_id': comp_id}, ensure_ascii=False),
+                                                            'event_type': 'Kegging',
+                                                            'event_date': pd.Timestamp(d),
+                                                            'from_vessel': current_vessel,
+                                                            'to_vessel': current_vessel,
+                                                            'notes': notes,
+                                                            'created_by': st.session_state.get('auth_user', 'admin'),
+                                                            'meta': json.dumps({'composite_id': comp_id, 'composite_name': comp_name, 'units': float(units_out)}, ensure_ascii=False),
                                                         })
 
-                                                    # Add finished goods inventory
-                                                    insert_data('composite_inventory', {
-                                                        'composite_id': comp_id,
-                                                        'composite_name': comp_name,
-                                                        'warehouse': warehouse,
-                                                        'quantity_units': float(units_out),
-                                                    })
+                                                        # Consume packaging + log
+                                                        total_pack_cost = 0.0
+                                                        for _, r in pkg_rows.iterrows():
+                                                            ingn = str(r.get(cname) or '')
+                                                            per_unit = float(r.get(cqty) or 0)
+                                                            need = per_unit * float(units_out)
+                                                            unit = str(r.get(cunit) or '')
+                                                            unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
+                                                            line_cost = float(need) * float(unit_cost or 0)
+                                                            total_pack_cost += line_cost
+                                                            adjust_stock_for_ingredient(get_all_data(), ingn, -float(need))
+                                                            insert_data('production_consumptions', {
+                                                                'batch_id': batch_id,
+                                                                'prod_event_id': int(ev_id) if ev_id is not None else None,
+                                                                'ingredient_id': '',
+                                                                'ingredient_name': ingn,
+                                                                'quantity': float(need),
+                                                                'unit': unit0 or unit,
+                                                                'unit_cost': float(unit_cost or 0),
+                                                                'total_cost': float(line_cost),
+                                                                'meta': json.dumps({'event': 'Kegging', 'composite_id': comp_id}, ensure_ascii=False),
+                                                            })
 
-                                                    # Keg run record
-                                                    insert_data('production_keg_runs', {
-                                                        'batch_id': batch_id,
-                                                        'product_name': str(selected_batch.get(b_recipe_name_col) or ''),
-                                                        'beer_volume_l': float(liters_needed),
-                                                        'warehouse': warehouse,
-                                                        'actual_cost': float(sum_production_costs(get_all_data(), batch_id) + total_pack_cost),
-                                                        'notes': notes,
-                                                        'composite_id': comp_id,
-                                                        'composite_name': comp_name,
-                                                        'units_produced': float(units_out),
-                                                        'output_unit': str(comp.get(c_out_unit_col) or 'unit'),
-                                                    })
+                                                        # Add finished goods inventory
+                                                        insert_data('composite_inventory', {
+                                                            'composite_id': comp_id,
+                                                            'composite_name': comp_name,
+                                                            'warehouse': warehouse,
+                                                            'quantity_units': float(units_out),
+                                                        })
 
-                                                    # Update batch volume
-                                                    new_remaining = float(remaining_vol) - float(liters_needed)
-                                                    upd = {
-                                                        'volume_remaining_l': new_remaining,
-                                                        'stage': 'Kegging',
-                                                        'status': 'In Progress',
-                                                    }
-                                                    if new_remaining <= 1e-9:
-                                                        upd['stage'] = 'Ready to Finish'
-                                                    update_data('production_batches', upd, f"{b_id_col} = :id", {'id': batch_id})
+                                                        # Keg run record
+                                                        insert_data('production_keg_runs', {
+                                                            'batch_id': batch_id,
+                                                            'product_name': str(selected_batch.get(b_recipe_name_col) or ''),
+                                                            'beer_volume_l': float(liters_needed),
+                                                            'warehouse': warehouse,
+                                                            'actual_cost': float(sum_production_costs(get_all_data(), batch_id) + total_pack_cost),
+                                                            'notes': notes,
+                                                            'composite_id': comp_id,
+                                                            'composite_name': comp_name,
+                                                            'units_produced': float(units_out),
+                                                            'output_unit': str(comp.get(c_out_unit_col) or 'unit'),
+                                                        })
 
-                                                    st.success('✅ Kegging recorded and finished goods added to inventory.')
-                                                    st.rerun()
+                                                        # Update batch volume
+                                                        new_remaining = float(remaining_vol) - float(liters_needed)
+                                                        upd = {
+                                                            'volume_remaining_l': new_remaining,
+                                                            'stage': 'Kegging',
+                                                            'status': 'In Progress',
+                                                        }
+                                                        if new_remaining <= 1e-9:
+                                                            upd['stage'] = 'Ready to Finish'
+                                                        update_data('production_batches', upd, f"{b_id_col} = :id", {'id': batch_id})
 
-                # ---- FINISH BATCH ----
-                if action == 'Finish Batch':
-                    if not is_admin():
-                        st.info("Admin only.")
-                    else:
-                        remaining = float(remaining_vol)
-                        loss_hint = f"{remaining:g} L" if remaining > 0 else "0 L"
-                        st.warning(f"Remaining beer in tank: {loss_hint}")
-                        with st.form(f'finish_{batch_id}', clear_on_submit=True):
-                            d = st.date_input('Finish date', date.today())
-                            mark_loss = st.checkbox(f"Finish batch and mark remaining volume as loss ({loss_hint})", value=True)
-                            notes = st.text_area('Notes', height=80)
-                            submit = st.form_submit_button('Finish batch', type='primary', use_container_width=True)
+                                                        st.success('✅ Kegging recorded and finished goods added to inventory.')
+                                                        st.rerun()
 
-                        if submit:
-                            require_admin_action()
-                            loss_l = remaining if mark_loss else 0.0
-                            insert_data('production_events', {
-                                'batch_id': batch_id,
-                                'event_type': 'Finish Batch',
-                                'event_date': pd.Timestamp(d),
-                                'from_vessel': current_vessel,
-                                'to_vessel': current_vessel,
-                                'notes': notes,
-                                'created_by': st.session_state.get('auth_user', 'admin'),
-                                'meta': json.dumps({'loss_l': float(loss_l)}, ensure_ascii=False),
-                            })
-                            # accumulate loss
-                            prior_loss = float(selected_batch.get(b_loss_col) or 0) if b_loss_col else 0.0
-                            update_data('production_batches', {
-                                'loss_l': float(prior_loss) + float(loss_l),
-                                'volume_remaining_l': 0.0,
-                                'status': 'Completed',
-                                'stage': 'Completed',
-                                'finished_date': d,
-                            }, f"{b_id_col} = :id", {'id': batch_id})
-                            st.success('✅ Batch completed.')
-                            st.rerun()
+                        # ---- FINISH BATCH ----
+                        if action == 'Finish Batch':
+                            remaining = float(remaining_vol)
+                            loss_hint = f"{remaining:g} L" if remaining > 0 else "0 L"
+                            st.warning(f"Remaining beer in tank: {loss_hint}")
+                            with st.form(f'finish_{batch_id}', clear_on_submit=True):
+                                d = st.date_input('Finish date', date.today())
+                                mark_loss = st.checkbox(f"Finish batch and mark remaining volume as loss ({loss_hint})", value=True)
+                                notes = st.text_area('Notes', height=80)
+                                submit = st.form_submit_button('Finish batch', type='primary', use_container_width=True)
 
-                st.markdown('---')
-                st.subheader('Materials & outputs')
-                # Consumptions
-                if cons_df is not None and not cons_df.empty:
-                    c_bid = _col(cons_df, 'batch_id')
-                    if c_bid:
-                        sub = cons_df[cons_df[c_bid] == batch_id]
-                        if not sub.empty:
-                            st.write('**Consumptions**')
-                            st.dataframe(sub[[c for c in sub.columns if c not in ('created_date',)]], use_container_width=True)
-
-                # Keg runs
-                if keg_runs_df is not None and not keg_runs_df.empty:
-                    k_bid = _col(keg_runs_df, 'batch_id')
-                    if k_bid:
-                        sub = keg_runs_df[keg_runs_df[k_bid] == batch_id]
-                        if not sub.empty:
-                            st.write('**Kegging runs**')
-                            st.dataframe(sub[[c for c in sub.columns if c not in ('created_date',)]], use_container_width=True)
+                            if submit:
+                                require_admin_action()
+                                loss_l = remaining if mark_loss else 0.0
+                                insert_data('production_events', {
+                                    'batch_id': batch_id,
+                                    'event_type': 'Finish Batch',
+                                    'event_date': pd.Timestamp(d),
+                                    'from_vessel': current_vessel,
+                                    'to_vessel': current_vessel,
+                                    'notes': notes,
+                                    'created_by': st.session_state.get('auth_user', 'admin'),
+                                    'meta': json.dumps({'loss_l': float(loss_l)}, ensure_ascii=False),
+                                })
+                                # accumulate loss
+                                prior_loss = float(selected_batch.get(b_loss_col) or 0) if b_loss_col else 0.0
+                                update_data('production_batches', {
+                                    'loss_l': float(prior_loss) + float(loss_l),
+                                    'volume_remaining_l': 0.0,
+                                    'status': 'Completed',
+                                    'stage': 'Completed',
+                                    'finished_date': d,
+                                }, f"{b_id_col} = :id", {'id': batch_id})
+                                st.success('✅ Batch completed.')
+                                st.rerun()
 
     with tab_reports:
         st.subheader('Batch report')
