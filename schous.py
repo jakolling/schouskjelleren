@@ -1987,6 +1987,16 @@ def handle_delete_confirmation():
             <p>This will also delete all equipment associated with this brewery.</p>
         </div>
         """, unsafe_allow_html=True)
+
+    elif delete_type == "recipe":
+        st.markdown(f"""
+        <div class=\"delete-confirmation\">
+            <h3>⚠️ Confirm Recipe Deletion</h3>
+            <p>Are you sure you want to delete <strong>'{delete_name}'</strong>?</p>
+            <p>This will also delete all ingredient lines for this recipe.</p>
+            <p>This action cannot be undone.</p>
+        </div>
+        """, unsafe_allow_html=True)
     
     col_confirm1, col_confirm2, col_confirm3 = st.columns([1, 1, 2])
     with col_confirm1:
@@ -2014,6 +2024,45 @@ def handle_delete_confirmation():
                 st.success(f"Brewery '{delete_name}' deleted successfully!")
             
             # Clear confirmação
+            elif delete_type == "recipe":
+                # Delete recipe items first, then the recipe itself (handle schema variations)
+                engine = get_engine()
+                dialect = engine.dialect.name.lower()
+
+                recipes_cols = get_table_columns_cached('recipes', dialect) or []
+                recipe_items_cols = get_table_columns_cached('recipe_items', dialect) or []
+
+                def _first_existing(cols, candidates):
+                    s = set([c.lower() for c in cols])
+                    for cand in candidates:
+                        if cand.lower() in s:
+                            return cand
+                    return None
+
+                recipes_id_col = _first_existing(recipes_cols, ['id_recipe', 'id_receipt', 'id'])
+                items_fk_col = _first_existing(recipe_items_cols, ['recipe_id', 'id_recipe', 'id_receipt'])
+
+                # Fallbacks if schema cache couldn't see columns
+                if not recipes_id_col:
+                    recipes_id_col = 'id_recipe'
+                if not items_fk_col:
+                    items_fk_col = 'recipe_id'
+
+                # Delete lines
+                try:
+                    delete_data('recipe_items', f"{items_fk_col} = :rid", {'rid': delete_id})
+                except Exception:
+                    # try string comparison if types mismatch
+                    delete_data('recipe_items', f"CAST({items_fk_col} AS TEXT) = :rid", {'rid': str(delete_id)})
+
+                # Delete recipe
+                try:
+                    delete_data('recipes', f"{recipes_id_col} = :rid", {'rid': delete_id})
+                except Exception:
+                    delete_data('recipes', f"CAST({recipes_id_col} AS TEXT) = :rid", {'rid': str(delete_id)})
+
+                st.success(f"Recipe '{delete_name}' deleted successfully!")
+
             st.session_state.delete_confirmation = {"type": None, "id": None, "name": None}
             data = get_all_data()
             st.rerun()
@@ -2024,7 +2073,7 @@ def handle_delete_confirmation():
             st.rerun()
 
 # Verificar se há confirmação pendente
-if st.session_state.delete_confirmation["type"] in ["ingredient", "supplier", "brewery"]:
+if st.session_state.delete_confirmation["type"] in ["ingredient", "supplier", "brewery", "recipe"]:
     handle_delete_confirmation()
 
 # -----------------------------
@@ -4997,6 +5046,139 @@ elif page == "Recipes":
     
     with tab_view:
         st.subheader("📖 Recipe Library")
+
+        # Edit panel (shows when a recipe has been selected)
+        if st.session_state.get('edit_recipe') is not None:
+            edit_id = st.session_state.get('edit_recipe')
+
+            # Locate the recipe row
+            rid_col = _col(recipes_df, 'id_recipe', 'id_receipt', 'id')
+            recipe_row = None
+            if rid_col and not recipes_df.empty:
+                match = recipes_df[recipes_df[rid_col].astype(str) == str(edit_id)]
+                if not match.empty:
+                    recipe_row = match.iloc[0]
+            if recipe_row is None and not recipes_df.empty:
+                # fallback: try index
+                try:
+                    recipe_row = recipes_df.loc[edit_id]
+                except Exception:
+                    recipe_row = None
+
+            if recipe_row is None:
+                st.warning('Selected recipe not found (it may have been deleted).')
+                st.session_state.edit_recipe = None
+            else:
+                with st.expander('📝 Edit Recipe', expanded=True):
+                    # Current values (with schema fallbacks)
+                    cur_name = recipe_row.get('name', recipe_row.get('recipe_name', ''))
+                    cur_style = recipe_row.get('style', recipe_row.get('beer_style', ''))
+                    cur_desc = recipe_row.get('description', recipe_row.get('notes', ''))
+                    cur_batch = recipe_row.get('batch_volume', recipe_row.get('batch_size', None))
+                    cur_eff = recipe_row.get('efficiency', None)
+                    cur_og = recipe_row.get('og', recipe_row.get('original_gravity', recipe_row.get('og_plato', None)))
+                    cur_fg = recipe_row.get('fg', recipe_row.get('final_gravity', recipe_row.get('fg_plato', None)))
+                    cur_ibu = recipe_row.get('ibus', recipe_row.get('ibu', None))
+                    cur_ebc = recipe_row.get('ebc', recipe_row.get('color_ebc', recipe_row.get('srm', None)))
+
+                    # Brewery selection
+                    breweries_df = data.get('breweries', pd.DataFrame())
+                    brewery_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
+                    brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
+
+                    # attempt to find current brewery id
+                    cur_brewery_id = recipe_row.get('brewery_id', recipe_row.get('id_brewery', recipe_row.get('brewery', None)))
+
+                    with st.form(key=f'edit_recipe_form_{str(edit_id)}'):
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            new_name = st.text_input('Recipe Name*', value=str(cur_name) if cur_name is not None else '')
+                            new_style = st.text_input('Beer Style', value=str(cur_style) if cur_style is not None else '')
+
+                            if not breweries_df.empty and brewery_id_col and brewery_name_col:
+                                brewery_options = {row[brewery_id_col]: row[brewery_name_col] for _, row in breweries_df.iterrows()}
+                                ids = list(brewery_options.keys())
+                                # Determine index
+                                try:
+                                    idx = ids.index(cur_brewery_id) if cur_brewery_id in ids else 0
+                                except Exception:
+                                    idx = 0
+                                new_brewery = st.selectbox('Target Brewery', options=ids, index=idx,
+                                                          format_func=lambda x: brewery_options.get(x, str(x)))
+                                new_brewery_name = brewery_options.get(new_brewery)
+                            else:
+                                new_brewery = cur_brewery_id
+                                new_brewery_name = recipe_row.get('brewery_name', None)
+                                st.info('Brewery list not available; keeping current brewery.')
+
+                            new_batch = st.number_input('Batch Volume (L)', min_value=0.0, value=float(cur_batch) if cur_batch not in [None, '', 'N/A'] and str(cur_batch) != 'nan' else 0.0, step=0.5)
+                            new_eff = st.number_input('Efficiency (%)', min_value=0.0, max_value=100.0, value=float(cur_eff) if cur_eff not in [None, '', 'N/A'] and str(cur_eff) != 'nan' else 0.0, step=1.0)
+
+                        with c2:
+                            new_og = st.number_input('OG (°P)', min_value=0.0, value=float(cur_og) if cur_og not in [None, '', 'N/A'] and str(cur_og) != 'nan' else 0.0, step=0.1)
+                            new_fg = st.number_input('FG (°P)', min_value=0.0, value=float(cur_fg) if cur_fg not in [None, '', 'N/A'] and str(cur_fg) != 'nan' else 0.0, step=0.1)
+                            new_ibu = st.number_input('IBU', min_value=0.0, value=float(cur_ibu) if cur_ibu not in [None, '', 'N/A'] and str(cur_ibu) != 'nan' else 0.0, step=1.0)
+                            new_ebc = st.number_input('Color (EBC)', min_value=0.0, value=float(cur_ebc) if cur_ebc not in [None, '', 'N/A'] and str(cur_ebc) != 'nan' else 0.0, step=1.0)
+
+                        new_desc = st.text_area('Description / Notes', value=str(cur_desc) if cur_desc is not None else '', height=120)
+
+                        colb1, colb2, colb3 = st.columns([1,1,3])
+                        with colb1:
+                            save = st.form_submit_button('💾 Save', type='primary', use_container_width=True)
+                        with colb2:
+                            cancel = st.form_submit_button('✖ Cancel', use_container_width=True)
+
+                    if cancel:
+                        st.session_state.edit_recipe = None
+                        st.rerun()
+
+                    if save:
+                        # Build update dict with common columns (update_data will ignore unknown cols)
+                        update_dict = {
+                            'name': new_name,
+                            'recipe_name': new_name,
+                            'style': new_style,
+                            'beer_style': new_style,
+                            'description': new_desc,
+                            'notes': new_desc,
+                            'batch_volume': new_batch,
+                            'batch_size': new_batch,
+                            'efficiency': new_eff,
+                            'og': new_og,
+                            'original_gravity': new_og,
+                            'og_plato': new_og,
+                            'fg': new_fg,
+                            'final_gravity': new_fg,
+                            'fg_plato': new_fg,
+                            'ibus': new_ibu,
+                            'ibu': new_ibu,
+                            'ebc': new_ebc,
+                            'color_ebc': new_ebc,
+                            'srm': new_ebc,
+                            'brewery_id': new_brewery,
+                            'id_brewery': new_brewery,
+                            'brewery_name': new_brewery_name,
+                        }
+
+                        # Determine recipes table id column
+                        engine = get_engine()
+                        dialect = engine.dialect.name.lower()
+                        recipes_cols = get_table_columns_cached('recipes', dialect) or []
+                        recipes_id_col = None
+                        for cand in ['id_recipe', 'id_receipt', 'id']:
+                            if cand.lower() in set([c.lower() for c in recipes_cols]):
+                                recipes_id_col = cand
+                                break
+                        if not recipes_id_col:
+                            recipes_id_col = 'id_recipe'
+
+                        update_data('recipes', update_dict, f"{recipes_id_col} = :rid", {'rid': edit_id})
+                        st.success('Recipe updated!')
+                        st.session_state.edit_recipe = None
+                        # refresh
+                        data = get_all_data()
+                        st.rerun()
+
         
         if not recipes_df.empty:
             # Filtros
@@ -5095,6 +5277,7 @@ elif page == "Recipes":
 
                             if st.button("📝 Edit", key=f"edit_{recipe_id_str}", use_container_width=True):
                                 st.session_state['edit_recipe'] = recipe_id
+                                st.rerun()
 
                             if st.button("🗑️ Delete", key=f"delete_{recipe_id_str}", use_container_width=True):
                                 st.session_state.delete_confirmation = {"type": "recipe", "id": recipe_id, "name": recipe.get('name', '')}
