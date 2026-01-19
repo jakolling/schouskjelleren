@@ -2418,6 +2418,10 @@ elif page == "Breweries":
             
             # Mostrar
             for _, brewery in filtered_breweries.iterrows():
+                brewery_id = brewery.get('id_brewery', brewery.get('brewery_id', brewery.get('id')))
+                if brewery_id is None:
+                    brewery_id = _
+                brewery_id_str = str(brewery_id)
                 with st.expander(f"🏭 {brewery['name']} - {brewery['type']}", expanded=False):
                     col_info1, col_info2, col_info3 = st.columns(3)
                     
@@ -2454,7 +2458,7 @@ elif page == "Breweries":
                         st.write(f"📅 Established: {est_str}")
                         eq_count = 0
                         try:
-                            eq_count = int(equipment_counts.get(brewery.get("id_brewery"), equipment_counts.get(str(brewery.get("id_brewery")), 0)))
+                            eq_count = int(equipment_counts.get(brewery_id, equipment_counts.get(str(brewery_id), 0)))
                         except Exception:
                             eq_count = 0
                         st.write(f"⚙️ Equipment: {eq_count}")
@@ -2470,11 +2474,11 @@ elif page == "Breweries":
                     # Buttons
                     col_edit, col_delete = st.columns(2)
                     with col_edit:
-                        if st.button("Edit", key=f"edit_{brewery['id_brewery']}", use_container_width=True):
-                            st.session_state['edit_brewery'] = brewery['id_brewery']
+                        if st.button("Edit", key=f"edit_{brewery_id_str}", use_container_width=True):
+                            st.session_state['edit_brewery'] = brewery_id
                     with col_delete:
-                        if st.button("🗑️ Delete", key=f"del_{brewery['id_brewery']}", use_container_width=True, type="secondary"):
-                            st.session_state.delete_confirmation = {"type": "brewery", "id": brewery['id_brewery'], "name": brewery['name']}
+                        if st.button("🗑️ Delete", key=f"del_{brewery_id_str}", use_container_width=True, type="secondary"):
+                            st.session_state.delete_confirmation = {"type": "brewery", "id": brewery_id, "name": brewery['name']}
                             st.rerun()
 
                     
@@ -2706,13 +2710,20 @@ elif page == "Breweries":
         with col_eq1:
             breweries_df = data.get("breweries", pd.DataFrame())
             if not breweries_df.empty:
-                brewery_options = breweries_df["name"].tolist()
+                brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
+                brewery_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
+
+                if not brewery_name_col:
+                    st.error("Breweries table is missing a name column.")
+                    st.stop()
+
+                brewery_options = breweries_df[brewery_name_col].astype(str).tolist()
 
                 # If we arrived here from a Brewery card ("View Equipment"), preselect that brewery.
                 preferred_id = st.session_state.get("selected_brewery")
-                if preferred_id is not None and preferred_id in set(breweries_df["id_brewery"].values):
-                    preferred_name = breweries_df.loc[breweries_df["id_brewery"] == preferred_id, "name"].iloc[0]
-                    st.session_state["equipment_brewery_select"] = preferred_name
+                if preferred_id is not None and brewery_id_col and preferred_id in set(breweries_df[brewery_id_col].astype(str).values):
+                    preferred_name = breweries_df.loc[breweries_df[brewery_id_col].astype(str) == str(preferred_id), brewery_name_col].iloc[0]
+                    st.session_state["equipment_brewery_select"] = str(preferred_name)
 
                 selected_brewery = st.selectbox(
                     "Select Brewery for Equipment*",
@@ -2720,10 +2731,10 @@ elif page == "Breweries":
                     key="equipment_brewery_select",
                 )
 
-                match = breweries_df[breweries_df["name"] == selected_brewery]
-                brewery_id = match["id_brewery"].iloc[0] if not match.empty else None
+                match = breweries_df[breweries_df[brewery_name_col].astype(str) == str(selected_brewery)]
+                brewery_id = match[brewery_id_col].iloc[0] if (brewery_id_col and not match.empty) else None
                 if brewery_id is None:
-                    st.error("Selected brewery not found in the database.")
+                    st.error("Selected brewery not found in the database (missing/unknown brewery id column).")
                     st.stop()
             else:
                 st.warning("⚠️ Please add a brewery first!")
@@ -2930,7 +2941,12 @@ elif page == "Breweries":
                     filtered_equipment = filtered_equipment[filtered_equipment["status"] == eq_status_filter]
                 
                 if brewery_filter != "All" and not breweries_df.empty:
-                    brewery_id_filter = breweries_df[breweries_df["name"] == brewery_filter]["id_brewery"].iloc[0]
+                    brewery_name_col = _col(breweries_df, "name", "brewery_name")
+                    brewery_id_col = _col(breweries_df, "id_brewery", "brewery_id", "id")
+                    brewery_id_filter = None
+                    if brewery_name_col and brewery_id_col:
+                        m = breweries_df[breweries_df[brewery_name_col].astype(str) == str(brewery_filter)]
+                        brewery_id_filter = m[brewery_id_col].iloc[0] if not m.empty else None
                     filtered_equipment = filtered_equipment[filtered_equipment["brewery_id"] == brewery_id_filter]
                 
                 if len(filtered_equipment) > 0:
@@ -2939,8 +2955,10 @@ elif page == "Breweries":
                     for idx, (_, eq) in enumerate(filtered_equipment.iterrows()):
                         with cols[idx % 2]:
                             brewery_name = ""
-                            if not breweries_df.empty and eq["brewery_id"] in breweries_df["id_brewery"].values:
-                                brewery_name = breweries_df[breweries_df["id_brewery"] == eq["brewery_id"]]["name"].iloc[0]
+                            brewery_name_col = _col(breweries_df, "name", "brewery_name")
+                            brewery_id_col = _col(breweries_df, "id_brewery", "brewery_id", "id")
+                            if (not breweries_df.empty) and brewery_name_col and brewery_id_col and str(eq.get("brewery_id")) in set(breweries_df[brewery_id_col].astype(str).values):
+                                brewery_name = breweries_df.loc[breweries_df[brewery_id_col].astype(str) == str(eq.get("brewery_id")), brewery_name_col].iloc[0]
                             
                             occupancy_pct = (eq.get("current_volume", 0) / eq["capacity_liters"]) * 100 if eq["capacity_liters"] > 0 else 0
                             
@@ -3053,7 +3071,9 @@ elif page == "Breweries":
             if not equipment_df.empty:
                 equipment_by_brewery = []
                 for _, brewery in breweries_df.iterrows():
-                    brewery_eq = equipment_df[equipment_df["brewery_id"] == brewery["id_brewery"]]
+                    brewery_id_col = _col(breweries_df, "id_brewery", "brewery_id", "id")
+                    b_id = brewery.get(brewery_id_col) if brewery_id_col else brewery.get("id_brewery")
+                    brewery_eq = equipment_df[equipment_df["brewery_id"].astype(str) == str(b_id)]
                     
                     equipment_by_brewery.append({
                         "Brewery": brewery["name"],
@@ -3098,7 +3118,9 @@ elif page == "Breweries":
                 
                 capacity_data = []
                 for _, brewery in breweries_df.iterrows():
-                    brewery_eq = equipment_df[equipment_df["brewery_id"] == brewery["id_brewery"]]
+                    brewery_id_col = _col(breweries_df, "id_brewery", "brewery_id", "id")
+                    b_id = brewery.get(brewery_id_col) if brewery_id_col else brewery.get("id_brewery")
+                    brewery_eq = equipment_df[equipment_df["brewery_id"].astype(str) == str(b_id)]
                     
                     capacity_data.append({
                         "Brewery": brewery["name"],
@@ -3133,8 +3155,10 @@ elif page == "Breweries":
                         days_until = (eq["next_maintenance"].date() - datetime.now().date()).days
                         
                         brewery_name = ""
-                        if not breweries_df.empty and eq["brewery_id"] in breweries_df["id_brewery"].values:
-                            brewery_name = breweries_df[breweries_df["id_brewery"] == eq["brewery_id"]]["name"].iloc[0]
+                        brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
+                        brewery_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
+                        if (not breweries_df.empty) and brewery_id_col and brewery_name_col and (eq.get('brewery_id') in set(breweries_df[brewery_id_col].values)):
+                            brewery_name = breweries_df.loc[breweries_df[brewery_id_col] == eq.get('brewery_id'), brewery_name_col].iloc[0]
                         
                         col_m1, col_m2, col_m3 = st.columns([3, 2, 1])
                         with col_m1:
@@ -4982,7 +5006,7 @@ elif page == "Recipes":
             with col2:
                 style_filter = st.selectbox(
                     "Filter by Style",
-                    ["All Styles"] + sorted(recipes_df['style'].dropna().unique().tolist()),
+                    (["All Styles"] + sorted(recipes_df[_col(recipes_df,'style','beer_style')].dropna().unique().tolist()) if _col(recipes_df,'style','beer_style') else ["All Styles"]),
                     key="style_filter"
                 )
             with col3:
@@ -4994,48 +5018,66 @@ elif page == "Recipes":
             
             # Aplicar filtros
             filtered_recipes = recipes_df.copy()
-            if recipe_search:
-                filtered_recipes = filtered_recipes[
-                    filtered_recipes['name'].str.contains(recipe_search, case=False, na=False) |
-                    filtered_recipes['style'].str.contains(recipe_search, case=False, na=False)
-                ]
-            if style_filter != "All Styles":
-                filtered_recipes = filtered_recipes[filtered_recipes['style'] == style_filter]
+            name_col = _col(filtered_recipes, 'name', 'recipe_name')
+            style_col = _col(filtered_recipes, 'style', 'beer_style')
+            if recipe_search and (name_col or style_col):
+                mask = False
+                if name_col:
+                    mask = mask | filtered_recipes[name_col].astype(str).str.contains(recipe_search, case=False, na=False)
+                if style_col:
+                    mask = mask | filtered_recipes[style_col].astype(str).str.contains(recipe_search, case=False, na=False)
+                filtered_recipes = filtered_recipes[mask]
+            if style_filter != "All Styles" and style_col:
+                filtered_recipes = filtered_recipes[filtered_recipes[style_col] == style_filter]
             if brewery_filter != "All Breweries" and 'brewery_name' in filtered_recipes.columns:
                 filtered_recipes = filtered_recipes[filtered_recipes['brewery_name'] == brewery_filter]
             
             # Mostrar receitas
             if not filtered_recipes.empty:
                 for idx, recipe in filtered_recipes.iterrows():
-                    with st.expander(f"🍺 {recipe['name']} - {recipe.get('style', 'N/A')}", expanded=False):
+                    recipe_name = recipe.get('name', recipe.get('recipe_name', 'Recipe'))
+                    recipe_style = recipe.get('style', recipe.get('beer_style', 'N/A'))
+                    with st.expander(f"🍺 {recipe_name} - {recipe_style}", expanded=False):
                         col_left, col_right = st.columns([2, 1])
                         
                         with col_left:
                             # Informações básicas
-                            st.write(f"**Batch Size:** {recipe.get('batch_volume', 'N/A')}L")
+                            st.write(f"**Batch Size:** {recipe.get('batch_volume', recipe.get('batch_size', 'N/A'))}L")
                             st.write(f"**Efficiency:** {recipe.get('efficiency', 'N/A')}%")
                             st.write(f"**Target Brewery:** {recipe.get('brewery_name', 'N/A')}")
                             
                             # Estatísticas da cerveja
-                            if all(k in recipe for k in ['og', 'fg', 'ibus', 'ebc']):
+                            if any(k in recipe.index for k in ['og','fg','ibus','ibu','ebc','srm','original_gravity','final_gravity','og_plato','fg_plato']):
                                 st.write("**Beer Stats:**")
                                 col_stats1, col_stats2 = st.columns(2)
                                 with col_stats1:
-                                    st.write(f"OG: {recipe['og']}°P")
-                                    st.write(f"FG: {recipe['fg']}°P")
+                                    og_val = recipe.get('og', recipe.get('original_gravity', recipe.get('og_plato')))
+                                    if og_val is not None and str(og_val) != 'nan':
+                                        st.write(f"OG: {og_val}°P")
+                                    fg_val = recipe.get('fg', recipe.get('final_gravity', recipe.get('fg_plato')))
+                                    if fg_val is not None and str(fg_val) != 'nan':
+                                        st.write(f"FG: {fg_val}°P")
                                 with col_stats2:
-                                    st.write(f"IBU: {recipe['ibus']}")
-                                    st.write(f"Color: {recipe['ebc']} EBC")
+                                    ibu_val = recipe.get('ibus', recipe.get('ibu'))
+                                    if ibu_val is not None and str(ibu_val) != 'nan':
+                                        st.write(f"IBU: {ibu_val}")
+                                    col_val = recipe.get('ebc', recipe.get('color_ebc', recipe.get('srm')))
+                                    if col_val is not None and str(col_val) != 'nan':
+                                        st.write(f"Color: {col_val} EBC")
                                 
                                 # Calcular ABV
-                                if recipe['og'] and recipe['fg']:
-                                    abv = (recipe['og'] - recipe['fg']) * 0.524
+                                og_calc = recipe.get('og', recipe.get('original_gravity', recipe.get('og_plato')))
+                                fg_calc = recipe.get('fg', recipe.get('final_gravity', recipe.get('fg_plato')))
+                                if og_calc and fg_calc:
+                                    abv = (float(og_calc) - float(fg_calc)) * 0.524
                                     st.write(f"**ABV:** {abv:.1f}%")
                             
                             # Descrição
                             if recipe.get('description'):
                                 st.write("**Description:**")
-                                st.write(recipe['description'])
+                                desc = recipe.get('description', recipe.get('notes', ''))
+                                if desc:
+                                    st.write(desc)
                         
                         with col_right:
                             # Ações
@@ -5117,7 +5159,12 @@ elif page == "Recipes":
             # Selecionar cervejaria
             breweries_df = data.get("breweries", pd.DataFrame())
             if not breweries_df.empty:
-                brewery_options = {row['id_brewery']: row['name'] for _, row in breweries_df.iterrows()}
+                brewery_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
+                brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
+                if not (brewery_id_col and brewery_name_col):
+                    st.error('Breweries table is missing id/name columns.')
+                    st.stop()
+                brewery_options = {row[brewery_id_col]: row[brewery_name_col] for _, row in breweries_df.iterrows()}
                 selected_brewery = st.selectbox(
                     "Target Brewery*",
                     options=list(brewery_options.keys()),
@@ -5174,7 +5221,12 @@ elif page == "Recipes":
                 
                 with col_ing1:
                     # Agrupar ingredientes por categoria
-                    ingredient_categories = sorted(ingredients_df['category'].dropna().unique())
+                    ing_cat_col = _col(ingredients_df, 'category', 'type', 'ingredient_type')
+                    ing_name_col = _col(ingredients_df, 'name', 'ingredient', 'ingredient_name')
+                    if ing_cat_col:
+                        ingredient_categories = sorted(ingredients_df[ing_cat_col].dropna().unique())
+                    else:
+                        ingredient_categories = []
                     selected_category = st.selectbox(
                         "Category",
                         ["All"] + ingredient_categories,
@@ -5183,9 +5235,15 @@ elif page == "Recipes":
                     
                     # Filtrar ingredientes por categoria
                     if selected_category == "All":
-                        available_ingredients = ingredients_df['name'].tolist()
+                        if ing_name_col:
+                            available_ingredients = ingredients_df[ing_name_col].astype(str).tolist()
+                        else:
+                            available_ingredients = []
                     else:
-                        available_ingredients = ingredients_df[ingredients_df['category'] == selected_category]['name'].tolist()
+                        if ing_name_col and ing_cat_col:
+                            available_ingredients = ingredients_df[ingredients_df[ing_cat_col].astype(str) == str(selected_category)][ing_name_col].astype(str).tolist()
+                        else:
+                            available_ingredients = []
                     
                     selected_ingredient = st.selectbox(
                         "Ingredient",
@@ -5196,7 +5254,10 @@ elif page == "Recipes":
                 with col_ing2:
                     if selected_ingredient:
                         # Obter unidade do ingrediente
-                        ing_info = ingredients_df[ingredients_df['name'] == selected_ingredient].iloc[0]
+                        if ing_name_col:
+                            ing_info = ingredients_df[ingredients_df[ing_name_col].astype(str) == str(selected_ingredient)].iloc[0]
+                        else:
+                            ing_info = pd.Series()
                         unit = ing_info['unit']
                         quantity = st.number_input(
                             f"Amount ({unit})",
@@ -5419,7 +5480,13 @@ elif page == "Recipes":
                 total_recipes = len(recipes_df)
                 st.metric("Total Recipes", total_recipes)
             with col_stats2:
-                unique_styles = recipes_df['style'].nunique()
+                style_col = _col(recipes_df, 'style', 'beer_style')
+                og_col = _col(recipes_df, 'og', 'original_gravity', 'og_plato')
+                fg_col = _col(recipes_df, 'fg', 'final_gravity', 'fg_plato')
+                ibu_col = _col(recipes_df, 'ibus', 'ibu')
+                name_col = _col(recipes_df, 'name', 'recipe_name')
+
+                unique_styles = recipes_df[style_col].nunique() if style_col else 0
                 st.metric("Unique Styles", unique_styles)
             with col_stats3:
                 batch_col = next((c for c in ['batch_volume', 'batch_size', 'batch_l', 'volume_l', 'volume'] if c in recipes_df.columns), None)
@@ -5429,14 +5496,14 @@ elif page == "Recipes":
                 else:
                     st.metric("Avg Batch Size", "N/A")
             with col_stats4:
-                avg_abv = ((recipes_df['og'] - recipes_df['fg']) * 0.524).mean()
+                avg_abv = (((pd.to_numeric(recipes_df[og_col], errors='coerce') - pd.to_numeric(recipes_df[fg_col], errors='coerce')) * 0.524).mean() if (og_col and fg_col) else float('nan'))
                 st.metric("Avg ABV", f"{avg_abv:.1f}%")
             
             # Gráfico de distribuição por estilo
             st.markdown("---")
             st.write("**Distribution by Beer Style**")
             
-            style_dist = recipes_df['style'].value_counts()
+            style_dist = (recipes_df[style_col].value_counts() if style_col else pd.Series(dtype=int))
             fig_style = go.Figure(data=[
                 go.Bar(
                     x=style_dist.index,
@@ -5461,11 +5528,11 @@ elif page == "Recipes":
                 # Scatter plot OG vs FG
                 fig_og_fg = go.Figure(data=[
                     go.Scatter(
-                        x=recipes_df['og'],
-                        y=recipes_df['fg'],
+                        x=pd.to_numeric(recipes_df[og_col], errors='coerce') if og_col else None,
+                        y=pd.to_numeric(recipes_df[fg_col], errors='coerce') if fg_col else None,
                         mode='markers',
-                        marker=dict(size=10, color=recipes_df['ibus'], colorscale='Viridis'),
-                        text=recipes_df['name'],
+                        marker=dict(size=10, color=pd.to_numeric(recipes_df[ibu_col], errors='coerce') if ibu_col else None, colorscale='Viridis'),
+                        text=recipes_df[name_col] if name_col else None,
                         hovertemplate='<b>%{text}</b><br>OG: %{x}°P<br>FG: %{y}°P<extra></extra>'
                     )
                 ])
@@ -5479,7 +5546,7 @@ elif page == "Recipes":
             
             with col_param2:
                 # Histograma de ABV
-                abv_values = (recipes_df['og'] - recipes_df['fg']) * 0.524
+                abv_values = ((pd.to_numeric(recipes_df[og_col], errors='coerce') - pd.to_numeric(recipes_df[fg_col], errors='coerce')) * 0.524) if (og_col and fg_col) else pd.Series(dtype=float)
                 fig_abv = go.Figure(data=[
                     go.Histogram(
                         x=abv_values,
@@ -6621,7 +6688,12 @@ elif page == "Calendar":
                 cleaning_tasks = equipment_copy.copy()
                 
                 if cleaning_brewery != "All":
-                    brewery_id = breweries_df[breweries_df["name"] == cleaning_brewery]["id_brewery"].iloc[0]
+                    brewery_name_col = _col(breweries_df, "name", "brewery_name")
+                    brewery_id_col = _col(breweries_df, "id_brewery", "brewery_id", "id")
+                    brewery_id = None
+                    if brewery_name_col and brewery_id_col:
+                        m = breweries_df[breweries_df[brewery_name_col].astype(str) == str(cleaning_brewery)]
+                        brewery_id = m[brewery_id_col].iloc[0] if not m.empty else None
                     cleaning_tasks = cleaning_tasks[cleaning_tasks["brewery_id"] == brewery_id]
                 
                 # Classificar por status
@@ -6653,8 +6725,10 @@ elif page == "Calendar":
                             
                             # Obter nome da cervejaria
                             brewery_name = ""
-                            if not breweries_df.empty and eq["brewery_id"] in breweries_df["id_brewery"].values:
-                                brewery_name = breweries_df[breweries_df["id_brewery"] == eq["brewery_id"]]["name"].iloc[0]
+                            brewery_name_col = _col(breweries_df, "name", "brewery_name")
+                            brewery_id_col = _col(breweries_df, "id_brewery", "brewery_id", "id")
+                            if (not breweries_df.empty) and brewery_name_col and brewery_id_col and str(eq.get("brewery_id")) in set(breweries_df[brewery_id_col].astype(str).values):
+                                brewery_name = breweries_df.loc[breweries_df[brewery_id_col].astype(str) == str(eq.get("brewery_id")), brewery_name_col].iloc[0]
                             st.write(f"Brewery: {brewery_name}")
                         
                         with col_task2:
@@ -6721,8 +6795,10 @@ elif page == "Calendar":
                         # Obter nome da cervejaria
                         brewery_name = ""
                         breweries_df = data.get("breweries", pd.DataFrame())
-                        if not breweries_df.empty and eq["brewery_id"] in breweries_df["id_brewery"].values:
-                            brewery_name = breweries_df[breweries_df["id_brewery"] == eq["brewery_id"]]["name"].iloc[0]
+                        brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
+                        brewery_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
+                        if (not breweries_df.empty) and brewery_id_col and brewery_name_col and (eq.get('brewery_id') in set(breweries_df[brewery_id_col].values)):
+                            brewery_name = breweries_df.loc[breweries_df[brewery_id_col] == eq.get('brewery_id'), brewery_name_col].iloc[0]
                         st.write(f"Brewery: {brewery_name}")
                     
                     with col_maint2:
