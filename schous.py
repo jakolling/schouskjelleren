@@ -1923,6 +1923,144 @@ def _col(df, *names):
     return None
 
 
+
+def _pick_col_from_cols(actual_cols, *candidates, contains_all=None, contains_any=None):
+    """Pick a column name from a list of column names.
+
+    1) Try exact matches (case-insensitive) for the provided candidates.
+    2) If none match, try a fuzzy search:
+       - contains_all: all of these substrings must be present
+       - contains_any: at least one of these substrings must be present
+
+    Returns the real column name as it appears in the DB, or None.
+    """
+    if not actual_cols:
+        return None
+    cols_map = {str(c).lower(): c for c in actual_cols}
+
+    # exact
+    for cand in candidates:
+        if cand is None:
+            continue
+        key = str(cand).lower()
+        if key in cols_map:
+            return cols_map[key]
+
+    # fuzzy
+    cols_lower = [str(c).lower() for c in actual_cols]
+    contains_all = [s.lower() for s in (contains_all or [])]
+    contains_any = [s.lower() for s in (contains_any or [])]
+
+    for c_low, c_real in zip(cols_lower, actual_cols):
+        if contains_all and not all(s in c_low for s in contains_all):
+            continue
+        if contains_any and not any(s in c_low for s in contains_any):
+            continue
+        if contains_all or contains_any:
+            return c_real
+    return None
+
+
+def build_recipe_insert_dict(recipe_name, recipe_style, batch_volume, efficiency, og, fg, ibus, ebc, selected_brewery, brewery_name, description):
+    """Build a recipes-row payload that matches the *actual* recipes schema.
+
+    We look up the real column names and only set keys that exist. This prevents
+    'nan' / 'N/A' later when the DB uses different column names than the UI.
+
+    Note: UI inputs OG/FG are in °P. We store those values in whichever gravity
+    columns exist in the schema (including Plato targets).
+    """
+    try:
+        actual_cols = get_table_columns_cached('recipes')
+    except Exception:
+        actual_cols = []
+
+    payload = {}
+
+    # Name/style/description
+    name_col = _pick_col_from_cols(actual_cols, 'name', 'recipe_name', 'title', contains_any=['name'])
+    if name_col:
+        payload[name_col] = recipe_name
+
+    style_col = _pick_col_from_cols(actual_cols, 'style', 'beer_style', 'type_style', contains_any=['style'])
+    if style_col:
+        payload[style_col] = recipe_style
+
+    desc_col = _pick_col_from_cols(actual_cols, 'description', 'notes', 'desc', contains_any=['desc','note'])
+    if desc_col:
+        payload[desc_col] = description
+
+    # Batch volume
+    batch_col = _pick_col_from_cols(
+        actual_cols,
+        'batch_volume', 'batch_size', 'batch_l', 'batch_volume_l', 'batch_volume_liters',
+        'volume_l', 'volume',
+        contains_any=['batch', 'volume']
+    )
+    if batch_col:
+        payload[batch_col] = float(batch_volume)
+
+    # Efficiency
+    eff_col = _pick_col_from_cols(
+        actual_cols,
+        'efficiency', 'brewhouse_efficiency', 'brew_efficiency', 'bh_efficiency',
+        'efficiency_pct', 'efficiency_percent',
+        contains_any=['eff']
+    )
+    if eff_col:
+        payload[eff_col] = float(efficiency)
+
+    # Brewery id / name
+    brew_id_col = _pick_col_from_cols(
+        actual_cols,
+        'brewery_id', 'id_brewery', 'target_brewery_id', 'id_target_brewery',
+        contains_all=['brewery'], contains_any=['id']
+    )
+    if brew_id_col:
+        payload[brew_id_col] = selected_brewery
+
+    brew_name_col = _pick_col_from_cols(actual_cols, 'brewery_name', 'target_brewery_name', contains_all=['brewery'], contains_any=['name'])
+    if brew_name_col:
+        payload[brew_name_col] = brewery_name
+
+    # Gravities (Plato)
+    og_col = _pick_col_from_cols(
+        actual_cols,
+        'og', 'target_og', 'og_target', 'og_planned',
+        'original_gravity', 'target_original_gravity',
+        'og_plato', 'original_gravity_plato', 'target_og_plato', 'target_original_gravity_plato',
+        contains_any=['og','original_gravity']
+    )
+    if og_col:
+        payload[og_col] = float(og)
+
+    fg_col = _pick_col_from_cols(
+        actual_cols,
+        'fg', 'target_fg', 'fg_target', 'fg_planned',
+        'final_gravity', 'target_final_gravity',
+        'fg_plato', 'final_gravity_plato', 'target_fg_plato', 'target_final_gravity_plato',
+        contains_any=['fg','final_gravity']
+    )
+    if fg_col:
+        payload[fg_col] = float(fg)
+
+    # IBU & Color
+    ibu_col = _pick_col_from_cols(actual_cols, 'ibus', 'ibu', 'target_ibu', 'ibu_target', contains_any=['ibu'])
+    if ibu_col:
+        payload[ibu_col] = float(ibus)
+
+    col_col = _pick_col_from_cols(actual_cols, 'ebc', 'color_ebc', 'colour_ebc', 'target_ebc', 'ebc_target', 'srm', 'color', contains_any=['ebc','srm','color'])
+    if col_col:
+        payload[col_col] = float(ebc)
+
+    # ABV (optional)
+    abv_val = (float(og) - float(fg)) * 0.524
+    abv_col = _pick_col_from_cols(actual_cols, 'abv', 'target_abv', contains_any=['abv'])
+    if abv_col:
+        payload[abv_col] = float(abv_val)
+
+    return payload
+
 def get_vessels_for_production(data: dict) -> list[str]:
     """Best-effort list of vessels (tanks/BBT/serving) from equipment table."""
     eq = data.get('equipment', None)
@@ -6389,9 +6527,32 @@ elif page == "Recipes":
                         
                         with col_left:
                             # Informações básicas
-                            st.write(f"**Batch Size:** {recipe.get('batch_volume', recipe.get('batch_size', 'N/A'))}L")
-                            st.write(f"**Efficiency:** {recipe.get('efficiency', 'N/A')}%")
-                            st.write(f"**Target Brewery:** {recipe.get('brewery_name', 'N/A')}")
+                            # Batch size (robust against schema differences + NaN)
+                            batch_val = recipe.get('batch_volume', recipe.get('batch_size'))
+                            if batch_val is None or str(batch_val) == 'nan':
+                                for _k in ['batch_l','batch_volume_l','batch_volume_liters','volume_l','volume']:
+                                    if _k in recipe.index and recipe.get(_k) is not None and str(recipe.get(_k)) != 'nan':
+                                        batch_val = recipe.get(_k)
+                                        break
+                            batch_txt = f"{batch_val}L" if batch_val is not None and str(batch_val) != 'nan' else 'N/A'
+                            st.write(f"**Batch Size:** {batch_txt}")
+
+                            eff_val = recipe.get('efficiency', recipe.get('brewhouse_efficiency', recipe.get('brew_efficiency', recipe.get('bh_efficiency'))))
+                            eff_txt = f"{eff_val}%" if eff_val is not None and str(eff_val) != 'nan' else 'N/A'
+                            st.write(f"**Efficiency:** {eff_txt}")
+
+                            # Brewery name: use stored name if present, else map from breweries table
+                            brew_name = recipe.get('brewery_name', recipe.get('target_brewery_name'))
+                            if brew_name is None or str(brew_name) == 'nan' or str(brew_name).strip() == '':
+                                bid = recipe.get('brewery_id', recipe.get('id_brewery', recipe.get('target_brewery_id', recipe.get('id_target_brewery'))))
+                                breweries_df = data.get('breweries', pd.DataFrame())
+                                b_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
+                                b_name_col = _col(breweries_df, 'name', 'brewery_name')
+                                if bid is not None and not breweries_df.empty and b_id_col and b_name_col:
+                                    mm = breweries_df[breweries_df[b_id_col].astype(str) == str(bid)]
+                                    if not mm.empty:
+                                        brew_name = mm.iloc[0][b_name_col]
+                            st.write(f"**Target Brewery:** {brew_name if brew_name is not None and str(brew_name) != 'nan' else 'N/A'}")
                             
                             # Estatísticas da cerveja
                             if any(k in recipe.index for k in ['og','fg','ibus','ibu','ebc','srm','original_gravity','final_gravity','og_plato','fg_plato']):
@@ -6696,87 +6857,19 @@ elif page == "Recipes":
                 st.error("Final Gravity must be lower than Original Gravity!")
             else:
                 # Criar registro da receita
-                new_recipe = {
-                    # Core fields (with many aliases; insert_data will keep only existing columns)
-                    'name': recipe_name,
-                    'recipe_name': recipe_name,
-                    'title': recipe_name,
-
-                    'style': recipe_style,
-                    'beer_style': recipe_style,
-                    'type_style': recipe_style,
-
-                    # Batch size / volume
-                    'batch_volume': batch_volume,
-                    'batch_size': batch_volume,
-                    'batch_l': batch_volume,
-                    'batch_volume_l': batch_volume,
-                    'volume_l': batch_volume,
-                    'volume': batch_volume,
-
-                    # Efficiency
-                    'efficiency': efficiency,
-                    'brewhouse_efficiency': efficiency,
-                    'brew_efficiency': efficiency,
-                    'bh_efficiency': efficiency,
-                    'efficiency_pct': efficiency,
-                    'efficiency_percent': efficiency,
-
-                    # Target brewery (id + name)
-                    'brewery_id': selected_brewery,
-                    'id_brewery': selected_brewery,
-                    'target_brewery_id': selected_brewery,
-                    'brewery': selected_brewery,
-                    'target_brewery': selected_brewery,
-
-                    'brewery_name': brewery_name,
-                    'target_brewery_name': brewery_name,
-
-                    # Gravities (UI is in °P; we store the same value across matching columns)
-                    'og': og,
-                    'target_og': og,
-                    'og_target': og,
-                    'og_planned': og,
-                    'original_gravity': og,
-                    'target_original_gravity': og,
-                    'og_plato': og,
-                    'original_gravity_plato': og,
-                    'target_og_plato': og,
-                    'target_original_gravity_plato': og,
-
-                    'fg': fg,
-                    'target_fg': fg,
-                    'fg_target': fg,
-                    'fg_planned': fg,
-                    'final_gravity': fg,
-                    'target_final_gravity': fg,
-                    'fg_plato': fg,
-                    'final_gravity_plato': fg,
-                    'target_fg_plato': fg,
-                    'target_final_gravity_plato': fg,
-
-                    # Other beer parameters
-                    'ibus': ibus,
-                    'ibu': ibus,
-                    'target_ibu': ibus,
-                    'ibu_target': ibus,
-
-                    'ebc': ebc,
-                    'color_ebc': ebc,
-                    'colour_ebc': ebc,
-                    'target_ebc': ebc,
-                    'ebc_target': ebc,
-                    'srm': ebc,
-                    'color': ebc,
-
-                    'abv': (og - fg) * 0.524,
-                    'target_abv': (og - fg) * 0.524,
-
-                    # Notes / description
-                    'description': description,
-                    'notes': description,
-                    'desc': description,
-                }
+                new_recipe = build_recipe_insert_dict(
+                    recipe_name=recipe_name,
+                    recipe_style=recipe_style,
+                    batch_volume=batch_volume,
+                    efficiency=efficiency,
+                    og=og,
+                    fg=fg,
+                    ibus=ibus,
+                    ebc=ebc,
+                    selected_brewery=selected_brewery,
+                    brewery_name=brewery_name,
+                    description=description,
+                )
 
                 # Inserir receita
                 recipe_id = insert_data("recipes", new_recipe)
