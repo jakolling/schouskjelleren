@@ -7833,7 +7833,27 @@ elif page == "Production":
 
                         # ---- KEGGING (via Composite Product) ----
                         if action == 'Kegging':
-                            if composites_df is None or composites_df.empty:
+                            # Guard: you cannot keg if the batch has not been brewed (no wort/beer yet).
+                            try:
+                                _brew_cnt = query_to_df(
+                                    "SELECT COUNT(*) AS cnt FROM production_events WHERE batch_id = :bid AND LOWER(event_type) = 'brew'",
+                                    {"bid": batch_id},
+                                )
+                                brewed_ok = bool(_brew_cnt is not None and not _brew_cnt.empty and int(_brew_cnt.iloc[0].get('cnt', 0)) > 0)
+                            except Exception:
+                                brewed_ok = False
+
+                            try:
+                                remaining_ok = float(remaining_vol or 0) > 1e-9
+                            except Exception:
+                                remaining_ok = False
+
+                            if not brewed_ok or not remaining_ok:
+                                st.warning(
+                                    "Kegging is only available after the batch has been **brewed** and has beer volume remaining. "
+                                    "Record a **Brew** event first."
+                                )
+                            elif composites_df is None or composites_df.empty:
                                 st.warning('No composite products found. Create one in Products → Composite Products.')
                             else:
                                 cid_col = _col(composites_df, 'id_composite', 'id')
