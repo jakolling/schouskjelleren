@@ -5973,8 +5973,8 @@ elif page == "Recipes":
                     desc_col = _col(recipes_df, 'description', 'notes', 'desc')
                     batch_col = _col(recipes_df, 'batch_volume', 'batch_size', 'batch_l', 'volume_l', 'volume')
                     eff_col = _col(recipes_df, 'efficiency', 'brewhouse_efficiency', 'brew_efficiency', 'bh_efficiency', 'efficiency_pct', 'efficiency_percent')
-                    og_col = _col(recipes_df, 'og', 'original_gravity', 'og_plato', 'target_og', 'og_target', 'og_planned', 'original_gravity_plato')
-                    fg_col = _col(recipes_df, 'fg', 'final_gravity', 'fg_plato', 'target_fg', 'fg_target', 'fg_planned', 'final_gravity_plato')
+                    og_col = _col(recipes_df, 'og', 'original_gravity', 'target_original_gravity', 'target_og', 'og_target', 'og_planned', 'og_plato', 'original_gravity_plato', 'target_og_plato', 'target_original_gravity_plato', 'original_gravity_p', 'og_p')
+                    fg_col = _col(recipes_df, 'fg', 'final_gravity', 'target_final_gravity', 'target_fg', 'fg_target', 'fg_planned', 'fg_plato', 'final_gravity_plato', 'target_fg_plato', 'target_final_gravity_plato', 'final_gravity_p', 'fg_p')
                     ibu_col = _col(recipes_df, 'ibus', 'ibu', 'target_ibu', 'ibu_target')
                     ebc_col = _col(recipes_df, 'ebc', 'color_ebc', 'srm', 'target_ebc', 'ebc_target', 'color')
 
@@ -5993,7 +5993,7 @@ elif page == "Recipes":
                     brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
 
                     # attempt to find current brewery id
-                    cur_brewery_id = recipe_row.get('brewery_id', recipe_row.get('id_brewery', recipe_row.get('brewery', None)))
+                    cur_brewery_id = recipe_row.get('brewery_id', recipe_row.get('id_brewery', recipe_row.get('target_brewery_id', recipe_row.get('target_brewery', recipe_row.get('brewery', None)))))
 
                     with st.form(key=f'edit_recipe_form_{str(edit_id)}'):
                         c1, c2 = st.columns(2)
@@ -6674,20 +6674,87 @@ elif page == "Recipes":
             else:
                 # Criar registro da receita
                 new_recipe = {
+                    # Core fields (with many aliases; insert_data will keep only existing columns)
                     'name': recipe_name,
+                    'recipe_name': recipe_name,
+                    'title': recipe_name,
+
                     'style': recipe_style,
+                    'beer_style': recipe_style,
+                    'type_style': recipe_style,
+
+                    # Batch size / volume
                     'batch_volume': batch_volume,
+                    'batch_size': batch_volume,
+                    'batch_l': batch_volume,
+                    'batch_volume_l': batch_volume,
+                    'volume_l': batch_volume,
+                    'volume': batch_volume,
+
+                    # Efficiency
                     'efficiency': efficiency,
+                    'brewhouse_efficiency': efficiency,
+                    'brew_efficiency': efficiency,
+                    'bh_efficiency': efficiency,
+                    'efficiency_pct': efficiency,
+                    'efficiency_percent': efficiency,
+
+                    # Target brewery (id + name)
                     'brewery_id': selected_brewery,
+                    'id_brewery': selected_brewery,
+                    'target_brewery_id': selected_brewery,
+                    'brewery': selected_brewery,
+                    'target_brewery': selected_brewery,
+
                     'brewery_name': brewery_name,
+                    'target_brewery_name': brewery_name,
+
+                    # Gravities (UI is in °P; we store the same value across matching columns)
                     'og': og,
+                    'target_og': og,
+                    'og_target': og,
+                    'og_planned': og,
+                    'original_gravity': og,
+                    'target_original_gravity': og,
+                    'og_plato': og,
+                    'original_gravity_plato': og,
+                    'target_og_plato': og,
+                    'target_original_gravity_plato': og,
+
                     'fg': fg,
+                    'target_fg': fg,
+                    'fg_target': fg,
+                    'fg_planned': fg,
+                    'final_gravity': fg,
+                    'target_final_gravity': fg,
+                    'fg_plato': fg,
+                    'final_gravity_plato': fg,
+                    'target_fg_plato': fg,
+                    'target_final_gravity_plato': fg,
+
+                    # Other beer parameters
                     'ibus': ibus,
+                    'ibu': ibus,
+                    'target_ibu': ibus,
+                    'ibu_target': ibus,
+
                     'ebc': ebc,
+                    'color_ebc': ebc,
+                    'colour_ebc': ebc,
+                    'target_ebc': ebc,
+                    'ebc_target': ebc,
+                    'srm': ebc,
+                    'color': ebc,
+
                     'abv': (og - fg) * 0.524,
-                    'description': description
+                    'target_abv': (og - fg) * 0.524,
+
+                    # Notes / description
+                    'description': description,
+                    'notes': description,
+                    'desc': description,
                 }
-                
+
                 # Inserir receita
                 recipe_id = insert_data("recipes", new_recipe)
                 
