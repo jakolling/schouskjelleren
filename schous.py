@@ -1990,6 +1990,33 @@ def _pick_col_from_cols(actual_cols, *candidates, contains_all=None, contains_an
     return None
 
 
+def _ingredient_name_label_map(ingredients_df: pd.DataFrame) -> dict:
+    """Return a mapping {ingredient_name: "Manufacturer — Name"} for UI.
+
+    IMPORTANT: The app still stores and queries ingredients by *name* in many places
+    (legacy tables like recipe_items and purchase_order_items). This helper only
+    changes how options are displayed in dropdowns.
+    """
+    if ingredients_df is None or ingredients_df.empty:
+        return {}
+
+    name_col = _col(ingredients_df, 'name', 'ingredient_name', 'ingredient')
+    if not name_col:
+        return {}
+
+    mfg_col = _col(ingredients_df, 'manufacturer', 'brand', 'producer', 'maltster', 'maker')
+
+    out = {}
+    for _, r in ingredients_df.iterrows():
+        nm = r.get(name_col)
+        if nm is None or str(nm).strip() == "":
+            continue
+        nm_s = str(nm).strip()
+        mfg = str(r.get(mfg_col) or "").strip() if mfg_col else ""
+        out[nm_s] = f"{mfg} — {nm_s}" if mfg else nm_s
+    return out
+
+
 def build_recipe_insert_dict(recipe_name, recipe_style, batch_volume, efficiency, og, fg, ibus, ebc, selected_brewery, brewery_name, description):
     """Build a recipes-row payload that matches the *actual* recipes schema.
 
@@ -4266,10 +4293,12 @@ elif page == "Ingredients":
         else:  # Edit Existing Ingredient
             ingredients_df = data.get("ingredients", pd.DataFrame())
             if not ingredients_df.empty:
+                ing_label_map = _ingredient_name_label_map(ingredients_df)
                 ingredient_options = ingredients_df["name"].tolist()
                 selected_ingredient = st.selectbox(
                     "Select Ingredient to Edit",
                     ingredient_options,
+                    format_func=lambda x: ing_label_map.get(str(x), str(x)),
                     key="edit_ing_select"
                 )
                 
@@ -4887,6 +4916,9 @@ elif page == "Purchases":
 
             ingredient_options = sorted(eligible_df["name"].dropna().astype(str).tolist())
 
+            # UI-only labels: show Manufacturer — Name in ingredient dropdowns
+            ing_label_map = _ingredient_name_label_map(ingredients_df)
+
             # --- Items entry (Add items + real dropdowns) ---
             # We avoid st.data_editor here because in some Streamlit versions the SelectboxColumn
             # can behave like a plain text input, which breaks the ‘pick from list’ workflow.
@@ -4937,6 +4969,7 @@ elif page == "Purchases":
                         "Ingredient",
                         ing_options,
                         index=ing_idx,
+                        format_func=lambda x: ing_label_map.get(str(x), str(x)) if str(x) else "",
                         key=f"po_item_ing_{i}",
                         label_visibility="collapsed",
                     )
@@ -5379,6 +5412,9 @@ elif page == "Purchases":
                             else []
                         )
 
+                    # UI-only labels: show Manufacturer — Name when possible
+                    corr_ing_label_map = _ingredient_name_label_map(ingredients_df)
+
                     lock_items = (mode == "Void")
 
                     addc1, _ = st.columns([1, 6])
@@ -5397,6 +5433,7 @@ elif page == "Purchases":
                                 "Ingredient",
                                 ing_options,
                                 index=(ing_options.index(cur_ing) if cur_ing in ing_options else 0),
+                                format_func=lambda x: corr_ing_label_map.get(str(x), str(x)) if str(x) else "",
                                 key=f"po_corr_ing_{sel_oid}_{j}",
                                 label_visibility="collapsed",
                                 disabled=lock_items,
@@ -6277,14 +6314,18 @@ elif page == "Recipes":
                     ingredient_options = []
                     ing_lookup = {}
                     if ingredients_df is not None and not ingredients_df.empty and ing_id_col and ing_name_col:
+                        ing_mfg_col = _col(ingredients_df, 'manufacturer', 'brand', 'producer', 'maltster', 'maker')
                         for _, r in ingredients_df.iterrows():
                             _iid = r.get(ing_id_col)
                             _nm = r.get(ing_name_col)
                             if _iid is None or _nm is None:
                                 continue
                             ingredient_options.append(_iid)
+                            _nm_s = str(_nm)
+                            _mfg = str(r.get(ing_mfg_col) or '').strip() if ing_mfg_col else ''
+                            _label = f"{_mfg} — {_nm_s}" if _mfg else _nm_s
                             ing_lookup[_iid] = {
-                                'name': str(_nm),
+                                'name': _label,
                                 'unit': str(r.get(ing_unit_col) or ''),
                             }
 
@@ -6747,6 +6788,7 @@ elif page == "Recipes":
         
         ingredients_df = data.get("ingredients", pd.DataFrame())
         if not ingredients_df.empty:
+            ing_label_map = _ingredient_name_label_map(ingredients_df)
             # Controle dinâmico de ingredientes
             if 'recipe_ingredient_count' not in st.session_state:
                 st.session_state.recipe_ingredient_count = 1
@@ -6786,6 +6828,7 @@ elif page == "Recipes":
                     selected_ingredient = st.selectbox(
                         "Ingredient",
                         [""] + available_ingredients,
+                        format_func=lambda x: ing_label_map.get(str(x), str(x)) if str(x) else "",
                         key=f"ing_{i}"
                     )
                 
@@ -7484,6 +7527,9 @@ elif page == "Production":
                                 if ingredients_df is not None and not ingredients_df.empty and ing_name_col:
                                     all_ing_opts = sorted(set(ingredients_df[ing_name_col].astype(str).dropna().tolist()))
 
+                                # UI-only labels (Manufacturer — Name)
+                                ing_label_map = _ingredient_name_label_map(ingredients_df)
+
                                 ri_recipe_col = _col(recipe_items_df, 'recipe_id', 'id_recipe')
                                 ri_ing_col = _col(recipe_items_df, 'ingredient_name', 'ingredient')
                                 ri_qty_col = _col(recipe_items_df, 'quantity')
@@ -7525,6 +7571,7 @@ elif page == "Production":
                                                 "Ingredient",
                                                 opts if opts else [''],
                                                 index=default_index if opts else 0,
+                                                format_func=lambda x: ing_label_map.get(str(x), str(x)) if str(x) else "",
                                                 key=f"brew_ing_pick_{batch_id}_{i}",
                                             )
                                         with cc3:
@@ -7554,6 +7601,7 @@ elif page == "Production":
                                             f"Extra ingredient {j+1}",
                                             [''] + (all_ing_opts if all_ing_opts else []),
                                             index=0,
+                                            format_func=lambda x: ing_label_map.get(str(x), str(x)) if str(x) else "",
                                             key=f"brew_extra_ing_{batch_id}_{j}",
                                         )
                                     with ec2:
@@ -7657,6 +7705,9 @@ elif page == "Production":
                                 else:
                                     options = ingredients_df[ing_name_col].astype(str).tolist()
 
+                            # UI-only labels (Manufacturer — Name)
+                            ing_label_map = _ingredient_name_label_map(ingredients_df)
+
                             with st.form(f'addition_action_{batch_id}_{action}', clear_on_submit=True):
                                 d = st.date_input('Date', date.today())
                                 notes = st.text_area('Notes', height=80)
@@ -7665,7 +7716,13 @@ elif page == "Production":
                                 for i in range(5):
                                     cc1, cc2 = st.columns([3, 1])
                                     with cc1:
-                                        ing = st.selectbox(f"Ingredient {i+1}", [''] + options, index=0, key=f"add_{batch_id}_{action}_{i}")
+                                        ing = st.selectbox(
+                                            f"Ingredient {i+1}",
+                                            [''] + options,
+                                            index=0,
+                                            format_func=lambda x: ing_label_map.get(str(x), str(x)) if str(x) else "",
+                                            key=f"add_{batch_id}_{action}_{i}",
+                                        )
                                     with cc2:
                                         qty = st.number_input("Qty", min_value=0.0, value=0.0, step=0.1, key=f"add_qty_{batch_id}_{action}_{i}")
                                     if ing and qty > 0:
