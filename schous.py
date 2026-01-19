@@ -5422,8 +5422,12 @@ elif page == "Recipes":
                 unique_styles = recipes_df['style'].nunique()
                 st.metric("Unique Styles", unique_styles)
             with col_stats3:
-                avg_batch_size = recipes_df['batch_volume'].mean()
-                st.metric("Avg Batch Size", f"{avg_batch_size:.1f}L")
+                batch_col = next((c for c in ['batch_volume', 'batch_size', 'batch_l', 'volume_l', 'volume'] if c in recipes_df.columns), None)
+                if batch_col is not None:
+                    avg_batch_size = pd.to_numeric(recipes_df[batch_col], errors='coerce').mean()
+                    st.metric("Avg Batch Size", f"{avg_batch_size:.1f}L" if pd.notna(avg_batch_size) else "N/A")
+                else:
+                    st.metric("Avg Batch Size", "N/A")
             with col_stats4:
                 avg_abv = ((recipes_df['og'] - recipes_df['fg']) * 0.524).mean()
                 st.metric("Avg ABV", f"{avg_abv:.1f}%")
@@ -5527,11 +5531,14 @@ elif page == "Recipes":
                                 unit_cost = ing.iloc[0].get('unit_cost', 0)
                                 total_cost += unit_cost * item['quantity']
                     
+                    batch_vol = pd.to_numeric(recipe.get('batch_volume', recipe.get('batch_size', 0)), errors='coerce')
+                    batch_vol = float(batch_vol) if pd.notna(batch_vol) else 0.0
+
                     recipe_costs.append({
                         'Recipe': recipe['name'],
-                        'Batch Volume (L)': recipe['batch_volume'],
+                        'Batch Volume (L)': batch_vol,
                         'Total Cost': total_cost,
-                        'Cost per Liter': total_cost / recipe['batch_volume'] if recipe['batch_volume'] > 0 else 0
+                        'Cost per Liter': total_cost / batch_vol if batch_vol > 0 else 0
                     })
                 
                 if recipe_costs:
