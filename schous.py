@@ -1875,13 +1875,40 @@ def update_stock_from_usage(ingredient_name, quantity):
         {"quantity": quantity, "ingredient_name": ingredient_name}
     )
 
+def _quote_ident(name: str) -> str:
+    """Safely double-quote a SQL identifier."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def check_ingredient_usage(ingredient_id):
-    """Verifica se um ingrediente está em uso em receitas"""
-    result = query_to_df(
-        "SELECT COUNT(*) as count FROM recipe_items WHERE id_ingredient = :ingredient_id",
-        {"ingredient_id": ingredient_id}
+    """Return True if ingredient appears in recipe_items (supports schema variations)."""
+    # Try to discover the ingredient FK column in recipe_items
+    try:
+        cols_df = query_to_df("SELECT * FROM recipe_items LIMIT 0")
+    except Exception:
+        # If table doesn't exist / can't be queried, assume not in use
+        return False
+
+    ing_col = _col(
+        cols_df,
+        'id_ingredient', 'ingredient_id', 'id_ing', 'ingredients_id', 'id_ingredients',
+        'fk_ingredient', 'ingredient', 'ingredient_fk'
     )
-    return result.iloc[0]['count'] > 0
+    if not ing_col:
+        return False
+
+    q = f"SELECT COUNT(*) as count FROM recipe_items WHERE {_quote_ident(ing_col)} = :ingredient_id"
+    try:
+        result = query_to_df(q, {"ingredient_id": ingredient_id})
+        return bool(result.iloc[0]['count'] > 0)
+    except Exception:
+        # Fallback: try without quoting (some DBs don't like quoted lower-case identifiers)
+        try:
+            q2 = f"SELECT COUNT(*) as count FROM recipe_items WHERE {ing_col} = :ingredient_id"
+            result = query_to_df(q2, {"ingredient_id": ingredient_id})
+            return bool(result.iloc[0]['count'] > 0)
+        except Exception:
+            return False
 
 
 
