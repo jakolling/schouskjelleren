@@ -5927,16 +5927,25 @@ elif page == "Recipes":
             else:
                 with st.expander('📝 Edit Recipe', expanded=True):
                     # Current values (with schema fallbacks)
-                    cur_name = recipe_row.get('name', recipe_row.get('recipe_name', ''))
-                    cur_style = recipe_row.get('style', recipe_row.get('beer_style', ''))
-                    cur_desc = recipe_row.get('description', recipe_row.get('notes', ''))
-                    cur_batch = recipe_row.get('batch_volume', recipe_row.get('batch_size', None))
-                    cur_eff = recipe_row.get('efficiency', None)
-                    cur_og = recipe_row.get('og', recipe_row.get('original_gravity', recipe_row.get('og_plato', None)))
-                    cur_fg = recipe_row.get('fg', recipe_row.get('final_gravity', recipe_row.get('fg_plato', None)))
-                    cur_ibu = recipe_row.get('ibus', recipe_row.get('ibu', None))
-                    cur_ebc = recipe_row.get('ebc', recipe_row.get('color_ebc', recipe_row.get('srm', None)))
+                    name_col = _col(recipes_df, 'name', 'recipe_name', 'title')
+                    style_col = _col(recipes_df, 'style', 'beer_style', 'type_style')
+                    desc_col = _col(recipes_df, 'description', 'notes', 'desc')
+                    batch_col = _col(recipes_df, 'batch_volume', 'batch_size', 'batch_l', 'volume_l', 'volume')
+                    eff_col = _col(recipes_df, 'efficiency', 'brewhouse_efficiency', 'brew_efficiency', 'bh_efficiency', 'efficiency_pct', 'efficiency_percent')
+                    og_col = _col(recipes_df, 'og', 'original_gravity', 'og_plato', 'target_og', 'og_target', 'og_planned', 'original_gravity_plato')
+                    fg_col = _col(recipes_df, 'fg', 'final_gravity', 'fg_plato', 'target_fg', 'fg_target', 'fg_planned', 'final_gravity_plato')
+                    ibu_col = _col(recipes_df, 'ibus', 'ibu', 'target_ibu', 'ibu_target')
+                    ebc_col = _col(recipes_df, 'ebc', 'color_ebc', 'srm', 'target_ebc', 'ebc_target', 'color')
 
+                    cur_name = recipe_row.get(name_col) if name_col else recipe_row.get('name', recipe_row.get('recipe_name', ''))
+                    cur_style = recipe_row.get(style_col) if style_col else recipe_row.get('style', recipe_row.get('beer_style', ''))
+                    cur_desc = recipe_row.get(desc_col) if desc_col else recipe_row.get('description', recipe_row.get('notes', ''))
+                    cur_batch = recipe_row.get(batch_col) if batch_col else recipe_row.get('batch_volume', recipe_row.get('batch_size', None))
+                    cur_eff = recipe_row.get(eff_col) if eff_col else recipe_row.get('efficiency', None)
+                    cur_og = recipe_row.get(og_col) if og_col else recipe_row.get('og', recipe_row.get('original_gravity', recipe_row.get('og_plato', None)))
+                    cur_fg = recipe_row.get(fg_col) if fg_col else recipe_row.get('fg', recipe_row.get('final_gravity', recipe_row.get('fg_plato', None)))
+                    cur_ibu = recipe_row.get(ibu_col) if ibu_col else recipe_row.get('ibus', recipe_row.get('ibu', None))
+                    cur_ebc = recipe_row.get(ebc_col) if ebc_col else recipe_row.get('ebc', recipe_row.get('color_ebc', recipe_row.get('srm', None)))
                     # Brewery selection
                     breweries_df = data.get('breweries', pd.DataFrame())
                     brewery_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
@@ -6187,15 +6196,30 @@ elif page == "Recipes":
                             'batch_volume': new_batch,
                             'batch_size': new_batch,
                             'efficiency': new_eff,
+                            'brewhouse_efficiency': new_eff,
+                            'brew_efficiency': new_eff,
+                            'bh_efficiency': new_eff,
+                            'efficiency_pct': new_eff,
+                            'efficiency_percent': new_eff,
                             'og': new_og,
+                            'target_og': new_og,
+                            'og_target': new_og,
+                            'og_planned': new_og,
                             'original_gravity': new_og,
                             'og_plato': new_og,
                             'fg': new_fg,
+                            'target_fg': new_fg,
+                            'fg_target': new_fg,
+                            'fg_planned': new_fg,
                             'final_gravity': new_fg,
                             'fg_plato': new_fg,
                             'ibus': new_ibu,
+                            'target_ibu': new_ibu,
+                            'ibu_target': new_ibu,
                             'ibu': new_ibu,
                             'ebc': new_ebc,
+                            'target_ebc': new_ebc,
+                            'ebc_target': new_ebc,
                             'color_ebc': new_ebc,
                             'srm': new_ebc,
                             'brewery_id': new_brewery,
