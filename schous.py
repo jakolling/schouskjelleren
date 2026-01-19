@@ -2344,7 +2344,30 @@ def handle_delete_confirmation():
                 if check_ingredient_usage(delete_id):
                     st.error("Failed to delete ingredient. It may be used in recipes.")
                 else:
-                    delete_data("ingredients", "id = :id", {"id": delete_id})
+                    # Ingredients table PK varies across schemas (id / id_ingredient / ingredient_id)
+                    engine = get_engine()
+                    dialect = engine.dialect.name.lower()
+                    ing_cols = get_table_columns_cached('ingredients', dialect) or []
+
+                    def _first_existing_ci(cols, candidates):
+                        s = set([c.lower() for c in cols])
+                        for cand in candidates:
+                            if cand.lower() in s:
+                                # return the actual-cased column name from cols
+                                for c in cols:
+                                    if c.lower() == cand.lower():
+                                        return c
+                                return cand
+                        return None
+
+                    ing_id_col = _first_existing_ci(ing_cols, ['id', 'id_ingredient', 'ingredient_id']) or 'id'
+
+                    try:
+                        delete_data("ingredients", f"{ing_id_col} = :rid", {"rid": delete_id})
+                    except Exception:
+                        # try string comparison if types mismatch
+                        delete_data("ingredients", f"CAST({ing_id_col} AS TEXT) = :rid", {"rid": str(delete_id)})
+
                     st.success(f"Ingredient '{delete_name}' deleted successfully!")
             
             elif delete_type == "supplier":
