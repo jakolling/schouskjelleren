@@ -2509,15 +2509,15 @@ if page == "Dashboard":
 
                         badges_html = "".join(event_badges)
                         is_selected = (selected_date == current_date)
-classes = f"{day_class}{' selected' if is_selected else ''}"
-cell_html = f"""
-                        <a class="calendar-day-link" href="?cal_date={current_date.isoformat()}">
-                        <div class="{classes}">
-                            <div style="font-weight:600; margin-bottom:4px;">{day}</div>
-                            {badges_html}
-                        </div>
-                        </a>
-                        """
+                        classes = f"{day_class}{' selected' if is_selected else ''}"
+                        cell_html = f"""
+<a class="calendar-day-link" href="?cal_date={current_date.isoformat()}">
+  <div class="{classes}">
+    <div style="font-weight:600; margin-bottom:4px;">{day}</div>
+    {badges_html}
+  </div>
+</a>
+"""
                         st.markdown(cell_html, unsafe_allow_html=True)
         
         # Add new event
