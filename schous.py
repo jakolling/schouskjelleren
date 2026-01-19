@@ -5040,35 +5040,62 @@ elif page == "Recipes":
                         with col_right:
                             # Ações
                             st.write("**Actions:**")
-                            if st.button("📋 Create Batch", key=f"brew_{recipe['id_receipt']}", use_container_width=True):
-                                st.session_state['recipe_to_brew'] = recipe['id_receipt']
+
+                            # Robust recipe id (supports older typo `id_receipt` and proper `id_recipe`)
+                            recipe_id = recipe.get('id_recipe', recipe.get('id_receipt', recipe.get('id')))
+                            if recipe_id is None:
+                                recipe_id = idx
+                            recipe_id_str = str(recipe_id)
+
+                            if st.button("📋 Create Batch", key=f"brew_{recipe_id_str}", use_container_width=True):
+                                st.session_state['recipe_to_brew'] = recipe_id
                                 st.rerun()
-                            
-                            if st.button("📝 Edit", key=f"edit_{recipe['id_receipt']}", use_container_width=True):
-                                st.session_state['edit_recipe'] = recipe['id_receipt']
-                            
-                            if st.button("🗑️ Delete", key=f"delete_{recipe['id_receipt']}", use_container_width=True):
-                                st.session_state.delete_confirmation = {"type": "recipe", "id": recipe['id_receipt'], "name": recipe['name']}
+
+                            if st.button("📝 Edit", key=f"edit_{recipe_id_str}", use_container_width=True):
+                                st.session_state['edit_recipe'] = recipe_id
+
+                            if st.button("🗑️ Delete", key=f"delete_{recipe_id_str}", use_container_width=True):
+                                st.session_state.delete_confirmation = {"type": "recipe", "id": recipe_id, "name": recipe.get('name', '')}
                                 st.rerun()
-                        
+
                         # Ingredients
                         st.write("**Ingredients:**")
                         recipe_items_df = data.get("recipe_items", pd.DataFrame())
                         if not recipe_items_df.empty:
-                            recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == recipe['id_receipt']]
+                            ri_recipe_col = _col(recipe_items_df, 'recipe_id', 'id_recipe', 'id_receipt')
+                            recipe_items = recipe_items_df.copy()
+                            if ri_recipe_col:
+                                recipe_items = recipe_items[recipe_items[ri_recipe_col].astype(str) == recipe_id_str]
+                            else:
+                                recipe_items = pd.DataFrame()
+
                             if not recipe_items.empty:
                                 ingredients_df = data.get("ingredients", pd.DataFrame())
+                                ing_id_col = _col(ingredients_df, 'id_ingredient', 'id')
+                                ing_name_col = _col(ingredients_df, 'name')
+
+                                it_ing_name_col = _col(recipe_items, 'ingredient_name', 'ingredient')
+                                it_ing_id_col = _col(recipe_items, 'id_ingredient', 'ingredient_id')
+                                it_qty_col = _col(recipe_items, 'quantity')
+                                it_unit_col = _col(recipe_items, 'unit')
+
                                 for _, item in recipe_items.iterrows():
-                                    # Obter nome do ingrediente
                                     ingredient_name = "Unknown"
-                                    if not ingredients_df.empty:
-                                        ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
+
+                                    if it_ing_name_col and pd.notna(item.get(it_ing_name_col)):
+                                        ingredient_name = str(item.get(it_ing_name_col))
+                                    elif ingredients_df is not None and not ingredients_df.empty and it_ing_id_col and ing_id_col and ing_name_col:
+                                        ing = ingredients_df[ingredients_df[ing_id_col] == item.get(it_ing_id_col)]
                                         if not ing.empty:
-                                            ingredient_name = ing.iloc[0]['name']
-                                    
-                                    st.write(f"- {ingredient_name}: {item['quantity']} units")
+                                            ingredient_name = str(ing.iloc[0][ing_name_col])
+
+                                    qty = item.get(it_qty_col) if it_qty_col else ''
+                                    unit = str(item.get(it_unit_col) or 'units') if it_unit_col else 'units'
+                                    st.write(f"- {ingredient_name}: {qty} {unit}")
                             else:
                                 st.write("No ingredients defined")
+                        else:
+                            st.write("No ingredients defined")
         else:
             st.info("No recipes available. Create your first recipe!")
     
@@ -5281,9 +5308,14 @@ elif page == "Recipes":
                 # Add ingredientes à tabela recipe_items
                 for item in ingredient_list:
                     new_recipe_item = {
+                        # support both legacy (typo) and current schemas
+                        'recipe_id': recipe_id,
+                        'id_recipe': recipe_id,
                         'id_receipt': recipe_id,
-                        'id_ingredient': item['id_ingredient'],
-                        'quantity': item['quantity']
+                        'ingredient_name': item.get('name'),
+                        'id_ingredient': item.get('id_ingredient'),
+                        'quantity': item.get('quantity'),
+                        'unit': item.get('unit'),
                     }
                     
                     insert_data("recipe_items", new_recipe_item)
@@ -5468,14 +5500,29 @@ elif page == "Recipes":
                 # Calcular custos estimados para cada receita
                 recipe_costs = []
                 for _, recipe in recipes_df.iterrows():
-                    recipe_id = recipe['id_receipt']
-                    recipe_items = recipe_items_df[recipe_items_df['id_receipt'] == recipe_id]
+                    recipe_id = recipe.get('id_recipe', recipe.get('id_receipt', recipe.get('id')))
+                    recipe_id_str = str(recipe_id)
+                    ri_recipe_col = _col(recipe_items_df, 'recipe_id', 'id_recipe', 'id_receipt')
+                    recipe_items = recipe_items_df.copy()
+                    if ri_recipe_col:
+                        recipe_items = recipe_items[recipe_items[ri_recipe_col].astype(str) == recipe_id_str]
+                    else:
+                        recipe_items = pd.DataFrame()
                     
                     total_cost = 0
                     for _, item in recipe_items.iterrows():
                         ingredients_df = data.get("ingredients", pd.DataFrame())
                         if not ingredients_df.empty:
-                            ing = ingredients_df[ingredients_df['id'] == item['id_ingredient']]
+                            ing_id_col = _col(ingredients_df, 'id_ingredient', 'id')
+                            ing_name_col = _col(ingredients_df, 'name')
+                            it_ing_id_col = _col(recipe_items_df, 'id_ingredient', 'ingredient_id')
+                            it_ing_name_col = _col(recipe_items_df, 'ingredient_name', 'ingredient')
+                            if it_ing_name_col and ing_name_col:
+                                ing = ingredients_df[ingredients_df[ing_name_col].astype(str) == str(item.get(it_ing_name_col))]
+                            elif it_ing_id_col and ing_id_col:
+                                ing = ingredients_df[ingredients_df[ing_id_col] == item.get(it_ing_id_col)]
+                            else:
+                                ing = pd.DataFrame()
                             if not ing.empty:
                                 unit_cost = ing.iloc[0].get('unit_cost', 0)
                                 total_cost += unit_cost * item['quantity']
