@@ -7472,9 +7472,17 @@ elif page == "Production":
                                 with c3:
                                     notes = st.text_area('Notes', height=90)
 
-                                st.markdown('**Confirm ingredient consumption (one by one)**')
+                                st.markdown("**Ingredient consumption**")
+                                st.caption("You can substitute ingredients or add extra ingredients for this brew. Quantities entered here will be used for batch costing.")
+
                                 rid = str(selected_batch.get(b_recipe_id_col) or '')
                                 scale = _recipe_scale_factor(rid, float(actual_volume))
+
+                                # Ingredient options
+                                ing_name_col = _col(ingredients_df, 'name')
+                                all_ing_opts = []
+                                if ingredients_df is not None and not ingredients_df.empty and ing_name_col:
+                                    all_ing_opts = sorted(set(ingredients_df[ing_name_col].astype(str).dropna().tolist()))
 
                                 ri_recipe_col = _col(recipe_items_df, 'recipe_id', 'id_recipe')
                                 ri_ing_col = _col(recipe_items_df, 'ingredient_name', 'ingredient')
@@ -7485,24 +7493,41 @@ elif page == "Production":
                                 if not items.empty and ri_recipe_col and rid:
                                     items = items[items[ri_recipe_col].astype(str) == str(rid)]
 
-                                confirmations = []
+                                confirmations = []  # (checked, chosen_ing, qty, unit, original_ing)
                                 if items.empty:
                                     st.warning("No recipe items found for this recipe.")
                                 else:
                                     for i, row in enumerate(items.to_dict('records')):
-                                        ingn = str(row.get(ri_ing_col) or '')
+                                        original_ing = str(row.get(ri_ing_col) or '')
                                         base_qty = float(row.get(ri_qty_col) or 0)
                                         unit = str(row.get(ri_unit_col) or '')
                                         planned_qty = base_qty * float(scale)
 
-                                        cc1, cc2, cc3 = st.columns([3, 2, 2])
+                                        # Build options including original even if it's not in the ingredients list
+                                        opts = list(all_ing_opts)
+                                        if original_ing and original_ing not in opts:
+                                            opts = [original_ing] + opts
+                                        try:
+                                            default_index = opts.index(original_ing) if original_ing else 0
+                                        except Exception:
+                                            default_index = 0
+
+                                        cc1, cc2, cc3, cc4 = st.columns([1.1, 3, 2, 2])
                                         with cc1:
                                             checked = st.checkbox(
-                                                ingn if ingn else f"Item {i+1}",
+                                                "Use",
                                                 value=True,
-                                                key=f"brew_ing_{batch_id}_{i}",
+                                                key=f"brew_ing_use_{batch_id}_{i}",
+                                                help="Uncheck to skip consuming this item.",
                                             )
                                         with cc2:
+                                            chosen_ing = st.selectbox(
+                                                "Ingredient",
+                                                opts if opts else [''],
+                                                index=default_index if opts else 0,
+                                                key=f"brew_ing_pick_{batch_id}_{i}",
+                                            )
+                                        with cc3:
                                             actual_qty = st.number_input(
                                                 f"Qty ({unit or 'unit'})",
                                                 min_value=0.0,
@@ -7511,11 +7536,36 @@ elif page == "Production":
                                                 key=f"brew_ing_qty_{batch_id}_{i}",
                                                 help=f"Planned: {planned_qty:g} {unit}",
                                             )
-                                        with cc3:
-                                            st.caption(f"Planned: {planned_qty:g} {unit}")
+                                        with cc4:
+                                            if original_ing and chosen_ing and chosen_ing != original_ing:
+                                                st.caption(f"Planned: {planned_qty:g} {unit}  •  Sub: {original_ing} → {chosen_ing}")
+                                            else:
+                                                st.caption(f"Planned: {planned_qty:g} {unit}")
 
-                                        confirmations.append((checked, ingn, float(actual_qty), unit))
+                                        confirmations.append((checked, str(chosen_ing or original_ing), float(actual_qty), unit, original_ing))
 
+                                st.markdown("**Add extra ingredients (optional)**")
+                                st.caption("These items are consumed from stock during the brew and included in the batch cost.")
+                                extra_lines = []  # (ing, qty)
+                                for j in range(5):
+                                    ec1, ec2 = st.columns([3, 2])
+                                    with ec1:
+                                        ex_ing = st.selectbox(
+                                            f"Extra ingredient {j+1}",
+                                            [''] + (all_ing_opts if all_ing_opts else []),
+                                            index=0,
+                                            key=f"brew_extra_ing_{batch_id}_{j}",
+                                        )
+                                    with ec2:
+                                        ex_qty = st.number_input(
+                                            "Qty",
+                                            min_value=0.0,
+                                            value=0.0,
+                                            step=0.1,
+                                            key=f"brew_extra_qty_{batch_id}_{j}",
+                                        )
+                                    if ex_ing and ex_qty > 0:
+                                        extra_lines.append((str(ex_ing), float(ex_qty)))
                                 submit = st.form_submit_button('Record Brew', type='primary', use_container_width=True)
 
                             if submit:
@@ -7541,8 +7591,31 @@ elif page == "Production":
 
                                     # Consume ingredients
                                     total_cost = 0.0
-                                    for checked, ingn, qty, unit in confirmations:
+                                    for checked, ingn, qty, unit, orig_ing in confirmations:
                                         if not checked or not ingn or qty <= 0:
+                                            continue
+                                        unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
+                                        line_cost = float(qty) * float(unit_cost or 0)
+                                        total_cost += line_cost
+                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty))
+                                        meta = {'event': 'Brew', 'source': 'recipe'}
+                                        if orig_ing and str(orig_ing) != str(ingn):
+                                            meta = {'event': 'Brew', 'source': 'substitute', 'original_ingredient': orig_ing}
+                                        insert_data('production_consumptions', {
+                                            'batch_id': batch_id,
+                                            'prod_event_id': int(ev_id) if ev_id is not None else None,
+                                            'ingredient_id': '',
+                                            'ingredient_name': ingn,
+                                            'quantity': float(qty),
+                                            'unit': unit0 or unit,
+                                            'unit_cost': float(unit_cost or 0),
+                                            'total_cost': float(line_cost),
+                                            'meta': json.dumps(meta, ensure_ascii=False),
+                                        })
+
+                                    # Extra ingredients
+                                    for ingn, qty in extra_lines:
+                                        if not ingn or qty <= 0:
                                             continue
                                         unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
                                         line_cost = float(qty) * float(unit_cost or 0)
@@ -7554,12 +7627,11 @@ elif page == "Production":
                                             'ingredient_id': '',
                                             'ingredient_name': ingn,
                                             'quantity': float(qty),
-                                            'unit': unit0 or unit,
+                                            'unit': unit0 or '',
                                             'unit_cost': float(unit_cost or 0),
                                             'total_cost': float(line_cost),
-                                            'meta': json.dumps({'event': 'Brew'}, ensure_ascii=False),
+                                            'meta': json.dumps({'event': 'Brew', 'source': 'extra'}, ensure_ascii=False),
                                         })
-
                                     update_data('production_batches', {
                                         'status': 'In Progress',
                                         'stage': 'Fermenting',
