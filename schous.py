@@ -8,6 +8,7 @@ import io
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import calendar
+import html
 import re
 import os
 import tempfile
@@ -2435,28 +2436,7 @@ if page == "Dashboard":
             selected_month = st.selectbox("Month", range(1, 13), index=today.month-1, format_func=lambda x: calendar.month_name[x])
         with col_cal2:
             selected_year = st.selectbox("Year", range(today.year-1, today.year+2), index=1)
-        
-        # Selected day via query params (click a day to focus)
-        cal_date_param = None
-        try:
-            if hasattr(st, 'query_params'):
-                _qp = st.query_params
-                cal_date_param = _qp.get('cal_date', None)
-                if isinstance(cal_date_param, list):
-                    cal_date_param = cal_date_param[0] if cal_date_param else None
-            else:
-                _qp = st.experimental_get_query_params()
-                cal_date_param = _qp.get('cal_date', [None])[0]
-        except Exception:
-            cal_date_param = None
-
-        selected_date = st.session_state.get('calendar_selected_date', None)
-        if cal_date_param:
-            try:
-                selected_date = pd.to_datetime(cal_date_param).date()
-            except Exception:
-                pass
-        st.session_state['calendar_selected_date'] = selected_date
+        # Hover-only calendar (no click selection)
 
         # Criar calendário
         cal = calendar.monthcalendar(selected_year, selected_month)
@@ -2490,7 +2470,6 @@ if page == "Dashboard":
                             if "start_date" in events_df.columns:
                                 events_df["start_date"] = pd.to_datetime(events_df["start_date"]).dt.date
                                 events_today = events_df[events_df["start_date"] == current_date]
-
                         for _, event in events_today.iterrows():
                             event_color = {
                                 "Brewing": "#4caf50",
@@ -2501,22 +2480,44 @@ if page == "Dashboard":
                                 "Meeting": "#9c27b0",
                                 "Other": "#757575",
                             }.get(event.get("event_type", "Other"), "#757575")
-                            title = event.get("title", "Event")
-                            title = title[:22] + "..." if isinstance(title, str) and len(title) > 25 else title
+
+                            full_title = str(event.get("title", "Event") or "Event")
+                            short_title = full_title
+                            if len(full_title) > 25:
+                                short_title = full_title[:22] + "..."
+
+                            ev_type = str(event.get("event_type", "") or "")
+                            equipment = str(event.get("equipment", "") or "")
+                            notes = str(event.get("notes", "") or "").strip()
+                            if len(notes) > 260:
+                                notes = notes[:260] + "..."
+
+                            tooltip_parts = [
+                                f"<div class='tt-title'>{html.escape(full_title)}</div>"
+                            ]
+                            meta = " • ".join([p for p in [ev_type, current_date.strftime('%Y-%m-%d')] if p])
+                            if meta:
+                                tooltip_parts.append(f"<div class='tt-meta'>{html.escape(meta)}</div>")
+                            if equipment:
+                                tooltip_parts.append(f"<div class='tt-line'><b>Equipment:</b> {html.escape(equipment)}</div>")
+                            if notes:
+                                tooltip_parts.append(f"<div class='tt-line'>{html.escape(notes)}</div>")
+
+                            tooltip_html = "".join(tooltip_parts)
+
                             event_badges.append(
-                                f'<div class="calendar-event" style="background-color: {event_color};">{title}</div>'
+                                f"<div class='calendar-event' style='background-color:{event_color};'>"
+                                f"{html.escape(short_title)}"
+                                f"<div class='event-tooltip'>{tooltip_html}</div>"
+                                f"</div>"
                             )
 
                         badges_html = "".join(event_badges)
-                        is_selected = (selected_date == current_date)
-                        classes = f"{day_class}{' selected' if is_selected else ''}"
                         cell_html = f"""
-<a class="calendar-day-link" href="?cal_date={current_date.isoformat()}">
-  <div class="{classes}">
+  <div class="{day_class}">
     <div style="font-weight:600; margin-bottom:4px;">{day}</div>
     {badges_html}
   </div>
-</a>
 """
                         st.markdown(cell_html, unsafe_allow_html=True)
         
@@ -2526,28 +2527,75 @@ if page == "Dashboard":
                 col_e1, col_e2 = st.columns(2)
                 with col_e1:
                     event_title = st.text_input("Event Title")
-                    event_type = st.selectbox("Event Type", ["Brewing", "Fermentation", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"])
+                    event_type = st.selectbox(
+                        "Event Type",
+                        ["Brewing", "Fermentation", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"],
+                    )
                 with col_e2:
                     event_date = st.date_input("Event Date", today)
                     equipment = st.text_input("Equipment (Optional)")
                 event_notes = st.text_area("Notes")
+
+                repeat = st.radio(
+                    "Repeat",
+                    ["No repeat", "Daily", "Weekly", "Monthly"],
+                    horizontal=True,
+                    index=0,
+                )
+                repeat_until = None
+                if repeat != "No repeat":
+                    default_until = event_date + timedelta(days=30 if repeat in ("Daily", "Weekly") else 90)
+                    repeat_until = st.date_input("Repeat until", default_until)
+                    st.caption("Creates multiple events up to the selected date.")
+
                 submitted = st.form_submit_button("Add Event", type="primary", use_container_width=True)
+
             if submitted and event_title:
-                new_event = {
+                def _add_month(d: date) -> date:
+                    """Return the same day in the next month (or last valid day)."""
+                    y = d.year + (d.month // 12)
+                    m = (d.month % 12) + 1
+                    last_day = calendar.monthrange(y, m)[1]
+                    return date(y, m, min(d.day, last_day))
+
+                dates_to_create = [event_date]
+                if repeat != "No repeat" and repeat_until and repeat_until >= event_date:
+                    max_occurrences = 400
+                    current = event_date
+                    while len(dates_to_create) < max_occurrences:
+                        if repeat == "Daily":
+                            current = current + timedelta(days=1)
+                        elif repeat == "Weekly":
+                            current = current + timedelta(weeks=1)
+                        else:  # Monthly
+                            current = _add_month(current)
+                        if current > repeat_until:
+                            break
+                        dates_to_create.append(current)
+
+                base_event = {
                     "title": event_title,
                     "event_type": event_type,
-                    "start_date": event_date,
-                    "end_date": event_date,
+                    "end_date": None,
                     "equipment": equipment,
                     "batch_id": "",
                     "notes": event_notes,
                     "created_by": "User",
                 }
-                insert_data("calendar_events", new_event)
+
+                for d in dates_to_create:
+                    new_event = dict(base_event)
+                    new_event["start_date"] = d
+                    new_event["end_date"] = d
+                    insert_data("calendar_events", new_event)
+
                 data = get_all_data()
-                st.success("Event added!")
+                if len(dates_to_create) == 1:
+                    st.success("Event added!")
+                else:
+                    st.success(f"{len(dates_to_create)} events added!")
                 st.rerun()
-        
+
         st.markdown("</div>", unsafe_allow_html=True)
         
         # PRÓXIMAS ATIVIDADES
@@ -3846,6 +3894,28 @@ elif page == "Ingredients":
                     st.session_state["new_ing_show_add_supplier"] = False
                     st.rerun()
 
+
+            # Opening stock settings (outside the form so the checkbox enables the cost field immediately)
+            opening_stock = st.checkbox(
+                "Opening stock (I already have this item in inventory)",
+                value=False,
+                help="Enable this if you're registering an ingredient that is already in stock and you want to set an initial unit cost before the first purchase entry.",
+                key="new_ing_opening_stock",
+            )
+
+            opening_unit_cost = st.number_input(
+                "Unit cost for opening stock",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                help="Cost per unit (same unit as the ingredient unit).",
+                key="new_ing_opening_unit_cost",
+                disabled=not opening_stock,
+            )
+            if not opening_stock:
+                st.session_state["new_ing_opening_unit_cost"] = 0.0
+                opening_unit_cost = 0.0
+
             # Ingredient details form (ONLY st.form_submit_button inside)
             with st.form("add_ingredient_form", clear_on_submit=True):
                 col_form1, col_form2 = st.columns(2)
@@ -3882,23 +3952,6 @@ elif page == "Ingredients":
                         key="new_ing_threshold",
                     )
 
-                    opening_stock = st.checkbox(
-                        "Opening stock (I already have this item in inventory)",
-                        value=False,
-                        help="Enable this if you're registering an ingredient that is already in stock and you want to set an initial unit cost before the first purchase entry.",
-                        key="new_ing_opening_stock",
-                    )
-
-                    opening_unit_cost = 0.0
-                    if opening_stock:
-                        opening_unit_cost = st.number_input(
-                            "Unit cost for opening stock",
-                            min_value=0.0,
-                            value=0.0,
-                            step=0.01,
-                            help="Cost per unit (same unit as the ingredient unit).",
-                            key="new_ing_opening_unit_cost",
-                        )
 
                 # Additional fields (inside the form, outside columns)
                 alpha_acid = st.number_input(
@@ -3971,6 +4024,8 @@ elif page == "Ingredients":
                         insert_data("ingredients", new_ingredient)
                         data = get_all_data()
                         st.success(f"✅ Ingredient '{ing_name}' added successfully!")
+                        st.session_state["new_ing_opening_stock"] = False
+                        st.session_state["new_ing_opening_unit_cost"] = 0.0
                         st.rerun()
         
         else:  # Edit Existing Ingredient
@@ -7473,28 +7528,7 @@ elif page == "Calendar":
                                    format_func=lambda x: calendar.month_name[x], key="cal_month")
         with col_cal2:
             cal_year = st.selectbox("Year", range(today.year-1, today.year+2), index=1, key="cal_year")
-
-        # Selected day via query params (click a day to focus)
-        cal_date_param = None
-        try:
-            if hasattr(st, 'query_params'):
-                _qp = st.query_params
-                cal_date_param = _qp.get('cal_date', None)
-                if isinstance(cal_date_param, list):
-                    cal_date_param = cal_date_param[0] if cal_date_param else None
-            else:
-                _qp = st.experimental_get_query_params()
-                cal_date_param = _qp.get('cal_date', [None])[0]
-        except Exception:
-            cal_date_param = None
-
-        selected_date = st.session_state.get('calendar_selected_date', None)
-        if cal_date_param:
-            try:
-                selected_date = pd.to_datetime(cal_date_param).date()
-            except Exception:
-                pass
-        st.session_state['calendar_selected_date'] = selected_date
+        # Hover-only calendar (no click selection)
         
         # Criar calendário
         cal = calendar.monthcalendar(cal_year, cal_month)
@@ -7529,7 +7563,6 @@ elif page == "Calendar":
                             if "start_date" in events_df.columns:
                                 events_df["start_date"] = pd.to_datetime(events_df["start_date"]).dt.date
                                 calendar_events = events_df[events_df["start_date"] == current_date]
-
                         for _, event in calendar_events.iterrows():
                             event_color = {
                                 "Brewing": "#4caf50",
@@ -7540,10 +7573,33 @@ elif page == "Calendar":
                                 "Meeting": "#9c27b0",
                                 "Other": "#757575",
                             }.get(event.get("event_type", "Other"), "#757575")
-                            title = event.get("title", "Event")
-                            title = title[:18] + "..." if isinstance(title, str) and len(title) > 21 else title
+
+                            full_title = str(event.get("title", "Event") or "Event")
+                            short_title = full_title
+                            if len(short_title) > 21:
+                                short_title = short_title[:18] + "..."
+
+                            ev_type = str(event.get("event_type", "") or "")
+                            equipment = str(event.get("equipment", "") or "")
+                            notes = str(event.get("notes", "") or "").strip()
+                            if len(notes) > 260:
+                                notes = notes[:260] + "..."
+
+                            tooltip_parts = [f"<div class='tt-title'>{html.escape(full_title)}</div>"]
+                            meta = " • ".join([p for p in [ev_type, current_date.strftime('%Y-%m-%d')] if p])
+                            if meta:
+                                tooltip_parts.append(f"<div class='tt-meta'>{html.escape(meta)}</div>")
+                            if equipment:
+                                tooltip_parts.append(f"<div class='tt-line'><b>Equipment:</b> {html.escape(equipment)}</div>")
+                            if notes:
+                                tooltip_parts.append(f"<div class='tt-line'>{html.escape(notes)}</div>")
+                            tooltip_html = "".join(tooltip_parts)
+
                             event_badges.append(
-                                f'<div class="calendar-event" style="background-color: {event_color};">{title}</div>'
+                                f"<div class='calendar-event' style='background-color:{event_color};'>"
+                                f"{html.escape(short_title)}"
+                                f"<div class='event-tooltip'>{tooltip_html}</div>"
+                                f"</div>"
                             )
 
                         # Production orders
@@ -7559,74 +7615,24 @@ elif page == "Calendar":
                             oid = order.get("id_order", "")
                             if oid != "":
                                 event_badges.append(
-                                    f'<div class="calendar-event" style="background-color: #9c27b0;">Order #{oid}</div>'
-                                )
+    f"<div class='calendar-event' style='background-color:#9c27b0;'>"
+    f"Order #{oid}"
+    f"<div class='event-tooltip'>"
+    f"<div class='tt-title'>Production Order #{oid}</div>"
+    f"<div class='tt-meta'>{current_date.strftime('%Y-%m-%d')}</div>"
+    f"</div>"
+    f"</div>"
+)
 
                         badges_html = "".join(event_badges)
-                        is_selected = (st.session_state.get('calendar_selected_date') == current_date)
-                        cell_classes = f"{day_class}{' selected' if is_selected else ''}"
                         cell_html = f"""
-                        <a class="calendar-day-link" href="?cal_date={current_date.isoformat()}">
-                          <div class="{cell_classes}">
-                            <div style="font-weight:600; margin-bottom:4px;">{day}</div>
+                          <div class="{day_class}">
+                            <div style=\"font-weight:600; margin-bottom:4px;\">{day}</div>
                             {badges_html}
                           </div>
-                        </a>
                         """
                         st.markdown(cell_html, unsafe_allow_html=True)
-        
-        # Selected day details
-        if st.session_state.get('calendar_selected_date'):
-            sel = st.session_state['calendar_selected_date']
-            # Collect events for selected date
-            sel_events = []
 
-            events_df = data.get('calendar_events', pd.DataFrame())
-            if not events_df.empty and 'start_date' in events_df.columns:
-                _e = events_df.copy()
-                _e['start_date'] = pd.to_datetime(_e['start_date']).dt.date
-                _e = _e[_e['start_date'] == sel]
-                for _, ev in _e.iterrows():
-                    sel_events.append({
-                        'kind': ev.get('event_type', 'Other'),
-                        'title': ev.get('title', 'Event'),
-                        'notes': ev.get('notes', ''),
-                        'equipment': ev.get('equipment', ''),
-                    })
-
-            orders_df = data.get('production_orders', pd.DataFrame())
-            if not orders_df.empty and 'start_date' in orders_df.columns:
-                _o = orders_df.copy()
-                _o['start_date'] = pd.to_datetime(_o['start_date']).dt.date
-                _o = _o[_o['start_date'] == sel]
-                for _, od in _o.iterrows():
-                    sel_events.append({
-                        'kind': 'Production Order',
-                        'title': f"Order #{od.get('id_order','')}",
-                        'notes': od.get('notes', ''),
-                        'equipment': od.get('equipment', ''),
-                    })
-
-            st.markdown(
-                f"""<div class='calendar-selected-panel'>
-                <div class='calendar-selected-title'>Selected day: {sel.strftime('%A, %b %d, %Y')}</div>
-                </div>""",
-                unsafe_allow_html=True
-            )
-            if sel_events:
-                # Render a larger, readable list
-                for item in sel_events:
-                    title = item.get('title', 'Event')
-                    kind = item.get('kind', 'Other')
-                    meta = []
-                    if item.get('equipment'):
-                        meta.append(f"Equipment: {item['equipment']}")
-                    if item.get('notes'):
-                        meta.append(str(item['notes']))
-                    meta_txt = (' — ' + ' | '.join(meta)) if meta else ''
-                    st.markdown(f"**{kind}:** {title}{meta_txt}")
-            else:
-                st.info('No events scheduled for the selected day.')
 
         # Legenda
         st.markdown("---")
