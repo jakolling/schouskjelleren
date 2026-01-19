@@ -1594,6 +1594,264 @@ def save_purchase_order_fast(
     bump_db_version()
     return po_id
 
+
+def _recalc_unit_cost_for_ingredients(conn, ingredient_names: list[str]):
+    """Recalculate ingredients.unit_cost as a weighted average of effective_unit_cost across *Purchase* orders.
+
+    This makes edits/deletes to purchases consistent over time.
+    """
+    ingredient_names = [str(n) for n in ingredient_names if str(n).strip()]
+    if not ingredient_names:
+        return
+
+    for ing in sorted(set(ingredient_names)):
+        row = conn.execute(
+            sql_text(
+                """
+                SELECT
+                    SUM(i.quantity * i.effective_unit_cost) AS cost_total,
+                    SUM(i.quantity) AS qty_total
+                FROM purchase_order_items i
+                JOIN purchase_orders o ON o.id_purchase_order = i.purchase_order_id
+                WHERE o.transaction_type = 'Purchase'
+                  AND i.ingredient = :ing
+                """
+            ),
+            {"ing": ing},
+        ).fetchone()
+
+        cost_total = float(row[0] or 0.0) if row else 0.0
+        qty_total = float(row[1] or 0.0) if row else 0.0
+
+        if qty_total > 0:
+            avg_cost = cost_total / qty_total
+            conn.execute(
+                sql_text(
+                    """
+                    UPDATE ingredients
+                       SET unit_cost = :c,
+                           last_updated = CURRENT_TIMESTAMP
+                     WHERE name = :n
+                    """
+                ),
+                {"c": float(avg_cost), "n": ing},
+            )
+        else:
+            # If no purchase history remains, keep unit_cost as-is (don't zero it out automatically)
+            pass
+
+
+def update_purchase_order_fast(
+    po_id: int,
+    transaction_type: str,
+    supplier: str,
+    order_number: str,
+    po_date: date,
+    freight_total: float,
+    notes: str,
+    recorded_by: str,
+    preview_rows: list[dict],
+):
+    """Update a purchase order (header + items) and adjust inventory deltas.
+
+    We compute the *inventory impact* of the old order vs the new order and apply the delta to ingredients.stock.
+    Then we recalc unit_cost as weighted avg of purchase history for affected ingredients.
+    """
+    require_admin_action()
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        # Load old header + items
+        old_hdr = conn.execute(
+            sql_text("SELECT transaction_type FROM purchase_orders WHERE id_purchase_order = :id"),
+            {"id": int(po_id)},
+        ).fetchone()
+        old_type = str(old_hdr[0] if old_hdr else "Purchase")
+
+        old_items = conn.execute(
+            sql_text(
+                """
+                SELECT ingredient, quantity
+                  FROM purchase_order_items
+                 WHERE purchase_order_id = :id
+                """
+            ),
+            {"id": int(po_id)},
+        ).fetchall()
+
+        # Aggregate old/new impacts
+        def impact_sign(t: str) -> float:
+            return 1.0 if str(t) == "Purchase" else -1.0
+
+        old_imp = {}
+        for ing, qty in old_items:
+            ing = str(ing)
+            old_imp[ing] = old_imp.get(ing, 0.0) + float(qty or 0.0) * impact_sign(old_type)
+
+        new_imp = {}
+        for row in preview_rows:
+            ing = str(row.get("Ingredient", "") or "")
+            qty = float(row.get("Quantity", 0.0) or 0.0)
+            if ing and qty:
+                new_imp[ing] = new_imp.get(ing, 0.0) + qty * impact_sign(transaction_type)
+
+        all_ings = sorted(set(list(old_imp.keys()) + list(new_imp.keys())))
+
+        # Header update
+        conn.execute(
+            sql_text(
+                """
+                UPDATE purchase_orders
+                   SET transaction_type = :transaction_type,
+                       supplier = :supplier,
+                       order_number = :order_number,
+                       date = :date,
+                       freight_total = :freight_total,
+                       notes = :notes,
+                       recorded_by = :recorded_by
+                 WHERE id_purchase_order = :id
+                """
+            ),
+            {
+                "transaction_type": transaction_type,
+                "supplier": supplier,
+                "order_number": order_number,
+                "date": po_date,
+                "freight_total": float(freight_total) if transaction_type == "Purchase" else 0.0,
+                "notes": notes,
+                "recorded_by": recorded_by,
+                "id": int(po_id),
+            },
+        )
+
+        # Replace items
+        conn.execute(
+            sql_text("DELETE FROM purchase_order_items WHERE purchase_order_id = :id"),
+            {"id": int(po_id)},
+        )
+
+        items_payload = []
+        for row in preview_rows:
+            items_payload.append(
+                {
+                    "purchase_order_id": int(po_id),
+                    "ingredient": str(row["Ingredient"]),
+                    "quantity": float(row["Quantity"]),
+                    "unit": str(row.get("Unit", "") or ""),
+                    "unit_price": float(row["Unit Price"]),
+                    "freight_per_unit": float(row["Freight / Unit"]),
+                    "effective_unit_cost": float(row["Effective Unit Cost"]),
+                    "total_cost": float(row["Line Total"]),
+                }
+            )
+
+        if items_payload:
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO purchase_order_items (
+                        purchase_order_id, ingredient, quantity, unit,
+                        unit_price, freight_per_unit, effective_unit_cost, total_cost
+                    ) VALUES (
+                        :purchase_order_id, :ingredient, :quantity, :unit,
+                        :unit_price, :freight_per_unit, :effective_unit_cost, :total_cost
+                    )
+                    """
+                ),
+                items_payload,
+            )
+
+        # Apply stock deltas
+        updates = []
+        for ing in all_ings:
+            delta = float(new_imp.get(ing, 0.0) - old_imp.get(ing, 0.0))
+            if abs(delta) > 1e-12:
+                updates.append({"n": ing, "d": delta})
+
+        if updates:
+            conn.execute(
+                sql_text(
+                    """
+                    UPDATE ingredients
+                       SET stock = COALESCE(stock,0) + :d,
+                           last_updated = CURRENT_TIMESTAMP
+                     WHERE name = :n
+                    """
+                ),
+                updates,
+            )
+
+        # Recalc unit costs for affected ingredients
+        _recalc_unit_cost_for_ingredients(conn, all_ings)
+
+    bump_db_version()
+
+
+def delete_purchase_order_fast(po_id: int):
+    """Hard-delete a purchase order + items, and reverse its inventory impact."""
+    require_admin_action()
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        hdr = conn.execute(
+            sql_text("SELECT transaction_type FROM purchase_orders WHERE id_purchase_order = :id"),
+            {"id": int(po_id)},
+        ).fetchone()
+        old_type = str(hdr[0] if hdr else "Purchase")
+
+        items = conn.execute(
+            sql_text(
+                """
+                SELECT ingredient, quantity
+                  FROM purchase_order_items
+                 WHERE purchase_order_id = :id
+                """
+            ),
+            {"id": int(po_id)},
+        ).fetchall()
+
+        def impact_sign(t: str) -> float:
+            return 1.0 if str(t) == "Purchase" else -1.0
+
+        imp = {}
+        for ing, qty in items:
+            ing = str(ing)
+            imp[ing] = imp.get(ing, 0.0) + float(qty or 0.0) * impact_sign(old_type)
+
+        # Reverse impact
+        updates = []
+        for ing, signed_qty in imp.items():
+            delta = -float(signed_qty)
+            if abs(delta) > 1e-12:
+                updates.append({"n": ing, "d": delta})
+
+        if updates:
+            conn.execute(
+                sql_text(
+                    """
+                    UPDATE ingredients
+                       SET stock = COALESCE(stock,0) + :d,
+                           last_updated = CURRENT_TIMESTAMP
+                     WHERE name = :n
+                    """
+                ),
+                updates,
+            )
+
+        # Delete children then header
+        conn.execute(
+            sql_text("DELETE FROM purchase_order_items WHERE purchase_order_id = :id"),
+            {"id": int(po_id)},
+        )
+        conn.execute(
+            sql_text("DELETE FROM purchase_orders WHERE id_purchase_order = :id"),
+            {"id": int(po_id)},
+        )
+
+        _recalc_unit_cost_for_ingredients(conn, list(imp.keys()))
+
+    bump_db_version()
+
 def update_stock_from_usage(ingredient_name, quantity):
     """Atualiza o estoque após uso em produção"""
     return execute_query(
@@ -4550,6 +4808,338 @@ elif page == "Purchases":
                 use_container_width=True,
                 height=280,
             )
+
+
+            # --- Manage an order (Edit / Delete) ---
+            st.markdown("---")
+            st.subheader("🛠️ Edit / Delete an Order")
+
+            if order_summary is not None and not order_summary.empty:
+                # Build labels for selection
+                _oids = [int(x) for x in order_summary["purchase_order_id"].tolist()]
+                _labels = []
+                for _, _r in order_summary.iterrows():
+                    _oid = int(_r["purchase_order_id"])
+                    _dt = _r.get("date", "")
+                    _sup = str(_r.get("supplier", "") or "")
+                    _on = str(_r.get("order_number", "") or _oid)
+                    _labels.append(f"{_dt} • {_sup} • #{_on} (ID {_oid})")
+
+                sel_idx = 0
+                sel_pos = st.selectbox(
+                    "Select an order",
+                    options=list(range(len(_oids))),
+                    format_func=lambda i: _labels[i],
+                    index=sel_idx,
+                    key="po_manage_select",
+                )
+                sel_oid = int(_oids[int(sel_pos)])
+
+                # Header + items
+                _hdr = orders_df[orders_df["id_purchase_order"] == sel_oid].iloc[0] if (
+                    orders_df is not None and not orders_df.empty
+                    and "id_purchase_order" in orders_df.columns
+                    and (orders_df["id_purchase_order"] == sel_oid).any()
+                ) else None
+                _items_df = items_df[items_df["purchase_order_id"] == sel_oid].copy() if (
+                    items_df is not None and not items_df.empty and "purchase_order_id" in items_df.columns
+                ) else pd.DataFrame()
+
+                if _hdr is not None:
+                    st.write(
+                        f"**Type:** {str(_hdr.get('transaction_type','') or '')}  •  "
+                        f"**Supplier:** {str(_hdr.get('supplier','') or '')}  •  "
+                        f"**Order #:** {str(_hdr.get('order_number','') or '')}"
+                    )
+                    try:
+                        _dt = pd.to_datetime(_hdr.get('date', None), errors='coerce').date()
+                    except Exception:
+                        _dt = _hdr.get('date', '')
+                    st.write(
+                        f"**Date:** {_dt}  •  "
+                        f"**Freight:** ${float(_hdr.get('freight_total',0.0) or 0.0):,.2f}"
+                    )
+                    if str(_hdr.get('notes','') or '').strip():
+                        st.caption(str(_hdr.get('notes','')))
+
+                if _items_df is not None and not _items_df.empty:
+                    show_cols = [c for c in ['ingredient','quantity','unit','unit_price','freight_per_unit','effective_unit_cost','total_cost'] if c in _items_df.columns]
+                    st.dataframe(
+                        _items_df[show_cols].rename(
+                            columns={
+                                'ingredient':'Ingredient',
+                                'quantity':'Quantity',
+                                'unit':'Unit',
+                                'unit_price':'Unit Price',
+                                'freight_per_unit':'Freight/Unit',
+                                'effective_unit_cost':'Effective Unit Cost',
+                                'total_cost':'Line Total',
+                            }
+                        ),
+                        use_container_width=True,
+                        height=220,
+                    )
+                else:
+                    st.info("No items found for this order.")
+
+                act1, act2, _ = st.columns([1, 1, 6])
+                with act1:
+                    if st.button("✏️ Edit", key=f"po_manage_edit_btn_{sel_oid}"):
+                        st.session_state["po_manage_edit_id"] = sel_oid
+                        st.session_state.pop("po_manage_delete_confirm_id", None)
+                with act2:
+                    if st.button("🗑️ Delete", key=f"po_manage_del_btn_{sel_oid}"):
+                        st.session_state["po_manage_delete_confirm_id"] = sel_oid
+                        st.session_state.pop("po_manage_edit_id", None)
+
+                # Delete confirmation (inline)
+                if st.session_state.get("po_manage_delete_confirm_id") == sel_oid:
+                    st.warning("Deseja deletar esta purchase? Isso vai ajustar o estoque e remover o pedido.")
+                    dc1, dc2, _ = st.columns([1, 1, 6])
+                    with dc1:
+                        if st.button("✅ Sim, deletar", key=f"po_manage_del_yes_{sel_oid}"):
+                            try:
+                                delete_purchase_order_fast(sel_oid)
+                                st.session_state.pop("po_manage_delete_confirm_id", None)
+                                st.session_state.pop("po_manage_edit_id", None)
+                                data = get_all_data()
+                                st.success("Purchase deletada.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erro ao deletar: {e}")
+                    with dc2:
+                        if st.button("↩️ Não", key=f"po_manage_del_no_{sel_oid}"):
+                            st.session_state.pop("po_manage_delete_confirm_id", None)
+
+                # Edit panel
+                if st.session_state.get("po_manage_edit_id") == sel_oid and _hdr is not None:
+                    st.markdown("---")
+                    st.subheader("✏️ Edit Order")
+
+                    cur_type = str(_hdr.get('transaction_type','Purchase') or 'Purchase')
+                    cur_supplier = str(_hdr.get('supplier','') or '')
+                    cur_order = str(_hdr.get('order_number','') or '')
+                    try:
+                        cur_date = pd.to_datetime(_hdr.get('date', datetime.now().date()), errors='coerce').date()
+                    except Exception:
+                        cur_date = datetime.now().date()
+                    cur_freight = float(_hdr.get('freight_total', 0.0) or 0.0)
+                    cur_notes = str(_hdr.get('notes','') or '')
+
+                    e1, e2, e3 = st.columns(3)
+                    with e1:
+                        new_type = st.selectbox(
+                            "Transaction Type*",
+                            ["Purchase", "Return", "Adjustment", "Sample", "Other"],
+                            index=(
+                                ["Purchase", "Return", "Adjustment", "Sample", "Other"].index(cur_type)
+                                if cur_type in ["Purchase", "Return", "Adjustment", "Sample", "Other"]
+                                else 0
+                            ),
+                            key=f"po_edit_type_main_{sel_oid}",
+                        )
+                    with e2:
+                        sup_opts = suppliers_df["name"].dropna().astype(str).tolist() if (
+                            suppliers_df is not None and not suppliers_df.empty and "name" in suppliers_df.columns
+                        ) else []
+                        if cur_supplier and cur_supplier not in sup_opts:
+                            sup_opts = [cur_supplier] + sup_opts
+                        new_supplier = st.selectbox(
+                            "Supplier*",
+                            ["Select Supplier"] + sup_opts,
+                            index=(["Select Supplier"] + sup_opts).index(cur_supplier) if cur_supplier in (["Select Supplier"] + sup_opts) else 0,
+                            key=f"po_edit_supplier_main_{sel_oid}",
+                        )
+                    with e3:
+                        new_order = st.text_input(
+                            "Order / Purchase Number",
+                            value=cur_order,
+                            key=f"po_edit_order_main_{sel_oid}",
+                        )
+
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        new_date = st.date_input(
+                            "Purchase Date",
+                            value=cur_date,
+                            key=f"po_edit_date_main_{sel_oid}",
+                        )
+                    with d2:
+                        new_freight = st.number_input(
+                            "Freight Total",
+                            min_value=0.0,
+                            value=cur_freight,
+                            step=0.01,
+                            format="%.2f",
+                            disabled=(new_type != "Purchase"),
+                            key=f"po_edit_freight_main_{sel_oid}",
+                        )
+
+                    new_notes = st.text_area(
+                        "Notes",
+                        value=cur_notes,
+                        key=f"po_edit_notes_main_{sel_oid}",
+                    )
+
+                    st.markdown("**Items**")
+                    edit_items_key = f"po_edit_items_state_{sel_oid}"
+                    if edit_items_key not in st.session_state:
+                        if _items_df is not None and not _items_df.empty:
+                            st.session_state[edit_items_key] = [
+                                {
+                                    "Ingredient": str(r.get("ingredient", "") or ""),
+                                    "Quantity": float(r.get("quantity", 0.0) or 0.0),
+                                    "Unit": str(r.get("unit", "") or ""),
+                                    "Unit Price": float(r.get("unit_price", 0.0) or 0.0),
+                                }
+                                for _, r in _items_df.iterrows()
+                            ]
+                        else:
+                            st.session_state[edit_items_key] = [
+                                {"Ingredient": "", "Quantity": 0.0, "Unit": "", "Unit Price": 0.0}
+                            ]
+
+                    if st.button("➕ Add item", key=f"po_edit_add_item_main_{sel_oid}"):
+                        st.session_state[edit_items_key].append(
+                            {"Ingredient": "", "Quantity": 0.0, "Unit": "", "Unit Price": 0.0}
+                        )
+
+                    ing_options = [""] + sorted(ingredients_df["name"].dropna().astype(str).tolist()) if (
+                        ingredients_df is not None and not ingredients_df.empty and "name" in ingredients_df.columns
+                    ) else [""]
+
+                    rows_to_remove = []
+                    for j, it in enumerate(list(st.session_state[edit_items_key])):
+                        r1, r2, r3, r4, r5 = st.columns([5, 2, 2, 2, 1])
+                        cur_ing = str(it.get("Ingredient", "") or "")
+                        with r1:
+                            ing_val = st.selectbox(
+                                "Ingredient",
+                                ing_options,
+                                index=(ing_options.index(cur_ing) if cur_ing in ing_options else 0),
+                                key=f"po_edit_ing_main_{sel_oid}_{j}",
+                                label_visibility="collapsed",
+                            )
+                        with r2:
+                            qty_val = st.number_input(
+                                "Quantity",
+                                min_value=0.0,
+                                value=float(it.get("Quantity", 0.0) or 0.0),
+                                step=0.1,
+                                format="%.3f",
+                                key=f"po_edit_qty_main_{sel_oid}_{j}",
+                                label_visibility="collapsed",
+                            )
+                        with r3:
+                            unit_val = st.text_input(
+                                "Unit",
+                                value=str(it.get("Unit", "") or ""),
+                                key=f"po_edit_unit_main_{sel_oid}_{j}",
+                                label_visibility="collapsed",
+                            )
+                        with r4:
+                            price_val = st.number_input(
+                                "Unit Price",
+                                min_value=0.0,
+                                value=float(it.get("Unit Price", 0.0) or 0.0),
+                                step=0.01,
+                                format="%.2f",
+                                key=f"po_edit_price_main_{sel_oid}_{j}",
+                                label_visibility="collapsed",
+                            )
+                        with r5:
+                            if st.button("🗑️", key=f"po_edit_rm_main_{sel_oid}_{j}"):
+                                rows_to_remove.append(j)
+
+                        st.session_state[edit_items_key][j] = {
+                            "Ingredient": str(ing_val),
+                            "Quantity": float(qty_val),
+                            "Unit": str(unit_val),
+                            "Unit Price": float(price_val),
+                        }
+
+                    for idx in sorted(rows_to_remove, reverse=True):
+                        try:
+                            st.session_state[edit_items_key].pop(idx)
+                        except Exception:
+                            pass
+
+                    # Preview allocation
+                    items = pd.DataFrame(st.session_state[edit_items_key], columns=["Ingredient", "Quantity", "Unit", "Unit Price"]).fillna({"Ingredient":"", "Quantity":0.0, "Unit Price":0.0})
+                    items = items[(items["Ingredient"].astype(str).str.len() > 0) & (items["Quantity"] > 0)]
+                    total_qty = float(items["Quantity"].sum()) if len(items) else 0.0
+                    freight_per_unit = (float(new_freight) / total_qty) if (new_type == "Purchase" and total_qty > 0) else 0.0
+
+                    preview_rows = []
+                    for _, r in items.iterrows():
+                        ing = str(r["Ingredient"])
+                        qty = float(r["Quantity"])
+                        unit_price = float(r["Unit Price"])
+                        unit = str(r.get("Unit", "") or "")
+                        eff_unit_cost = unit_price + freight_per_unit
+                        preview_rows.append(
+                            {
+                                "Ingredient": ing,
+                                "Quantity": qty,
+                                "Unit": unit,
+                                "Unit Price": unit_price,
+                                "Freight / Unit": freight_per_unit,
+                                "Effective Unit Cost": eff_unit_cost,
+                                "Line Total": qty * eff_unit_cost,
+                            }
+                        )
+
+                    if preview_rows:
+                        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, height=220)
+                    else:
+                        st.info("Add at least one valid item to preview.")
+
+                    s1, s2, _ = st.columns([1, 1, 6])
+                    with s1:
+                        if st.button("💾 Save changes", type="primary", key=f"po_edit_save_main_{sel_oid}"):
+                            if (not new_supplier) or (new_supplier == "Select Supplier"):
+                                st.error("Please select a supplier.")
+                            elif not preview_rows:
+                                st.error("Please add at least one valid item.")
+                            else:
+                                try:
+                                    update_purchase_order_fast(
+                                        purchase_order_id=sel_oid,
+                                        new_transaction_type=new_type,
+                                        new_supplier=new_supplier,
+                                        new_order_number=new_order,
+                                        new_date=new_date,
+                                        new_freight_total=float(new_freight),
+                                        new_notes=new_notes,
+                                        preview_rows=preview_rows,
+                                    )
+                                    # Clear edit state
+                                    st.session_state.pop(edit_items_key, None)
+                                    st.session_state.pop("po_manage_edit_id", None)
+                                    data = get_all_data()
+                                    st.success("Purchase atualizada!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Erro ao salvar: {e}")
+                    with s2:
+                        if st.button("✖ Cancel", key=f"po_edit_cancel_main_{sel_oid}"):
+                            st.session_state["po_edit_cancel_confirm"] = True
+
+                    if st.session_state.get("po_edit_cancel_confirm"):
+                        st.warning("Deseja confirmar o cancelamento? Suas alterações não salvas serão descartadas.")
+                        cc1, cc2, _ = st.columns([1, 1, 6])
+                        with cc1:
+                            if st.button("✅ Sim, descartar", key=f"po_edit_cancel_yes_{sel_oid}"):
+                                st.session_state.pop(edit_items_key, None)
+                                st.session_state.pop("po_manage_edit_id", None)
+                                st.session_state.pop("po_edit_cancel_confirm", None)
+                                st.rerun()
+                        with cc2:
+                            if st.button("↩️ Não", key=f"po_edit_cancel_no_{sel_oid}"):
+                                st.session_state.pop("po_edit_cancel_confirm", None)
+
+
+
 
             # Expanders with items
             st.markdown("---")
