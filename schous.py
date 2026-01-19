@@ -4229,42 +4229,132 @@ elif page == "Purchases":
 
             ingredient_options = sorted(eligible_df["name"].dropna().astype(str).tolist())
 
-            # Keep a local working table in session state
-            if "po_items_df" not in st.session_state:
-                st.session_state.po_items_df = pd.DataFrame(
-                    [{"Ingredient": "", "Quantity": 1.0, "Unit Price": 0.0}]
-                )
+            # --- Items entry (Add items + real dropdowns) ---
+            # We avoid st.data_editor here because in some Streamlit versions the SelectboxColumn
+            # can behave like a plain text input, which breaks the ‘pick from list’ workflow.
+            unit_by_name = {}
+            try:
+                if ingredients_df is not None and not ingredients_df.empty and "name" in ingredients_df.columns:
+                    unit_col = None
+                    for c in ["unit", "uom", "Unit", "UOM"]:
+                        if c in ingredients_df.columns:
+                            unit_col = c
+                            break
+                    if unit_col:
+                        unit_by_name = dict(
+                            zip(
+                                ingredients_df["name"].astype(str).tolist(),
+                                ingredients_df[unit_col].astype(str).fillna("").tolist(),
+                            )
+                        )
+            except Exception:
+                unit_by_name = {}
 
-            edited_items = st.data_editor(
-                st.session_state.po_items_df,
-                num_rows="dynamic",
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Ingredient": st.column_config.SelectboxColumn(
+            if "po_items" not in st.session_state:
+                st.session_state.po_items = [
+                    {"Ingredient": "", "Quantity": 0.0, "Unit": "", "Unit Price": 0.0}
+                ]
+
+            add_col, _ = st.columns([1, 5])
+            with add_col:
+                if st.button("➕ Add item", use_container_width=True, key="po_add_item_btn"):
+                    st.session_state.po_items.append(
+                        {"Ingredient": "", "Quantity": 0.0, "Unit": "", "Unit Price": 0.0}
+                    )
+
+            # Render item rows
+            rows_to_remove = []
+            for i, row in enumerate(list(st.session_state.po_items)):
+                c1, c2, c3, c4, c5 = st.columns([5, 2, 2, 2, 1])
+
+                # Ingredient dropdown
+                current_ing = str(row.get("Ingredient", "") or "")
+                ing_options = [""] + ingredient_options
+                try:
+                    ing_idx = ing_options.index(current_ing) if current_ing in ing_options else 0
+                except Exception:
+                    ing_idx = 0
+                with c1:
+                    ing_val = st.selectbox(
                         "Ingredient",
-                        options=[""] + ingredient_options,
-                        required=False,
-                    ),
-                    "Quantity": st.column_config.NumberColumn(
+                        ing_options,
+                        index=ing_idx,
+                        key=f"po_item_ing_{i}",
+                        label_visibility="collapsed",
+                    )
+
+                # Quantity
+                with c2:
+                    qty_val = st.number_input(
                         "Quantity",
                         min_value=0.0,
+                        value=float(row.get("Quantity", 0.0) or 0.0),
                         step=0.1,
                         format="%.3f",
-                        required=False,
-                    ),
-                    "Unit Price": st.column_config.NumberColumn(
+                        key=f"po_item_qty_{i}",
+                        label_visibility="collapsed",
+                    )
+
+                # Unit (auto from ingredient registry; read-only unless missing)
+                unit_val = str(unit_by_name.get(str(ing_val), "") or "")
+                with c3:
+                    if ing_val and unit_val:
+                        st.text_input(
+                            "Unit",
+                            value=unit_val,
+                            disabled=True,
+                            key=f"po_item_unit_{i}",
+                            label_visibility="collapsed",
+                        )
+                    else:
+                        fallback_units = ["", "kg", "g", "lb", "oz", "L", "mL", "unit"]
+                        unit_val = st.selectbox(
+                            "Unit",
+                            fallback_units,
+                            index=fallback_units.index(str(row.get("Unit", "") or ""))
+                            if str(row.get("Unit", "") or "") in fallback_units
+                            else 0,
+                            key=f"po_item_unit_sel_{i}",
+                            label_visibility="collapsed",
+                        )
+
+                # Unit price
+                with c4:
+                    price_val = st.number_input(
                         "Unit Price",
                         min_value=0.0,
+                        value=float(row.get("Unit Price", 0.0) or 0.0),
                         step=0.01,
                         format="%.2f",
-                        required=False,
-                    ),
-                },
-                key="po_items_editor",
-            )
+                        key=f"po_item_price_{i}",
+                        label_visibility="collapsed",
+                    )
 
-            st.session_state.po_items_df = edited_items
+                # Remove row
+                with c5:
+                    if st.button("🗑️", key=f"po_item_rm_{i}"):
+                        rows_to_remove.append(i)
+
+                # Persist row values
+                st.session_state.po_items[i] = {
+                    "Ingredient": str(ing_val),
+                    "Quantity": float(qty_val),
+                    "Unit": str(unit_val),
+                    "Unit Price": float(price_val),
+                }
+
+            # Apply removals (reverse so indices don't shift)
+            for idx in sorted(rows_to_remove, reverse=True):
+                try:
+                    st.session_state.po_items.pop(idx)
+                except Exception:
+                    pass
+
+            # Build a dataframe for downstream preview/save logic
+            edited_items = pd.DataFrame(
+                st.session_state.po_items,
+                columns=["Ingredient", "Quantity", "Unit", "Unit Price"],
+            )
 
             # --- Preview / freight allocation ---
             items = edited_items.copy()
@@ -4279,11 +4369,8 @@ elif page == "Purchases":
                 ing = str(r["Ingredient"])
                 qty = float(r["Quantity"])
                 unit_price = float(r["Unit Price"])
-                unit = ""
-                try:
-                    unit = str(ingredients_df[ingredients_df["name"] == ing].iloc[0].get("unit", ""))
-                except Exception:
-                    unit = ""
+                # Unit is sourced during entry (auto from ingredient registry when available)
+                unit = str(r.get("Unit", "") or "")
                 eff_unit_cost = unit_price + freight_per_unit
                 preview_rows.append(
                     {
@@ -4330,10 +4417,17 @@ elif page == "Purchases":
                         preview_rows=preview_rows,
                     )
 
-                    # Reset editor
-                    st.session_state.po_items_df = pd.DataFrame(
-                        [{"Ingredient": "", "Quantity": 1.0, "Unit Price": 0.0}]
-                    )
+                    # Reset items UI
+                    st.session_state.po_items = [
+                        {"Ingredient": "", "Quantity": 0.0, "Unit": "", "Unit Price": 0.0}
+                    ]
+                    # Clear per-row widget state so the UI doesn't keep old values
+                    for k in list(st.session_state.keys()):
+                        if str(k).startswith("po_item_"):
+                            try:
+                                del st.session_state[k]
+                            except Exception:
+                                pass
                     data = get_all_data()
                     st.success(f"✅ Order saved! #{order_number if order_number else po_id}")
                     st.rerun()
@@ -5128,11 +5222,34 @@ elif page == "Recipes":
                         with colb2:
                             cancel = st.form_submit_button('✖ Cancel', use_container_width=True)
 
+                    # Keep the confirmation UI *right below* the Cancel button
+                    confirm_flag_key = f"confirm_cancel_recipe_edit_{str(edit_id)}"
+                    if confirm_flag_key not in st.session_state:
+                        st.session_state[confirm_flag_key] = False
+
                     if cancel:
-                        st.session_state.edit_recipe = None
+                        st.session_state[confirm_flag_key] = True
                         st.rerun()
 
+                    if st.session_state.get(confirm_flag_key):
+                        st.warning("Deseja confirmar o cancelamento? Alterações não salvas serão perdidas.")
+                        cc1, cc2 = st.columns(2)
+                        with cc1:
+                            if st.button("✅ Sim, descartar", key=f"confirm_cancel_yes_{str(edit_id)}", use_container_width=True):
+                                st.session_state[confirm_flag_key] = False
+                                st.session_state.edit_recipe = None
+                                st.rerun()
+                        with cc2:
+                            if st.button("↩️ Não, continuar editando", key=f"confirm_cancel_no_{str(edit_id)}", use_container_width=True):
+                                st.session_state[confirm_flag_key] = False
+                                st.rerun()
+
                     if save:
+                        # reset any pending cancel confirmation
+                        try:
+                            st.session_state[confirm_flag_key] = False
+                        except Exception:
+                            pass
                         # Build update dict with common columns (update_data will ignore unknown cols)
                         update_dict = {
                             'name': new_name,
