@@ -2055,10 +2055,23 @@ st.markdown("""
     padding: 0.5rem;
     height: 100px;
     overflow-y: auto;
+    transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+.calendar-day:hover {
+    border-color: #bdbdbd;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    transform: translateY(-1px);
+}
+.calendar-day.selected {
+    border: 2px solid #111827;
+    background-color: #f3f4f6;
 }
 .calendar-day.today {
     background-color: #e3f2fd;
     border: 2px solid #2196f3;
+}
+.calendar-day.today.selected {
+    border: 2px solid #111827;
 }
 .calendar-day.weekend {
     background-color: #f8f9fa !important;
@@ -2067,6 +2080,12 @@ st.markdown("""
     background-color: #e3f2fd !important;
     border: 2px solid #2196f3 !important;
 }
+a.calendar-day-link {
+    text-decoration: none;
+    color: inherit;
+    display: block;
+    height: 100%;
+}
 .calendar-event {
     background-color: #4caf50;
     color: white;
@@ -2074,6 +2093,24 @@ st.markdown("""
     border-radius: 3px;
     font-size: 0.8rem;
     margin-bottom: 2px;
+    transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
+    cursor: pointer;
+}
+.calendar-event:hover {
+    transform: scale(1.04);
+    filter: brightness(1.05);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+}
+.calendar-selected-panel {
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 0.75rem 1rem;
+    background: #ffffff;
+    margin-top: 0.75rem;
+}
+.calendar-selected-title {
+    font-weight: 700;
+    margin-bottom: 0.5rem;
 }
 .delete-confirmation {
     background-color: #fee;
@@ -2399,6 +2436,28 @@ if page == "Dashboard":
         with col_cal2:
             selected_year = st.selectbox("Year", range(today.year-1, today.year+2), index=1)
         
+        # Selected day via query params (click a day to focus)
+        cal_date_param = None
+        try:
+            if hasattr(st, 'query_params'):
+                _qp = st.query_params
+                cal_date_param = _qp.get('cal_date', None)
+                if isinstance(cal_date_param, list):
+                    cal_date_param = cal_date_param[0] if cal_date_param else None
+            else:
+                _qp = st.experimental_get_query_params()
+                cal_date_param = _qp.get('cal_date', [None])[0]
+        except Exception:
+            cal_date_param = None
+
+        selected_date = st.session_state.get('calendar_selected_date', None)
+        if cal_date_param:
+            try:
+                selected_date = pd.to_datetime(cal_date_param).date()
+            except Exception:
+                pass
+        st.session_state['calendar_selected_date'] = selected_date
+
         # Criar calendário
         cal = calendar.monthcalendar(selected_year, selected_month)
         
@@ -2449,11 +2508,15 @@ if page == "Dashboard":
                             )
 
                         badges_html = "".join(event_badges)
-                        cell_html = f"""
-                        <div class="{day_class}">
+                        is_selected = (selected_date == current_date)
+classes = f"{day_class}{' selected' if is_selected else ''}"
+cell_html = f"""
+                        <a class="calendar-day-link" href="?cal_date={current_date.isoformat()}">
+                        <div class="{classes}">
                             <div style="font-weight:600; margin-bottom:4px;">{day}</div>
                             {badges_html}
                         </div>
+                        </a>
                         """
                         st.markdown(cell_html, unsafe_allow_html=True)
         
@@ -7410,6 +7473,28 @@ elif page == "Calendar":
                                    format_func=lambda x: calendar.month_name[x], key="cal_month")
         with col_cal2:
             cal_year = st.selectbox("Year", range(today.year-1, today.year+2), index=1, key="cal_year")
+
+        # Selected day via query params (click a day to focus)
+        cal_date_param = None
+        try:
+            if hasattr(st, 'query_params'):
+                _qp = st.query_params
+                cal_date_param = _qp.get('cal_date', None)
+                if isinstance(cal_date_param, list):
+                    cal_date_param = cal_date_param[0] if cal_date_param else None
+            else:
+                _qp = st.experimental_get_query_params()
+                cal_date_param = _qp.get('cal_date', [None])[0]
+        except Exception:
+            cal_date_param = None
+
+        selected_date = st.session_state.get('calendar_selected_date', None)
+        if cal_date_param:
+            try:
+                selected_date = pd.to_datetime(cal_date_param).date()
+            except Exception:
+                pass
+        st.session_state['calendar_selected_date'] = selected_date
         
         # Criar calendário
         cal = calendar.monthcalendar(cal_year, cal_month)
@@ -7478,14 +7563,71 @@ elif page == "Calendar":
                                 )
 
                         badges_html = "".join(event_badges)
+                        is_selected = (st.session_state.get('calendar_selected_date') == current_date)
+                        cell_classes = f"{day_class}{' selected' if is_selected else ''}"
                         cell_html = f"""
-                        <div class="{day_class}">
+                        <a class="calendar-day-link" href="?cal_date={current_date.isoformat()}">
+                          <div class="{cell_classes}">
                             <div style="font-weight:600; margin-bottom:4px;">{day}</div>
                             {badges_html}
-                        </div>
+                          </div>
+                        </a>
                         """
                         st.markdown(cell_html, unsafe_allow_html=True)
         
+        # Selected day details
+        if st.session_state.get('calendar_selected_date'):
+            sel = st.session_state['calendar_selected_date']
+            # Collect events for selected date
+            sel_events = []
+
+            events_df = data.get('calendar_events', pd.DataFrame())
+            if not events_df.empty and 'start_date' in events_df.columns:
+                _e = events_df.copy()
+                _e['start_date'] = pd.to_datetime(_e['start_date']).dt.date
+                _e = _e[_e['start_date'] == sel]
+                for _, ev in _e.iterrows():
+                    sel_events.append({
+                        'kind': ev.get('event_type', 'Other'),
+                        'title': ev.get('title', 'Event'),
+                        'notes': ev.get('notes', ''),
+                        'equipment': ev.get('equipment', ''),
+                    })
+
+            orders_df = data.get('production_orders', pd.DataFrame())
+            if not orders_df.empty and 'start_date' in orders_df.columns:
+                _o = orders_df.copy()
+                _o['start_date'] = pd.to_datetime(_o['start_date']).dt.date
+                _o = _o[_o['start_date'] == sel]
+                for _, od in _o.iterrows():
+                    sel_events.append({
+                        'kind': 'Production Order',
+                        'title': f"Order #{od.get('id_order','')}",
+                        'notes': od.get('notes', ''),
+                        'equipment': od.get('equipment', ''),
+                    })
+
+            st.markdown(
+                f"""<div class='calendar-selected-panel'>
+                <div class='calendar-selected-title'>Selected day: {sel.strftime('%A, %b %d, %Y')}</div>
+                </div>""",
+                unsafe_allow_html=True
+            )
+            if sel_events:
+                # Render a larger, readable list
+                for item in sel_events:
+                    title = item.get('title', 'Event')
+                    kind = item.get('kind', 'Other')
+                    meta = []
+                    if item.get('equipment'):
+                        meta.append(f"Equipment: {item['equipment']}")
+                    if item.get('notes'):
+                        meta.append(str(item['notes']))
+                    meta_txt = (' — ' + ' | '.join(meta)) if meta else ''
+                    st.markdown(f"**{kind}:** {title}{meta_txt}")
+            else:
+                st.info('No events scheduled for the selected day.')
+
         # Legenda
         st.markdown("---")
         st.subheader("🎨 Legend")
