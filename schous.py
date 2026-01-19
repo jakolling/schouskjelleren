@@ -4017,11 +4017,19 @@ elif page == "Ingredients":
                             "notes": notes,
                         }
 
-                        insert_data("ingredients", new_ingredient)
+                        inserted_id = insert_data("ingredients", new_ingredient)
+
+                        # If this ingredient is being registered with opening stock, persist the initial unit cost baseline.
+                        # Some deployments have DB defaults/triggers that can overwrite inserted values; this explicit update
+                        # ensures the cost is reflected immediately in the stock view.
+                        if opening_stock and float(opening_unit_cost or 0.0) > 0:
+                            try:
+                                update_data("ingredients", {"unit_cost": float(opening_unit_cost)}, "name = :n", {"n": ing_name})
+                            except Exception:
+                                pass
+
                         data = get_all_data()
                         st.success(f"✅ Ingredient '{ing_name}' added successfully!")
-                        st.session_state["new_ing_opening_stock"] = False
-                        st.session_state["new_ing_opening_unit_cost"] = 0.0
                         st.rerun()
         
         else:  # Edit Existing Ingredient
