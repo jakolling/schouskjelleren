@@ -3895,26 +3895,6 @@ elif page == "Ingredients":
                     st.rerun()
 
 
-            # Opening stock settings (outside the form so the checkbox enables the cost field immediately)
-            opening_stock = st.checkbox(
-                "Opening stock (I already have this item in inventory)",
-                value=False,
-                help="Enable this if you're registering an ingredient that is already in stock and you want to set an initial unit cost before the first purchase entry.",
-                key="new_ing_opening_stock",
-            )
-
-            opening_unit_cost = st.number_input(
-                "Unit cost for opening stock",
-                min_value=0.0,
-                value=0.0,
-                step=0.01,
-                help="Cost per unit (same unit as the ingredient unit).",
-                key="new_ing_opening_unit_cost",
-                disabled=not opening_stock,
-            )
-            if not opening_stock:
-                st.session_state["new_ing_opening_unit_cost"] = 0.0
-                opening_unit_cost = 0.0
 
             # Ingredient details form (ONLY st.form_submit_button inside)
             with st.form("add_ingredient_form", clear_on_submit=True):
@@ -3941,6 +3921,22 @@ elif page == "Ingredients":
 
                     stock = st.number_input(
                         "Initial Stock*", min_value=0.0, value=0.0, step=0.1, key="new_ing_stock"
+                    )
+
+                    opening_stock = st.checkbox(
+                        "Opening stock (I already have this item in inventory)",
+                        value=False,
+                        help="Enable this if you're registering an ingredient that is already in stock and you want to set an initial unit cost baseline before the first purchase entry.",
+                        key="new_ing_opening_stock",
+                    )
+
+                    opening_unit_cost = st.number_input(
+                        "Unit cost for opening stock",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.01,
+                        help="Only used if Opening stock is checked. Cost per unit (same unit as the ingredient unit).",
+                        key="new_ing_opening_unit_cost",
                     )
 
                 with col_form2:
