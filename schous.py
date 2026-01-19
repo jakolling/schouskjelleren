@@ -5976,6 +5976,170 @@ elif page == "Recipes":
                         with colb2:
                             cancel = st.form_submit_button('✖ Cancel', use_container_width=True)
 
+
+
+                    # -----------------------------
+                    # Ingredients editor
+                    # -----------------------------
+                    st.markdown("### 🧪 Recipe Ingredients")
+
+                    ingredients_df = data.get("ingredients", pd.DataFrame())
+                    ing_id_col = _col(ingredients_df, 'id_ingredient', 'ingredient_id', 'id')
+                    ing_name_col = _col(ingredients_df, 'name', 'ingredient_name', 'ingredient')
+                    ing_unit_col = _col(ingredients_df, 'unit')
+
+                    recipe_items_df = data.get("recipe_items", pd.DataFrame())
+                    ri_recipe_col = _col(recipe_items_df, 'recipe_id', 'id_recipe', 'id_receipt')
+                    ri_ing_id_col = _col(recipe_items_df, 'id_ingredient', 'ingredient_id')
+                    ri_ing_name_col = _col(recipe_items_df, 'ingredient_name', 'ingredient')
+                    ri_qty_col = _col(recipe_items_df, 'quantity')
+                    ri_unit_col = _col(recipe_items_df, 'unit')
+
+                    edit_items_key = f"edit_recipe_items_{str(edit_id)}"
+                    edit_count_key = f"edit_recipe_ing_count_{str(edit_id)}"
+
+                    # Load items once per edit session
+                    if edit_items_key not in st.session_state:
+                        items = []
+                        if recipe_items_df is not None and not recipe_items_df.empty and ri_recipe_col:
+                            try:
+                                _f = recipe_items_df[recipe_items_df[ri_recipe_col].astype(str) == str(edit_id)].copy()
+                            except Exception:
+                                _f = pd.DataFrame()
+                            if not _f.empty:
+                                for _, r in _f.iterrows():
+                                    nm = r.get(ri_ing_name_col) if ri_ing_name_col else None
+                                    iid = r.get(ri_ing_id_col) if ri_ing_id_col else None
+                                    qty = r.get(ri_qty_col) if ri_qty_col else 0.0
+                                    unit = r.get(ri_unit_col) if ri_unit_col else None
+                                    items.append({
+                                        'id_ingredient': iid,
+                                        'ingredient_name': nm,
+                                        'quantity': float(qty) if qty not in [None, '', 'N/A'] and str(qty) != 'nan' else 0.0,
+                                        'unit': unit,
+                                    })
+                        st.session_state[edit_items_key] = items
+                        st.session_state[edit_count_key] = max(1, len(items) if items else 1)
+
+                    # Ensure count exists
+                    if edit_count_key not in st.session_state:
+                        st.session_state[edit_count_key] = max(1, len(st.session_state.get(edit_items_key, [])) or 1)
+
+                    # Ingredient options
+                    ingredient_options = []
+                    ing_lookup = {}
+                    if ingredients_df is not None and not ingredients_df.empty and ing_id_col and ing_name_col:
+                        for _, r in ingredients_df.iterrows():
+                            _iid = r.get(ing_id_col)
+                            _nm = r.get(ing_name_col)
+                            if _iid is None or _nm is None:
+                                continue
+                            ingredient_options.append(_iid)
+                            ing_lookup[_iid] = {
+                                'name': str(_nm),
+                                'unit': str(r.get(ing_unit_col) or ''),
+                            }
+
+                    # Render rows
+                    working_items = []
+                    row_count = int(st.session_state.get(edit_count_key, 1) or 1)
+                    for i in range(row_count):
+                        base = None
+                        existing = st.session_state.get(edit_items_key, [])
+                        if i < len(existing):
+                            base = existing[i]
+                        default_ing_id = base.get('id_ingredient') if base else None
+
+                        # If we only have a name, try to map to an id
+                        if default_ing_id is None and base and base.get('ingredient_name') and ing_lookup:
+                            name_to_id = {v['name']: k for k, v in ing_lookup.items()}
+                            default_ing_id = name_to_id.get(str(base.get('ingredient_name')))
+
+                        cols_ing = st.columns([5, 3, 2, 1])
+                        with cols_ing[0]:
+                            if ingredient_options:
+                                try:
+                                    idx = ingredient_options.index(default_ing_id) if default_ing_id in ingredient_options else 0
+                                except Exception:
+                                    idx = 0
+                                sel_ing = st.selectbox(
+                                    "Ingredient",
+                                    options=ingredient_options,
+                                    index=idx,
+                                    format_func=lambda x: ing_lookup.get(x, {}).get('name', str(x)),
+                                    key=f"edit_ing_{str(edit_id)}_{i}",
+                                )
+                            else:
+                                # fallback: free text
+                                sel_ing = None
+                                st.text_input(
+                                    "Ingredient",
+                                    value=str(base.get('ingredient_name') if base else ''),
+                                    key=f"edit_ing_name_{str(edit_id)}_{i}",
+                                )
+
+                        with cols_ing[1]:
+                            planned_unit = ''
+                            if sel_ing is not None and sel_ing in ing_lookup:
+                                planned_unit = ing_lookup[sel_ing].get('unit', '')
+                            else:
+                                planned_unit = str(base.get('unit') if base else '')
+
+                            qty_default = float(base.get('quantity') or 0.0) if base else 0.0
+                            qty_val = st.number_input(
+                                f"Quantity ({planned_unit or 'units'})",
+                                min_value=0.0,
+                                value=qty_default,
+                                step=0.1,
+                                key=f"edit_qty_{str(edit_id)}_{i}",
+                            )
+
+                        with cols_ing[2]:
+                            st.text_input(
+                                "Unit",
+                                value=planned_unit,
+                                disabled=True,
+                                key=f"edit_unit_{str(edit_id)}_{i}",
+                            )
+
+                        with cols_ing[3]:
+                            if st.button("🗑️", key=f"edit_rm_{str(edit_id)}_{i}"):
+                                # remove item i
+                                items = st.session_state.get(edit_items_key, [])
+                                if i < len(items):
+                                    items.pop(i)
+                                    st.session_state[edit_items_key] = items
+                                st.session_state[edit_count_key] = max(1, int(st.session_state.get(edit_count_key, 1)) - 1)
+                                st.rerun()
+
+                        # collect row
+                        if ingredient_options:
+                            ing_name = ing_lookup.get(sel_ing, {}).get('name') if sel_ing is not None else ''
+                            unit_val = ing_lookup.get(sel_ing, {}).get('unit') if sel_ing is not None else planned_unit
+                            working_items.append({
+                                'id_ingredient': sel_ing,
+                                'ingredient_name': ing_name,
+                                'quantity': float(qty_val),
+                                'unit': unit_val,
+                            })
+                        else:
+                            ing_name = st.session_state.get(f"edit_ing_name_{str(edit_id)}_{i}", '')
+                            working_items.append({
+                                'id_ingredient': None,
+                                'ingredient_name': ing_name,
+                                'quantity': float(qty_val),
+                                'unit': planned_unit,
+                            })
+
+                    st.session_state[edit_items_key] = working_items
+
+                    if st.button("➕ Add Ingredient", key=f"edit_add_ing_{str(edit_id)}"):
+                        st.session_state[edit_count_key] = int(st.session_state.get(edit_count_key, 1) or 1) + 1
+                        st.rerun()
+
+                    if not st.session_state.get(edit_items_key):
+                        st.warning("No ingredients in this recipe yet. Add at least one ingredient.")
+
                     # Keep the confirmation UI *right below* the Cancel button
                     confirm_flag_key = f"confirm_cancel_recipe_edit_{str(edit_id)}"
                     if confirm_flag_key not in st.session_state:
@@ -5986,15 +6150,15 @@ elif page == "Recipes":
                         st.rerun()
 
                     if st.session_state.get(confirm_flag_key):
-                        st.warning("Deseja confirmar o cancelamento? Alterações não salvas serão perdidas.")
+                        st.warning("Confirm cancel? Unsaved changes will be lost.")
                         cc1, cc2 = st.columns(2)
                         with cc1:
-                            if st.button("✅ Sim, descartar", key=f"confirm_cancel_yes_{str(edit_id)}", use_container_width=True):
+                            if st.button("✅ Yes, discard", key=f"confirm_cancel_yes_{str(edit_id)}", use_container_width=True):
                                 st.session_state[confirm_flag_key] = False
                                 st.session_state.edit_recipe = None
                                 st.rerun()
                         with cc2:
-                            if st.button("↩️ Não, continuar editando", key=f"confirm_cancel_no_{str(edit_id)}", use_container_width=True):
+                            if st.button("↩️ No, keep editing", key=f"confirm_cancel_no_{str(edit_id)}", use_container_width=True):
                                 st.session_state[confirm_flag_key] = False
                                 st.rerun()
 
@@ -6042,6 +6206,40 @@ elif page == "Recipes":
                                 break
                         if not recipes_id_col:
                             recipes_id_col = 'id_recipe'
+
+                        
+
+                        # --- Update recipe_items to match edited ingredient list ---
+                        try:
+                            recipe_items_cols = get_table_columns_cached('recipe_items', dialect) or []
+                            items_fk_col = _first_existing(recipe_items_cols, ['recipe_id', 'id_recipe', 'id_receipt']) or 'recipe_id'
+                            items_ing_name_col = _first_existing(recipe_items_cols, ['ingredient_name', 'ingredient']) or 'ingredient_name'
+                            items_ing_id_col = _first_existing(recipe_items_cols, ['id_ingredient', 'ingredient_id'])
+                            items_qty_col = _first_existing(recipe_items_cols, ['quantity']) or 'quantity'
+                            items_unit_col = _first_existing(recipe_items_cols, ['unit']) or 'unit'
+
+                            # Remove existing items for this recipe
+                            try:
+                                delete_data('recipe_items', f"{items_fk_col} = :rid", {'rid': edit_id})
+                            except Exception:
+                                delete_data('recipe_items', f"CAST({items_fk_col} AS TEXT) = :rid", {'rid': str(edit_id)})
+
+                            # Re-insert current list
+                            _items = st.session_state.get(f"edit_recipe_items_{str(edit_id)}", []) or []
+                            for it in _items:
+                                if not it or float(it.get('quantity') or 0) <= 0:
+                                    continue
+                                row = {
+                                    items_fk_col: edit_id,
+                                    items_ing_name_col: it.get('ingredient_name'),
+                                    items_qty_col: float(it.get('quantity') or 0),
+                                    items_unit_col: it.get('unit') or '',
+                                }
+                                if items_ing_id_col:
+                                    row[items_ing_id_col] = it.get('id_ingredient')
+                                insert_data('recipe_items', row)
+                        except Exception as _e:
+                            st.error(f"Could not update recipe ingredients: {_e}")
 
                         update_data('recipes', update_dict, f"{recipes_id_col} = :rid", {'rid': edit_id})
                         st.success('Recipe updated!')
