@@ -7656,6 +7656,23 @@ elif page == "Calendar":
                 event_title = st.text_input("Event Title", key="new_event_title")
                 event_type = st.selectbox("Event Type", ["Brewing", "Transfer", "Packaging", "Cleaning", "Maintenance", "Meeting", "Other"], key="new_event_type")
                 event_date = st.date_input("Event Date", datetime.now().date(), key="new_event_date")
+                repeat_mode = st.radio(
+                    "Repeat",
+                    ["No repeat", "Daily", "Weekly", "Monthly"],
+                    horizontal=True,
+                    key="new_event_repeat_mode"
+                )
+                if repeat_mode != "No repeat":
+                    # Sensible default horizon: 30 days (daily) / 12 weeks (weekly) / 6 months (monthly)
+                    if repeat_mode == "Daily":
+                        default_until = event_date + timedelta(days=30)
+                    elif repeat_mode == "Weekly":
+                        default_until = event_date + timedelta(weeks=12)
+                    else:
+                        default_until = (pd.Timestamp(event_date) + pd.DateOffset(months=6)).date()
+                    repeat_until = st.date_input("Repeat until", default_until, key="new_event_repeat_until")
+                else:
+                    repeat_until = event_date
             
             with col_e2:
                 equipment_df = data.get("equipment", pd.DataFrame())
@@ -7673,23 +7690,62 @@ elif page == "Calendar":
                     batch_id = st.text_input("Batch ID", key="new_event_batch_text")
             
             event_notes = st.text_area("Notes", key="new_event_notes")
-            
             if st.button("Add Event", key="add_event_btn"):
                 if event_title:
-                    new_event = {
-                        "title": event_title,
-                        "event_type": event_type,
-                        "start_date": event_date,
-                        "end_date": event_date,
-                        "equipment": ", ".join(equipment) if isinstance(equipment, list) else equipment,
-                        "batch_id": batch_id if batch_id != "None" else "",
-                        "notes": event_notes,
-                        "created_by": "User"
-                    }
-                    
-                    insert_data("calendar_events", new_event)
+                    # Build the list of occurrence dates
+                    dates_to_create = [event_date]
+
+                    if repeat_mode != "No repeat":
+                        # Guardrails to avoid accidental huge inserts
+                        max_occurrences = 400
+                        occ_count = 1
+                        cur = event_date
+
+                        # Normalize repeat_until
+                        try:
+                            if repeat_until < event_date:
+                                repeat_until = event_date
+                        except Exception:
+                            repeat_until = event_date
+
+                        while occ_count < max_occurrences:
+                            if repeat_mode == "Daily":
+                                cur = cur + timedelta(days=1)
+                            elif repeat_mode == "Weekly":
+                                cur = cur + timedelta(weeks=1)
+                            else:
+                                cur = (pd.Timestamp(cur) + pd.DateOffset(months=1)).date()
+
+                            if cur > repeat_until:
+                                break
+
+                            dates_to_create.append(cur)
+                            occ_count += 1
+
+                        if occ_count >= max_occurrences:
+                            st.warning("Repeat series capped at 400 occurrences.")
+
+                    # Insert occurrences
+                    created = 0
+                    for d in dates_to_create:
+                        new_event = {
+                            "title": event_title,
+                            "event_type": event_type,
+                            "start_date": d,
+                            "end_date": d,
+                            "equipment": ", ".join(equipment) if isinstance(equipment, list) else equipment,
+                            "batch_id": batch_id if batch_id != "None" else "",
+                            "notes": event_notes,
+                            "created_by": "User",
+                        }
+                        insert_data("calendar_events", new_event)
+                        created += 1
+
                     data = get_all_data()
-                    st.success("✅ Event added successfully!")
+                    if created == 1:
+                        st.success("✅ Event added successfully!")
+                    else:
+                        st.success(f"✅ {created} events added successfully!")
                     st.rerun()
                 else:
                     st.error("Event title is required!")
