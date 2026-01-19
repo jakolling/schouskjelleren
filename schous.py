@@ -4003,6 +4003,7 @@ elif page == "Ingredients":
                             # Prices/costs are calculated from Purchases (incl. freight allocation).
                             # If user is setting opening stock, allow an initial cost baseline.
                             "unit_cost": float(opening_unit_cost) if opening_stock else 0.0,
+                            "cost_per_unit": float(opening_unit_cost) if opening_stock else 0.0,
                             "low_stock_threshold": low_stock_threshold,
                             "alpha_acid": alpha_acid if category == "Hops" else 0.0,
                             "lot_number": lot_number,
@@ -4023,8 +4024,21 @@ elif page == "Ingredients":
                         # Some deployments have DB defaults/triggers that can overwrite inserted values; this explicit update
                         # ensures the cost is reflected immediately in the stock view.
                         if opening_stock and float(opening_unit_cost or 0.0) > 0:
+                            c0 = float(opening_unit_cost)
+                            # Use raw SQL updates to avoid any stale cached-schema filtering.
                             try:
-                                update_data("ingredients", {"unit_cost": float(opening_unit_cost)}, "name = :n", {"n": ing_name})
+                                execute_query(
+                                    "UPDATE ingredients SET unit_cost = :c, last_updated = CURRENT_TIMESTAMP WHERE name = :n",
+                                    {"c": c0, "n": ing_name},
+                                )
+                            except Exception:
+                                pass
+                            # Best-effort: keep legacy alias in sync if present
+                            try:
+                                execute_query(
+                                    "UPDATE ingredients SET cost_per_unit = :c WHERE name = :n",
+                                    {"c": c0, "n": ing_name},
+                                )
                             except Exception:
                                 pass
 
@@ -5926,47 +5940,14 @@ elif page == "Recipes":
                 st.session_state.edit_recipe = None
             else:
                 with st.expander('📝 Edit Recipe', expanded=True):
-                                        # Current values (with schema fallbacks)
-                    # Exact-match first
+                    # Current values (with schema fallbacks)
                     name_col = _col(recipes_df, 'name', 'recipe_name', 'title')
                     style_col = _col(recipes_df, 'style', 'beer_style', 'type_style')
                     desc_col = _col(recipes_df, 'description', 'notes', 'desc')
                     batch_col = _col(recipes_df, 'batch_volume', 'batch_size', 'batch_l', 'volume_l', 'volume')
                     eff_col = _col(recipes_df, 'efficiency', 'brewhouse_efficiency', 'brew_efficiency', 'bh_efficiency', 'efficiency_pct', 'efficiency_percent')
-
-                    # OG/FG are often named inconsistently; try exact match aliases first, then fuzzy search
-                    og_col = _col(recipes_df,
-                        'og', 'OG',
-                        'original_gravity', 'originalGravity',
-                        'target_og', 'og_target', 'og_planned',
-                        'og_plato', 'original_gravity_plato',
-                        'og_sg', 'original_gravity_sg', 'target_og_sg'
-                    )
-                    fg_col = _col(recipes_df,
-                        'fg', 'FG',
-                        'final_gravity', 'finalGravity',
-                        'target_fg', 'fg_target', 'fg_planned',
-                        'fg_plato', 'final_gravity_plato',
-                        'fg_sg', 'final_gravity_sg', 'target_fg_sg'
-                    )
-
-                    _cols_lc = [c.lower() for c in recipes_df.columns]
-
-                    def _fuzzy_pick(cols_lower, want=('og',), must_any=(), avoid_any=()):
-                        # returns original column name
-                        for i, cl in enumerate(cols_lower):
-                            if any(a in cl for a in avoid_any):
-                                continue
-                            if all(w in cl for w in want) and (not must_any or any(m in cl for m in must_any)):
-                                return recipes_df.columns[i]
-                        return None
-
-                    if og_col is None:
-                        # prefer columns that mention both og and gravity/target
-                        og_col = _fuzzy_pick(_cols_lc, want=('og',), must_any=('grav', 'target', 'plan', 'orig'), avoid_any=('logo',))
-                    if fg_col is None:
-                        fg_col = _fuzzy_pick(_cols_lc, want=('fg',), must_any=('grav', 'target', 'plan', 'final'), avoid_any=())
-
+                    og_col = _col(recipes_df, 'og', 'original_gravity', 'og_plato', 'target_og', 'og_target', 'og_planned', 'original_gravity_plato')
+                    fg_col = _col(recipes_df, 'fg', 'final_gravity', 'fg_plato', 'target_fg', 'fg_target', 'fg_planned', 'final_gravity_plato')
                     ibu_col = _col(recipes_df, 'ibus', 'ibu', 'target_ibu', 'ibu_target')
                     ebc_col = _col(recipes_df, 'ebc', 'color_ebc', 'srm', 'target_ebc', 'ebc_target', 'color')
 
@@ -5975,21 +5956,17 @@ elif page == "Recipes":
                     cur_desc = recipe_row.get(desc_col) if desc_col else recipe_row.get('description', recipe_row.get('notes', ''))
                     cur_batch = recipe_row.get(batch_col) if batch_col else recipe_row.get('batch_volume', recipe_row.get('batch_size', None))
                     cur_eff = recipe_row.get(eff_col) if eff_col else recipe_row.get('efficiency', None)
-                    cur_og = recipe_row.get(og_col) if og_col else recipe_row.get('og', recipe_row.get('original_gravity', recipe_row.get('og_plato', recipe_row.get('target_og', None))))
-                    cur_fg = recipe_row.get(fg_col) if fg_col else recipe_row.get('fg', recipe_row.get('final_gravity', recipe_row.get('fg_plato', recipe_row.get('target_fg', None))))
+                    cur_og = recipe_row.get(og_col) if og_col else recipe_row.get('og', recipe_row.get('original_gravity', recipe_row.get('og_plato', None)))
+                    cur_fg = recipe_row.get(fg_col) if fg_col else recipe_row.get('fg', recipe_row.get('final_gravity', recipe_row.get('fg_plato', None)))
                     cur_ibu = recipe_row.get(ibu_col) if ibu_col else recipe_row.get('ibus', recipe_row.get('ibu', None))
                     cur_ebc = recipe_row.get(ebc_col) if ebc_col else recipe_row.get('ebc', recipe_row.get('color_ebc', recipe_row.get('srm', None)))
-
                     # Brewery selection
                     breweries_df = data.get('breweries', pd.DataFrame())
                     brewery_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
                     brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
 
-                    # try multiple possible recipe->brewery columns
-                    recipe_brewery_col = _col(recipes_df, 'target_brewery_id', 'target_brewery', 'brewery_id', 'id_brewery', 'brewery')
-
-                    # attempt to find current brewery id (or name) from the recipe row
-                    cur_brewery_id = recipe_row.get(recipe_brewery_col) if recipe_brewery_col else recipe_row.get('brewery_id', recipe_row.get('id_brewery', recipe_row.get('target_brewery', recipe_row.get('brewery', None))))
+                    # attempt to find current brewery id
+                    cur_brewery_id = recipe_row.get('brewery_id', recipe_row.get('id_brewery', recipe_row.get('brewery', None)))
 
                     with st.form(key=f'edit_recipe_form_{str(edit_id)}'):
                         c1, c2 = st.columns(2)
