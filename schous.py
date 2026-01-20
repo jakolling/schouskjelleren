@@ -1,4 +1,4 @@
-# Brewery Manager - Multi-user Streamlit app (Postgres/Neon)
+a# Brewery Manager - Multi-user Streamlit app (Postgres/Neon)
 import streamlit as st
 import bcrypt
 import pandas as pd
@@ -607,7 +607,62 @@ def init_database():
                 warehouse TEXT,
                 quantity_units DOUBLE PRECISION,
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+             )""",
+
+            """CREATE TABLE IF NOT EXISTS deposits (
+                id_deposit BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                address TEXT,
+                city TEXT,
+                country TEXT,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )""",
+            """CREATE TABLE IF NOT EXISTS customers (
+                id_customer BIGSERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                org_no TEXT,
+                email TEXT,
+                phone TEXT,
+                billing_address TEXT,
+                delivery_address TEXT,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS sales_orders (
+                id_sales_order BIGSERIAL PRIMARY KEY,
+                order_no TEXT,
+                order_date DATE,
+                delivery_date DATE,
+                customer_id BIGINT,
+                customer_name TEXT,
+                deposit_id BIGINT,
+                deposit_name TEXT,
+                status TEXT DEFAULT 'Draft',
+                currency TEXT DEFAULT 'NOK',
+                subtotal DOUBLE PRECISION DEFAULT 0,
+                total DOUBLE PRECISION DEFAULT 0,
+                confirmed_date DATE,
+                fulfilled_date DATE,
+                notes TEXT,
+                created_by TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS sales_order_items (
+                id_sales_order_item BIGSERIAL PRIMARY KEY,
+                sales_order_id BIGINT,
+                product_id BIGINT,
+                product_name TEXT,
+                quantity DOUBLE PRECISION,
+                unit TEXT,
+                unit_price DOUBLE PRECISION,
+                line_total DOUBLE PRECISION,
+                notes TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+
             """CREATE TABLE IF NOT EXISTS calendar_events (
                 id_event BIGSERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -832,7 +887,93 @@ def init_database():
                 actual_cost REAL,
                 notes TEXT,
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+             )""",
+
+            """CREATE TABLE IF NOT EXISTS composite_products (
+                id_composite INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                sku TEXT,
+                recipe_id TEXT,
+                recipe_name TEXT,
+                output_unit TEXT DEFAULT 'unit',
+                beer_liters_per_unit REAL DEFAULT 0,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
+            """CREATE TABLE IF NOT EXISTS composite_product_items (
+                id_composite_item INTEGER PRIMARY KEY AUTOINCREMENT,
+                composite_id INTEGER,
+                component_type TEXT,
+                component_name TEXT,
+                quantity REAL,
+                unit TEXT,
+                notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS composite_inventory (
+                id_composite_inventory INTEGER PRIMARY KEY AUTOINCREMENT,
+                composite_id INTEGER,
+                composite_name TEXT,
+                warehouse TEXT,
+                quantity_units REAL,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+
+            """CREATE TABLE IF NOT EXISTS deposits (
+                id_deposit INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                address TEXT,
+                city TEXT,
+                country TEXT,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS customers (
+                id_customer INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                org_no TEXT,
+                email TEXT,
+                phone TEXT,
+                billing_address TEXT,
+                delivery_address TEXT,
+                notes TEXT,
+                status TEXT DEFAULT 'Active',
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS sales_orders (
+                id_sales_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_no TEXT,
+                order_date DATE,
+                delivery_date DATE,
+                customer_id INTEGER,
+                customer_name TEXT,
+                deposit_id INTEGER,
+                deposit_name TEXT,
+                status TEXT DEFAULT 'Draft',
+                currency TEXT DEFAULT 'NOK',
+                subtotal REAL DEFAULT 0,
+                total REAL DEFAULT 0,
+                confirmed_date DATE,
+                fulfilled_date DATE,
+                notes TEXT,
+                created_by TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS sales_order_items (
+                id_sales_order_item INTEGER PRIMARY KEY AUTOINCREMENT,
+                sales_order_id INTEGER,
+                product_id INTEGER,
+                product_name TEXT,
+                quantity REAL,
+                unit TEXT,
+                unit_price REAL,
+                line_total REAL,
+                notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+
             """CREATE TABLE IF NOT EXISTS calendar_events (
                 id_event INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
@@ -1205,6 +1346,66 @@ def init_database():
         },
     )
 
+
+
+    # --- Sales / Orders ---
+    _ensure_columns(
+        "deposits",
+        {
+            "name": "TEXT",
+            "address": "TEXT",
+            "city": "TEXT",
+            "country": "TEXT",
+            "notes": "TEXT",
+            "status": "TEXT",
+        },
+    )
+    _ensure_columns(
+        "customers",
+        {
+            "name": "TEXT",
+            "org_no": "TEXT",
+            "email": "TEXT",
+            "phone": "TEXT",
+            "billing_address": "TEXT",
+            "delivery_address": "TEXT",
+            "notes": "TEXT",
+            "status": "TEXT",
+        },
+    )
+    _ensure_columns(
+        "sales_orders",
+        {
+            "order_no": "TEXT",
+            "order_date": "DATE",
+            "delivery_date": "DATE",
+            "customer_id": "BIGINT",
+            "customer_name": "TEXT",
+            "deposit_id": "BIGINT",
+            "deposit_name": "TEXT",
+            "status": "TEXT",
+            "currency": "TEXT",
+            "subtotal": "DOUBLE PRECISION DEFAULT 0",
+            "total": "DOUBLE PRECISION DEFAULT 0",
+            "confirmed_date": "DATE",
+            "fulfilled_date": "DATE",
+            "notes": "TEXT",
+            "created_by": "TEXT",
+        },
+    )
+    _ensure_columns(
+        "sales_order_items",
+        {
+            "sales_order_id": "BIGINT",
+            "product_id": "BIGINT",
+            "product_name": "TEXT",
+            "quantity": "DOUBLE PRECISION",
+            "unit": "TEXT",
+            "unit_price": "DOUBLE PRECISION",
+            "line_total": "DOUBLE PRECISION",
+            "notes": "TEXT",
+        },
+    )
     # --- Production extensions ---
     _ensure_columns(
         "production_batches",
@@ -1417,6 +1618,8 @@ def _get_all_data_uncached() -> dict[str, pd.DataFrame]:
         'production_batches', 'production_events', 'production_consumptions', 'production_keg_runs',
         # finished goods
         'composite_products', 'composite_product_items', 'composite_inventory',
+        # sales / orders
+        'deposits', 'customers', 'sales_orders', 'sales_order_items',
         # legacy
         'production_orders', 'calendar_events', 'team_members'
     ]
@@ -2750,7 +2953,7 @@ def _on_page_change():
 # Navegação
 # -----------------------------
 page = st.sidebar.radio("Navigation", [
-    "Dashboard", "Breweries", "Ingredients", "Products", "Purchases", 
+    "Dashboard", "Breweries", "Ingredients", "Products", "Orders", "Purchases", 
     "Recipes", "Production", "Calendar"
 ], key="page", on_change=_on_page_change)
 st.sidebar.markdown("---")
@@ -4875,6 +5078,635 @@ elif page == "Products":
                 st.dataframe(agg.sort_values('units', ascending=False), use_container_width=True)
             else:
                 st.dataframe(view, use_container_width=True)
+
+
+
+elif page == "Orders":
+    st.title("🧾 Orders")
+
+    deposits_df = data.get('deposits', pd.DataFrame())
+    customers_df = data.get('customers', pd.DataFrame())
+    products_df = data.get('composite_products', pd.DataFrame())
+    inv_df = data.get('composite_inventory', pd.DataFrame())
+    orders_df = data.get('sales_orders', pd.DataFrame())
+    items_df = data.get('sales_order_items', pd.DataFrame())
+
+    def _safe_str(x):
+        return '' if x is None else str(x)
+
+    def _available_units(composite_id: int, warehouse: str) -> float:
+        if inv_df is None or inv_df.empty:
+            return 0.0
+        cid = _col(inv_df, 'composite_id')
+        wcol = _col(inv_df, 'warehouse')
+        qcol = _col(inv_df, 'quantity_units')
+        if not (cid and wcol and qcol):
+            return 0.0
+        v = inv_df.copy()
+        try:
+            v = v[(v[cid].astype(float) == float(composite_id)) & (v[wcol].astype(str) == str(warehouse))]
+            return float(v[qcol].sum() or 0)
+        except Exception:
+            return 0.0
+
+    def _generate_order_pdf(order_row: dict, lines: pd.DataFrame, customer_row: dict | None, deposit_row: dict | None) -> bytes:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.units import mm
+
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=A4)
+        w, h = A4
+        y = h - 18*mm
+
+        order_no = _safe_str(order_row.get('order_no') or f"#{order_row.get('id_sales_order','')}")
+        status = _safe_str(order_row.get('status'))
+        currency = _safe_str(order_row.get('currency') or 'NOK')
+
+        c.setFont('Helvetica-Bold', 15)
+        c.drawString(18*mm, y, 'ORDER CONFIRMATION')
+        y -= 8*mm
+        c.setFont('Helvetica', 10)
+        c.drawString(18*mm, y, f"Order: {order_no}    Status: {status}")
+        y -= 6*mm
+        c.drawString(18*mm, y, f"Order date: {_safe_str(order_row.get('order_date'))}    Delivery: {_safe_str(order_row.get('delivery_date'))}")
+        y -= 8*mm
+
+        cust_name = _safe_str(order_row.get('customer_name') or (customer_row or {}).get('name'))
+        dep_name = _safe_str(order_row.get('deposit_name') or (deposit_row or {}).get('name'))
+
+        c.setFont('Helvetica-Bold', 11)
+        c.drawString(18*mm, y, 'Customer')
+        y -= 5*mm
+        c.setFont('Helvetica', 10)
+        c.drawString(18*mm, y, cust_name)
+        y -= 5*mm
+        if customer_row:
+            if customer_row.get('org_no'):
+                c.drawString(18*mm, y, f"Org: {_safe_str(customer_row.get('org_no'))}")
+                y -= 5*mm
+            if customer_row.get('delivery_address'):
+                for line in _safe_str(customer_row.get('delivery_address')).split('\n'):
+                    c.drawString(18*mm, y, line[:100])
+                    y -= 4.5*mm
+            if customer_row.get('email') or customer_row.get('phone'):
+                c.drawString(18*mm, y, f"Email: {_safe_str(customer_row.get('email'))}   Phone: {_safe_str(customer_row.get('phone'))}")
+                y -= 5*mm
+        y -= 2*mm
+
+        c.setFont('Helvetica-Bold', 11)
+        c.drawString(18*mm, y, 'Dispatch / Deposit')
+        y -= 5*mm
+        c.setFont('Helvetica', 10)
+        c.drawString(18*mm, y, dep_name)
+        y -= 8*mm
+
+        # Table header
+        c.setFont('Helvetica-Bold', 10)
+        c.drawString(18*mm, y, 'Product')
+        c.drawString(120*mm, y, 'Qty')
+        c.drawString(145*mm, y, f"Unit ({currency})")
+        c.drawString(175*mm, y, f"Total ({currency})")
+        y -= 4*mm
+        c.line(18*mm, y, 195*mm, y)
+        y -= 6*mm
+
+        # Lines
+        c.setFont('Helvetica', 10)
+        subtotal = 0.0
+        if lines is not None and not lines.empty:
+            for _, r in lines.iterrows():
+                pname = _safe_str(r.get('product_name'))
+                qty = float(r.get('quantity') or 0)
+                unit_price = float(r.get('unit_price') or 0)
+                total = float(r.get('line_total') or (qty * unit_price))
+                subtotal += total
+
+                # wrap product name if long
+                pname_lines = [pname[i:i+52] for i in range(0, len(pname), 52)] or ['']
+                c.drawString(18*mm, y, pname_lines[0])
+                c.drawRightString(140*mm, y, f"{qty:g}")
+                c.drawRightString(170*mm, y, f"{unit_price:.2f}")
+                c.drawRightString(195*mm, y, f"{total:.2f}")
+                y -= 5*mm
+                for extra in pname_lines[1:]:
+                    c.drawString(18*mm, y, extra)
+                    y -= 4.5*mm
+
+                if y < 25*mm:
+                    c.showPage()
+                    y = h - 18*mm
+                    c.setFont('Helvetica', 10)
+
+        y -= 2*mm
+        c.line(120*mm, y, 195*mm, y)
+        y -= 6*mm
+        c.setFont('Helvetica-Bold', 11)
+        c.drawRightString(170*mm, y, 'Subtotal:')
+        c.drawRightString(195*mm, y, f"{subtotal:.2f}")
+        y -= 6*mm
+        total_val = float(order_row.get('total') or subtotal)
+        c.drawRightString(170*mm, y, 'Total:')
+        c.drawRightString(195*mm, y, f"{total_val:.2f}")
+        y -= 10*mm
+
+        notes = _safe_str(order_row.get('notes'))
+        if notes:
+            c.setFont('Helvetica-Bold', 10)
+            c.drawString(18*mm, y, 'Notes')
+            y -= 5*mm
+            c.setFont('Helvetica', 10)
+            for line in notes.split('\n'):
+                c.drawString(18*mm, y, line[:110])
+                y -= 4.5*mm
+                if y < 20*mm:
+                    c.showPage()
+                    y = h - 18*mm
+                    c.setFont('Helvetica', 10)
+
+        c.showPage()
+        c.save()
+        buf.seek(0)
+        return buf.read()
+
+    tab_dep, tab_cust, tab_new, tab_list = st.tabs([
+        "📦 Deposits",
+        "👥 Customers",
+        "🧾 New Order",
+        "📜 Orders",
+    ])
+
+    with tab_dep:
+        st.subheader("Deposits")
+        if not can_write():
+            st.info("Guest mode: you can view deposits, but only admin can create/edit.")
+
+        # Create
+        with st.form('deposit_create', clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                dep_name = st.text_input('Name*')
+                dep_city = st.text_input('City')
+            with c2:
+                dep_country = st.text_input('Country')
+                dep_status = st.selectbox('Status', ['Active', 'Inactive'], index=0)
+            dep_address = st.text_area('Address', height=80)
+            dep_notes = st.text_area('Notes', height=80)
+            submit = st.form_submit_button('Add deposit', type='primary', use_container_width=True)
+
+        if submit:
+            require_admin_action()
+            if not dep_name.strip():
+                st.error('Name is required.')
+            else:
+                insert_data('deposits', {
+                    'name': dep_name.strip(),
+                    'address': dep_address,
+                    'city': dep_city,
+                    'country': dep_country,
+                    'status': dep_status,
+                    'notes': dep_notes,
+                })
+                st.success('✅ Deposit added.')
+                st.rerun()
+
+        st.markdown('---')
+        if deposits_df is None or deposits_df.empty:
+            st.info('No deposits yet.')
+        else:
+            d_id = _col(deposits_df, 'id_deposit', 'id')
+            d_name = _col(deposits_df, 'name')
+            view = deposits_df.copy()
+            cols = [c for c in view.columns if c not in ('created_date',)]
+            st.dataframe(view[cols], use_container_width=True)
+
+            if can_write() and d_id and d_name:
+                st.markdown('#### Edit deposit')
+                recs = view.sort_values(d_name).to_dict('records')
+                sel = st.selectbox('Select', recs, format_func=lambda r: f"{r.get(d_name,'')} (#{r.get(d_id,'')})")
+                with st.form('deposit_edit', clear_on_submit=False):
+                    n = st.text_input('Name', value=_safe_str(sel.get(d_name)))
+                    addr = st.text_area('Address', value=_safe_str(sel.get('address')), height=80)
+                    city = st.text_input('City', value=_safe_str(sel.get('city')))
+                    country = st.text_input('Country', value=_safe_str(sel.get('country')))
+                    status = st.selectbox('Status', ['Active','Inactive'], index=0 if _safe_str(sel.get('status','Active'))!='Inactive' else 1)
+                    notes = st.text_area('Notes', value=_safe_str(sel.get('notes')), height=80)
+                    save = st.form_submit_button('Save changes', type='primary', use_container_width=True)
+
+                if save:
+                    require_admin_action()
+                    update_data('deposits', {
+                        'name': n.strip(),
+                        'address': addr,
+                        'city': city,
+                        'country': country,
+                        'status': status,
+                        'notes': notes,
+                    }, f"{d_id} = :id", {'id': int(sel.get(d_id))})
+                    st.success('✅ Updated.')
+                    st.rerun()
+
+    with tab_cust:
+        st.subheader("Customers")
+        if not can_write():
+            st.info("Guest mode: you can view customers, but only admin can create/edit.")
+
+        with st.form('customer_create', clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                cust_name = st.text_input('Name*')
+                cust_org = st.text_input('Org no')
+            with c2:
+                cust_email = st.text_input('Email')
+                cust_phone = st.text_input('Phone')
+            with c3:
+                cust_status = st.selectbox('Status', ['Active','Inactive'], index=0)
+            bill = st.text_area('Billing address', height=80)
+            deliver = st.text_area('Delivery address', height=80)
+            notes = st.text_area('Notes', height=80)
+            submit = st.form_submit_button('Add customer', type='primary', use_container_width=True)
+
+        if submit:
+            require_admin_action()
+            if not cust_name.strip():
+                st.error('Name is required.')
+            else:
+                insert_data('customers', {
+                    'name': cust_name.strip(),
+                    'org_no': cust_org,
+                    'email': cust_email,
+                    'phone': cust_phone,
+                    'billing_address': bill,
+                    'delivery_address': deliver,
+                    'status': cust_status,
+                    'notes': notes,
+                })
+                st.success('✅ Customer added.')
+                st.rerun()
+
+        st.markdown('---')
+        if customers_df is None or customers_df.empty:
+            st.info('No customers yet.')
+        else:
+            c_id = _col(customers_df, 'id_customer', 'id')
+            c_name = _col(customers_df, 'name')
+            view = customers_df.copy()
+            cols = [c for c in view.columns if c not in ('created_date',)]
+            st.dataframe(view[cols], use_container_width=True)
+
+            if can_write() and c_id and c_name:
+                st.markdown('#### Edit customer')
+                recs = view.sort_values(c_name).to_dict('records')
+                sel = st.selectbox('Select', recs, format_func=lambda r: f"{r.get(c_name,'')} (#{r.get(c_id,'')})")
+                with st.form('customer_edit', clear_on_submit=False):
+                    n = st.text_input('Name', value=_safe_str(sel.get(c_name)))
+                    org = st.text_input('Org no', value=_safe_str(sel.get('org_no')))
+                    email = st.text_input('Email', value=_safe_str(sel.get('email')))
+                    phone = st.text_input('Phone', value=_safe_str(sel.get('phone')))
+                    status = st.selectbox('Status', ['Active','Inactive'], index=0 if _safe_str(sel.get('status','Active'))!='Inactive' else 1)
+                    bill = st.text_area('Billing address', value=_safe_str(sel.get('billing_address')), height=80)
+                    deliver = st.text_area('Delivery address', value=_safe_str(sel.get('delivery_address')), height=80)
+                    notes = st.text_area('Notes', value=_safe_str(sel.get('notes')), height=80)
+                    save = st.form_submit_button('Save changes', type='primary', use_container_width=True)
+
+                if save:
+                    require_admin_action()
+                    update_data('customers', {
+                        'name': n.strip(),
+                        'org_no': org,
+                        'email': email,
+                        'phone': phone,
+                        'billing_address': bill,
+                        'delivery_address': deliver,
+                        'status': status,
+                        'notes': notes,
+                    }, f"{c_id} = :id", {'id': int(sel.get(c_id))})
+                    st.success('✅ Updated.')
+                    st.rerun()
+
+    with tab_new:
+        st.subheader('Create order')
+        if not can_write():
+            st.warning('You are in visualization mode. To create orders, sign in as admin and turn off visualization mode.')
+
+        # Options
+        dep_name_col = _col(deposits_df, 'name')
+        dep_id_col = _col(deposits_df, 'id_deposit', 'id')
+        cust_name_col = _col(customers_df, 'name')
+        cust_id_col = _col(customers_df, 'id_customer', 'id')
+
+        prod_name_col = _col(products_df, 'name')
+        prod_id_col = _col(products_df, 'id_composite', 'id')
+        prod_unit_col = _col(products_df, 'output_unit')
+
+        dep_records = deposits_df[deposits_df.get('status','Active')!='Inactive'].to_dict('records') if deposits_df is not None and not deposits_df.empty else []
+        cust_records = customers_df[customers_df.get('status','Active')!='Inactive'].to_dict('records') if customers_df is not None and not customers_df.empty else []
+
+        if not dep_records:
+            st.info('Add at least one deposit first.')
+        if not cust_records:
+            st.info('Add at least one customer first.')
+
+        if 'so_lines' not in st.session_state:
+            st.session_state['so_lines'] = pd.DataFrame([{
+                'product': '',
+                'quantity': 0.0,
+                'unit_price': 0.0,
+            }])
+
+        with st.form('order_create', clear_on_submit=False):
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                cust = st.selectbox('Customer*', cust_records, format_func=lambda r: _safe_str(r.get(cust_name_col,'')) if cust_name_col else str(r)) if cust_records else None
+            with c2:
+                dep = st.selectbox('Deposit*', dep_records, format_func=lambda r: _safe_str(r.get(dep_name_col,'')) if dep_name_col else str(r)) if dep_records else None
+            with c3:
+                order_date = st.date_input('Order date', value=date.today())
+            with c4:
+                delivery_date = st.date_input('Delivery date', value=date.today())
+
+            c5, c6 = st.columns([1,3])
+            with c5:
+                currency = st.selectbox('Currency', ['NOK','EUR','USD'], index=0)
+            with c6:
+                notes = st.text_area('Notes', height=80)
+
+            # Lines editor
+            product_options = products_df[prod_name_col].dropna().astype(str).tolist() if products_df is not None and not products_df.empty and prod_name_col else []
+
+            st.markdown('#### Items')
+            edited = st.data_editor(
+                st.session_state['so_lines'],
+                use_container_width=True,
+                num_rows='dynamic',
+                column_config={
+                    'product': st.column_config.SelectboxColumn('Product', options=[''] + product_options),
+                    'quantity': st.column_config.NumberColumn('Quantity', min_value=0.0, step=1.0),
+                    'unit_price': st.column_config.NumberColumn('Unit price', min_value=0.0, step=1.0, format='%.2f'),
+                }
+            )
+            st.session_state['so_lines'] = edited
+
+            submit = st.form_submit_button('Create order', type='primary', use_container_width=True)
+
+        # live preview totals
+        lines_clean = st.session_state.get('so_lines', pd.DataFrame()).copy()
+        if not lines_clean.empty:
+            lines_clean = lines_clean[lines_clean['product'].astype(str).str.strip() != '']
+            try:
+                lines_clean['quantity'] = pd.to_numeric(lines_clean['quantity'], errors='coerce').fillna(0.0)
+                lines_clean['unit_price'] = pd.to_numeric(lines_clean['unit_price'], errors='coerce').fillna(0.0)
+                lines_clean['line_total'] = lines_clean['quantity'] * lines_clean['unit_price']
+                subtotal_preview = float(lines_clean['line_total'].sum() or 0)
+            except Exception:
+                subtotal_preview = 0.0
+        else:
+            subtotal_preview = 0.0
+        st.caption(f"Subtotal preview: {subtotal_preview:.2f} {currency if 'currency' in locals() else 'NOK'}")
+
+        if submit:
+            require_admin_action()
+            if not (cust and dep):
+                st.error('Customer and deposit are required.')
+            else:
+                if lines_clean.empty:
+                    st.error('Add at least one item.')
+                else:
+                    # resolve ids
+                    cust_id = int(cust.get(cust_id_col)) if cust_id_col else None
+                    cust_name = _safe_str(cust.get(cust_name_col)) if cust_name_col else ''
+                    dep_id = int(dep.get(dep_id_col)) if dep_id_col else None
+                    dep_name = _safe_str(dep.get(dep_name_col)) if dep_name_col else ''
+
+                    # order no
+                    try:
+                        next_id = 1
+                        if orders_df is not None and not orders_df.empty:
+                            oid = _col(orders_df, 'id_sales_order', 'id')
+                            if oid:
+                                next_id = int(pd.to_numeric(orders_df[oid], errors='coerce').max() or 0) + 1
+                        order_no = f"SO-{date.today().strftime('%Y%m%d')}-{next_id:04d}"
+                    except Exception:
+                        order_no = f"SO-{date.today().strftime('%Y%m%d')}-{int(datetime.utcnow().timestamp())%100000:05d}"
+
+                    # build items rows with product_id + unit
+                    prod_map = {}
+                    if products_df is not None and not products_df.empty and prod_name_col and prod_id_col:
+                        for _, r in products_df.iterrows():
+                            prod_map[str(r.get(prod_name_col))] = {
+                                'id': int(r.get(prod_id_col)),
+                                'unit': _safe_str(r.get(prod_unit_col) or 'unit')
+                            }
+
+                    subtotal = float(lines_clean['line_total'].sum() or 0)
+
+                    order_id = insert_data('sales_orders', {
+                        'order_no': order_no,
+                        'order_date': order_date,
+                        'delivery_date': delivery_date,
+                        'customer_id': cust_id,
+                        'customer_name': cust_name,
+                        'deposit_id': dep_id,
+                        'deposit_name': dep_name,
+                        'status': 'Draft',
+                        'currency': currency,
+                        'subtotal': subtotal,
+                        'total': subtotal,
+                        'notes': notes,
+                        'created_by': st.session_state.get('auth_user','admin'),
+                    })
+
+                    for _, r in lines_clean.iterrows():
+                        pname = str(r.get('product') or '').strip()
+                        qty = float(r.get('quantity') or 0)
+                        up = float(r.get('unit_price') or 0)
+                        if not pname or qty <= 0:
+                            continue
+                        meta = prod_map.get(pname, {})
+                        insert_data('sales_order_items', {
+                            'sales_order_id': int(order_id) if order_id is not None else None,
+                            'product_id': meta.get('id'),
+                            'product_name': pname,
+                            'quantity': qty,
+                            'unit': meta.get('unit', 'unit'),
+                            'unit_price': up,
+                            'line_total': float(qty*up),
+                        })
+
+                    st.success(f"✅ Order created: {order_no}")
+                    # reset lines
+                    st.session_state['so_lines'] = pd.DataFrame([{'product':'','quantity':0.0,'unit_price':0.0}])
+                    st.rerun()
+
+    with tab_list:
+        st.subheader('Orders list')
+        if orders_df is None or orders_df.empty:
+            st.info('No orders yet.')
+        else:
+            oid = _col(orders_df, 'id_sales_order', 'id')
+            ono = _col(orders_df, 'order_no')
+            ocust = _col(orders_df, 'customer_name')
+            odep = _col(orders_df, 'deposit_name')
+            ostatus = _col(orders_df, 'status')
+            ototal = _col(orders_df, 'total')
+
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                status_filter = st.selectbox('Status', ['All'] + sorted(list(set([_safe_str(s) for s in orders_df[ostatus].dropna().tolist()]))) if ostatus else ['All'], index=0)
+            with f2:
+                cust_filter = st.selectbox('Customer', ['All'] + sorted(list(set([_safe_str(s) for s in orders_df[ocust].dropna().tolist()]))) if ocust else ['All'], index=0)
+            with f3:
+                dep_filter = st.selectbox('Deposit', ['All'] + sorted(list(set([_safe_str(s) for s in orders_df[odep].dropna().tolist()]))) if odep else ['All'], index=0)
+
+            view = orders_df.copy()
+            if ostatus and status_filter != 'All':
+                view = view[view[ostatus].astype(str) == status_filter]
+            if ocust and cust_filter != 'All':
+                view = view[view[ocust].astype(str) == cust_filter]
+            if odep and dep_filter != 'All':
+                view = view[view[odep].astype(str) == dep_filter]
+
+            show_cols = [c for c in [ono, 'order_date', 'delivery_date', ocust, odep, ostatus, ototal] if c and c in view.columns]
+            st.dataframe(view[show_cols].sort_values(view.columns[0], ascending=False), use_container_width=True)
+
+            # Select order to view details
+            recs = view.sort_values(oid or view.columns[0], ascending=False).to_dict('records')
+            sel = st.selectbox('Open order', recs, format_func=lambda r: f"{_safe_str(r.get(ono) or r.get(oid))} — {_safe_str(r.get(ocust))} ({_safe_str(r.get(ostatus))})")
+
+            order_id = int(sel.get(oid)) if oid else None
+            lines = pd.DataFrame()
+            if items_df is not None and not items_df.empty and order_id is not None:
+                sid = _col(items_df, 'sales_order_id')
+                if sid:
+                    lines = items_df[items_df[sid].astype(float) == float(order_id)].copy()
+
+            st.markdown('---')
+            st.markdown(f"### {_safe_str(sel.get(ono) or ('Order #' + str(order_id))) }")
+            st.caption(f"Customer: {_safe_str(sel.get(ocust))} | Deposit: {_safe_str(sel.get(odep))} | Status: {_safe_str(sel.get(ostatus))}")
+
+            if lines is None or lines.empty:
+                st.info('No items.')
+            else:
+                pcol = _col(lines, 'product_name')
+                qcol = _col(lines, 'quantity')
+                ucol = _col(lines, 'unit')
+                upcol = _col(lines, 'unit_price')
+                ltcol = _col(lines, 'line_total')
+                disp_cols = [c for c in [pcol, qcol, ucol, upcol, ltcol] if c]
+                st.dataframe(lines[disp_cols], use_container_width=True)
+
+            # PDF
+            cust_row = None
+            dep_row = None
+            try:
+                if customers_df is not None and not customers_df.empty:
+                    cid = _col(customers_df, 'id_customer', 'id')
+                    if cid and sel.get('customer_id') is not None:
+                        m = customers_df[customers_df[cid].astype(float) == float(sel.get('customer_id'))]
+                        cust_row = m.iloc[0].to_dict() if not m.empty else None
+                if deposits_df is not None and not deposits_df.empty:
+                    did = _col(deposits_df, 'id_deposit', 'id')
+                    if did and sel.get('deposit_id') is not None:
+                        m = deposits_df[deposits_df[did].astype(float) == float(sel.get('deposit_id'))]
+                        dep_row = m.iloc[0].to_dict() if not m.empty else None
+            except Exception:
+                pass
+
+            pdf_bytes = _generate_order_pdf(sel, lines, cust_row, dep_row)
+            fname = f"order_{_safe_str(sel.get(ono) or order_id)}.pdf".replace(' ', '_')
+            st.download_button('📄 Download Order Confirmation (PDF)', data=pdf_bytes, file_name=fname, mime='application/pdf', use_container_width=True)
+
+            # Admin actions
+            if can_write():
+                st.markdown('---')
+                st.subheader('Admin actions')
+                a1, a2, a3 = st.columns(3)
+
+                with a1:
+                    if st.button('✅ Confirm order', use_container_width=True):
+                        require_admin_action()
+                        update_data('sales_orders', {
+                            'status': 'Confirmed',
+                            'confirmed_date': date.today(),
+                        }, f"{oid} = :id", {'id': order_id})
+                        st.success('Confirmed.')
+                        st.rerun()
+
+                with a2:
+                    if st.button('🚚 Fulfill (dispatch + stock out)', use_container_width=True):
+                        require_admin_action()
+                        # stock check
+                        warehouse = _safe_str(sel.get(odep))
+                        insufficient = []
+                        if lines is not None and not lines.empty:
+                            pidc = _col(lines, 'product_id')
+                            pnc = _col(lines, 'product_name')
+                            qc = _col(lines, 'quantity')
+                            for _, r in lines.iterrows():
+                                try:
+                                    pid = int(float(r.get(pidc))) if pidc and r.get(pidc) is not None else None
+                                except Exception:
+                                    pid = None
+                                pname = _safe_str(r.get(pnc))
+                                qty = float(r.get(qc) or 0)
+                                if pid is None:
+                                    # fall back: try map by name
+                                    if products_df is not None and not products_df.empty and prod_name_col and prod_id_col:
+                                        m = products_df[products_df[prod_name_col].astype(str) == pname]
+                                        if not m.empty:
+                                            pid = int(m.iloc[0][prod_id_col])
+                                if pid is None:
+                                    insufficient.append((pname, qty, 0.0))
+                                    continue
+                                avail = _available_units(pid, warehouse)
+                                if qty > avail + 1e-9:
+                                    insufficient.append((pname, qty, avail))
+
+                        if insufficient:
+                            msg = "\n".join([f"- {n}: need {q:g}, available {a:g}" for n, q, a in insufficient])
+                            st.error("Insufficient stock in this deposit:\n" + msg)
+                        else:
+                            # stock out via negative rows
+                            warehouse = _safe_str(sel.get(odep))
+                            pidc = _col(lines, 'product_id')
+                            pnc = _col(lines, 'product_name')
+                            qc = _col(lines, 'quantity')
+                            for _, r in lines.iterrows():
+                                pid = None
+                                try:
+                                    pid = int(float(r.get(pidc))) if pidc and r.get(pidc) is not None else None
+                                except Exception:
+                                    pid = None
+                                pname = _safe_str(r.get(pnc))
+                                qty = float(r.get(qc) or 0)
+                                if pid is None:
+                                    if products_df is not None and not products_df.empty and prod_name_col and prod_id_col:
+                                        m = products_df[products_df[prod_name_col].astype(str) == pname]
+                                        if not m.empty:
+                                            pid = int(m.iloc[0][prod_id_col])
+                                insert_data('composite_inventory', {
+                                    'composite_id': pid,
+                                    'composite_name': pname,
+                                    'warehouse': warehouse,
+                                    'quantity_units': -float(qty),
+                                })
+
+                            update_data('sales_orders', {
+                                'status': 'Fulfilled',
+                                'fulfilled_date': date.today(),
+                            }, f"{oid} = :id", {'id': order_id})
+                            st.success('Fulfilled and stock updated.')
+                            st.rerun()
+
+                with a3:
+                    if st.button('🛑 Cancel order', use_container_width=True):
+                        require_admin_action()
+                        update_data('sales_orders', {
+                            'status': 'Cancelled',
+                        }, f"{oid} = :id", {'id': order_id})
+                        st.success('Cancelled.')
+                        st.rerun()
+
 
 elif page == "Purchases":
     st.title("🛒 Purchases & Inventory Management")
