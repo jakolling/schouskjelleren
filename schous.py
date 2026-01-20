@@ -94,15 +94,15 @@ def _to_python_scalar(value):
 
     return f"<span class='status-badge {cls}'>{s}</span>"
 def _auth_users():
-    # Expected structure in secrets:
-    # [auth]
-    #   [auth.credentials]
-    #     [auth.credentials.usernames]
-    #       [auth.credentials.usernames.<username>]
-    #       name = "..."
-    #       password = "$2b$12$..."  # bcrypt hash
-    #       role = "admin" | "viewer"
-    return st.secrets["auth"]["credentials"]["usernames"]
+    """Return configured users from Streamlit secrets (optional).
+
+    If auth is not configured, returns an empty dict and the app will run
+    in guest visualization mode only.
+    """
+    try:
+        return st.secrets["auth"]["credentials"]["usernames"]
+    except Exception:
+        return {}
 
 def _check_password(plain: str, hashed: str) -> bool:
     try:
@@ -110,83 +110,82 @@ def _check_password(plain: str, hashed: str) -> bool:
     except Exception:
         return False
 
-def require_login():
-    """Username/password login.
+def auth_sidebar():
+    """Optional admin login + session mode control.
 
-    This app supports a *Visualization mode* (read-only) session:
-    - users can browse and export reports
-    - all INSERT/UPDATE/DELETE are blocked (even for admins)
+    Default behavior (no login):
+      - Guest access
+      - Visualization mode ON (read-only)
 
-    On Streamlit Cloud, this is handy when you want to share the app broadly
-    without risking accidental edits.
+    If an admin logs in:
+      - Visualization mode can be toggled off to enable edits
     """
 
-    # If already logged in, show quick status + logout
-    if st.session_state.get("logged_in"):
-        with st.sidebar:
+    # Default to guest visualization mode
+    if not st.session_state.get("logged_in"):
+        st.session_state.setdefault("visualization_mode", True)
+
+    with st.sidebar:
+        st.markdown("### Session")
+
+        if st.session_state.get("logged_in"):
+            role = st.session_state.get("auth_role", "viewer")
+            name = st.session_state.get("auth_name", "user")
             mode = "Visualization" if is_visualization_mode() else "Edit"
-            st.caption(
-                f"Signed in as: {st.session_state.get('auth_name')} ({st.session_state.get('auth_role')})"
-            )
+
+            st.caption(f"Signed in as: {name} ({role})")
             st.caption(f"Mode: {mode}")
 
-            # Allow admins to switch modes after login
-            if st.session_state.get("auth_role") == "admin":
+            if role == "admin":
                 st.toggle(
                     "👁️ Visualization mode",
                     key="visualization_mode",
                     help="Read-only: disables all database writes for this session.",
                 )
             else:
-                # Viewers are always read-only
                 st.session_state["visualization_mode"] = True
 
             if st.button("🚪 Sign out"):
                 for k in ["logged_in", "auth_user", "auth_name", "auth_role", "visualization_mode"]:
                     st.session_state.pop(k, None)
+                # back to guest visualization
+                st.session_state["visualization_mode"] = True
                 st.rerun()
-        return
 
-    st.title("🔐 Login")
-    st.write("Enter your username and password to access the app.")
+        else:
+            # Guest
+            st.caption("Signed in as: Guest")
+            st.caption("Mode: Visualization (read-only)")
 
-    with st.form("login_form", clear_on_submit=False):
-        username = st.text_input("Username", value="", placeholder="ex: admin")
-        password = st.text_input("Password", value="", type="password")
+            users = _auth_users()
+            if users:
+                with st.expander("Admin login", expanded=False):
+                    with st.form("admin_login_form", clear_on_submit=False):
+                        username = st.text_input("Username", value="", placeholder="ex: admin")
+                        password = st.text_input("Password", value="", type="password")
+                        submitted = st.form_submit_button("Sign in")
 
-        c1, c2 = st.columns(2)
-        with c1:
-            submitted = st.form_submit_button("Sign in")
-        with c2:
-            submitted_viz = st.form_submit_button("👁️ Sign in (Visualization mode)")
+                    if submitted:
+                        if username not in users:
+                            st.error("Invalid username or password.")
+                            st.stop()
+                        user_cfg = users[username]
+                        if not _check_password(password, user_cfg.get("password", "")):
+                            st.error("Invalid username or password.")
+                            st.stop()
 
-    if not (submitted or submitted_viz):
-        st.stop()
+                        role = user_cfg.get("role", "viewer")
+                        st.session_state["logged_in"] = True
+                        st.session_state["auth_user"] = username
+                        st.session_state["auth_name"] = user_cfg.get("name", username)
+                        st.session_state["auth_role"] = role
 
-    users = _auth_users()
-    if username not in users:
-        st.error("Invalid username or password.")
-        st.stop()
-
-    user_cfg = users[username]
-    if not _check_password(password, user_cfg.get("password", "")):
-        st.error("Invalid username or password.")
-        st.stop()
-
-    role = user_cfg.get("role", "viewer")
-
-    st.session_state["logged_in"] = True
-    st.session_state["auth_user"] = username
-    st.session_state["auth_name"] = user_cfg.get("name", username)
-    st.session_state["auth_role"] = role
-
-    # Visualization mode rules:
-    # - If user clicked the visualization button -> force read-only for this session
-    # - If user isn't admin -> always read-only
-    st.session_state["visualization_mode"] = bool(submitted_viz) or (role != "admin")
-
-    st.success("Signed in!" + (" (Visualization mode)" if st.session_state["visualization_mode"] else ""))
-    st.rerun()
+                        # viewers remain read-only; admins default to edit mode
+                        st.session_state["visualization_mode"] = (role != "admin")
+                        st.success("Signed in!")
+                        st.rerun()
+            else:
+                st.info("Admin login is not configured (missing [auth] in secrets).")
 
 DEFAULT_SQLITE_FILE = os.getenv("SQLITE_FILE", "brewery_database.db")
 
@@ -2286,8 +2285,8 @@ def check_supplier_usage(supplier_name):
 # -----------------------------
 # UI CONFIG
 # -----------------------------
-# Exigir login (viewer/admin) antes de carregar o app
-require_login()
+# Optional admin login (default: guest visualization mode)
+auth_sidebar()
 
 
 # Estilos CSS
@@ -2715,14 +2714,48 @@ def handle_delete_confirmation():
 if st.session_state.delete_confirmation["type"] in ["ingredient", "supplier", "brewery", "recipe"]:
     handle_delete_confirmation()
 
+
+# -----------------------------
+# Reset de estado ao trocar de aba (página)
+# -----------------------------
+# O Streamlit mantém st.session_state entre reruns. Isso é útil, mas aqui queremos
+# que o estado de edição/formulários NÃO fique preso quando o usuário navega.
+# Então, sempre que a página muda, apagamos as chaves não essenciais.
+_PERSISTENT_SESSION_KEYS = {
+    # auth
+    "logged_in", "auth_user", "auth_name", "auth_role", "visualization_mode",
+    # navegação
+    "page", "_last_page",
+}
+
+def _reset_non_persistent_state():
+    for k in list(st.session_state.keys()):
+        if k not in _PERSISTENT_SESSION_KEYS:
+            try:
+                del st.session_state[k]
+            except Exception:
+                pass
+
+
+def _on_page_change():
+    prev = st.session_state.get("_last_page")
+    cur = st.session_state.get("page")
+    # Só limpa quando realmente mudou
+    if prev is not None and cur != prev:
+        _reset_non_persistent_state()
+    st.session_state["_last_page"] = cur
+
+
 # -----------------------------
 # Navegação
 # -----------------------------
 page = st.sidebar.radio("Navigation", [
     "Dashboard", "Breweries", "Ingredients", "Products", "Purchases", 
     "Recipes", "Production", "Calendar"
-], key="page")
+], key="page", on_change=_on_page_change)
 st.sidebar.markdown("---")
+if "_last_page" not in st.session_state:
+    st.session_state["_last_page"] = page
 st.sidebar.info(f"👤 Role: {st.session_state.get('auth_role','viewer')} | Mode: {'Visualization' if is_visualization_mode() else 'Edit'}")
 
 # -----------------------------
