@@ -1,4 +1,4 @@
-a# Brewery Manager - Multi-user Streamlit app (Postgres/Neon)
+# Brewery Manager - Multi-user Streamlit app (Postgres/Neon)
 import streamlit as st
 import bcrypt
 import pandas as pd
@@ -9618,3 +9618,4 @@ elif page == "Calendar":
 # -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.caption("Brewery Manager v2.0 • Multiusuário (Postgres/SQLite)")
+
