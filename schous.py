@@ -5496,11 +5496,28 @@ elif page == "Orders":
                             warehouse = _safe_str(dep_rec.get(dep_name_col))
                             avail = _available_units(pid, warehouse)
                             st.caption(f"Available in deposit: {avail:g} units")
+                            # Warn if product is not available in this deposit
+                            if avail <= 0:
+                                st.warning("⚠️ Este produto não tem estoque no depósito selecionado. Você pode adicionar ao pedido, mas não será possível dar baixa/expedir a partir deste depósito até que haja estoque.")
                     except Exception:
                         pass
 
             with col2:
                 qty = st.number_input('Quantity', min_value=0.0, value=float(st.session_state.get(f'so_qty_{i}', 0.0) or 0.0), step=1.0, key=f'so_qty_{i}')
+
+                # Warn if quantity exceeds available stock (when deposit + product selected)
+                if prod_label and dep_label and qty > 0:
+                    try:
+                        prow = product_label_to_row.get(prod_label)
+                        dep_rec = dep_label_to_rec.get(dep_label)
+                        if prow is not None and dep_rec is not None:
+                            pid = int(float(prow.get(prod_id_col)))
+                            warehouse = _safe_str(dep_rec.get(dep_name_col))
+                            avail = _available_units(pid, warehouse)
+                            if qty > avail + 1e-9:
+                                st.warning(f"⚠️ A quantidade solicitada ({qty:g}) é maior do que o estoque disponível ({avail:g}) neste depósito.")
+                    except Exception:
+                        pass
 
             with col3:
                 unit_price = st.number_input('Unit price', min_value=0.0, value=float(st.session_state.get(f'so_price_{i}', 0.0) or 0.0), step=1.0, format='%.2f', key=f'so_price_{i}')
