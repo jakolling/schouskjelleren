@@ -5407,136 +5407,203 @@ elif page == "Orders":
         if not cust_records:
             st.info('Add at least one customer first.')
 
-        if 'so_lines' not in st.session_state:
-            st.session_state['so_lines'] = pd.DataFrame([{
-                'product': '',
-                'quantity': 0.0,
-                'unit_price': 0.0,
-            }])
+        # Stable labels for selectboxes (avoid dict objects as options)
+        dep_label_to_rec = {}
+        dep_labels = []
+        if dep_records and dep_id_col and dep_name_col:
+            for r in dep_records:
+                lab = f"{_safe_str(r.get(dep_name_col))} (#{_safe_str(r.get(dep_id_col))})"
+                dep_labels.append(lab)
+                dep_label_to_rec[lab] = r
 
-        with st.form('order_create', clear_on_submit=False):
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                cust = st.selectbox('Customer*', cust_records, format_func=lambda r: _safe_str(r.get(cust_name_col,'')) if cust_name_col else str(r)) if cust_records else None
-            with c2:
-                dep = st.selectbox('Deposit*', dep_records, format_func=lambda r: _safe_str(r.get(dep_name_col,'')) if dep_name_col else str(r)) if dep_records else None
-            with c3:
-                order_date = st.date_input('Order date', value=date.today())
-            with c4:
-                delivery_date = st.date_input('Delivery date', value=date.today())
+        cust_label_to_rec = {}
+        cust_labels = []
+        if cust_records and cust_id_col and cust_name_col:
+            for r in cust_records:
+                lab = f"{_safe_str(r.get(cust_name_col))} (#{_safe_str(r.get(cust_id_col))})"
+                cust_labels.append(lab)
+                cust_label_to_rec[lab] = r
 
-            c5, c6 = st.columns([1,3])
-            with c5:
-                currency = st.selectbox('Currency', ['NOK','EUR','USD'], index=0)
-            with c6:
-                notes = st.text_area('Notes', height=80)
+        product_label_to_row = {}
+        product_labels = []
+        if products_df is not None and (not products_df.empty) and prod_name_col and prod_id_col:
+            for _, r in products_df.sort_values(prod_name_col).iterrows():
+                name = _safe_str(r.get(prod_name_col))
+                pid = _safe_str(r.get(prod_id_col))
+                unit = _safe_str(r.get(prod_unit_col) or 'unit')
+                lab = f"{name} [{unit}] (#{pid})"
+                product_labels.append(lab)
+                product_label_to_row[lab] = r
 
-            # Lines editor
-            product_options = products_df[prod_name_col].dropna().astype(str).tolist() if products_df is not None and not products_df.empty and prod_name_col else []
+        def _reset_order_form():
+            # Header
+            for k in [
+                'so_customer_label', 'so_deposit_label', 'so_order_date', 'so_delivery_date',
+                'so_currency', 'so_notes'
+            ]:
+                st.session_state.pop(k, None)
+            # Lines
+            count = int(st.session_state.get('so_line_count', 1) or 1)
+            for i in range(max(count, 1)):
+                for k in [f'so_prod_{i}', f'so_qty_{i}', f'so_price_{i}']:
+                    st.session_state.pop(k, None)
+            st.session_state['so_line_count'] = 1
 
-            st.markdown('#### Items')
-            edited = st.data_editor(
-                st.session_state['so_lines'],
-                use_container_width=True,
-                num_rows='dynamic',
-                column_config={
-                    'product': st.column_config.SelectboxColumn('Product', options=[''] + product_options),
-                    'quantity': st.column_config.NumberColumn('Quantity', min_value=0.0, step=1.0),
-                    'unit_price': st.column_config.NumberColumn('Unit price', min_value=0.0, step=1.0, format='%.2f'),
-                }
-            )
-            st.session_state['so_lines'] = edited
+        st.markdown('---')
+        st.markdown('### Order header')
+        h1, h2, h3, h4 = st.columns(4)
+        with h1:
+            cust_label = st.selectbox('Customer*', [''] + cust_labels, key='so_customer_label')
+        with h2:
+            dep_label = st.selectbox('Deposit*', [''] + dep_labels, key='so_deposit_label')
+        with h3:
+            order_date = st.date_input('Order date', value=st.session_state.get('so_order_date', date.today()), key='so_order_date')
+        with h4:
+            delivery_date = st.date_input('Delivery date', value=st.session_state.get('so_delivery_date', date.today()), key='so_delivery_date')
 
-            submit = st.form_submit_button('Create order', type='primary', use_container_width=True)
+        h5, h6 = st.columns([1, 3])
+        with h5:
+            currency = st.selectbox('Currency', ['NOK', 'EUR', 'USD'], index=0, key='so_currency')
+        with h6:
+            notes = st.text_area('Notes', height=80, key='so_notes')
 
-        # live preview totals
-        lines_clean = st.session_state.get('so_lines', pd.DataFrame()).copy()
-        if not lines_clean.empty:
-            lines_clean = lines_clean[lines_clean['product'].astype(str).str.strip() != '']
-            try:
-                lines_clean['quantity'] = pd.to_numeric(lines_clean['quantity'], errors='coerce').fillna(0.0)
-                lines_clean['unit_price'] = pd.to_numeric(lines_clean['unit_price'], errors='coerce').fillna(0.0)
-                lines_clean['line_total'] = lines_clean['quantity'] * lines_clean['unit_price']
-                subtotal_preview = float(lines_clean['line_total'].sum() or 0)
-            except Exception:
-                subtotal_preview = 0.0
-        else:
-            subtotal_preview = 0.0
-        st.caption(f"Subtotal preview: {subtotal_preview:.2f} {currency if 'currency' in locals() else 'NOK'}")
+        st.markdown('---')
+        st.subheader('🧾 Items')
 
-        if submit:
-            require_admin_action()
-            if not (cust and dep):
-                st.error('Customer and deposit are required.')
-            else:
-                if lines_clean.empty:
-                    st.error('Add at least one item.')
-                else:
-                    # resolve ids
-                    cust_id = int(cust.get(cust_id_col)) if cust_id_col else None
-                    cust_name = _safe_str(cust.get(cust_name_col)) if cust_name_col else ''
-                    dep_id = int(dep.get(dep_id_col)) if dep_id_col else None
-                    dep_name = _safe_str(dep.get(dep_name_col)) if dep_name_col else ''
+        # Dynamic line items (similar to Recipes -> Ingredients)
+        st.session_state.setdefault('so_line_count', 1)
 
-                    # order no
+        line_items = []
+
+        for i in range(int(st.session_state.get('so_line_count', 1) or 1)):
+            st.write(f"**Item {i+1}**")
+            col1, col2, col3, col4 = st.columns([4, 2, 2, 1])
+
+            with col1:
+                prod_label = st.selectbox(
+                    'Product',
+                    [''] + product_labels,
+                    key=f'so_prod_{i}',
+                )
+
+                # Stock hint (when deposit + product selected)
+                if prod_label and dep_label:
                     try:
-                        next_id = 1
-                        if orders_df is not None and not orders_df.empty:
-                            oid = _col(orders_df, 'id_sales_order', 'id')
-                            if oid:
-                                next_id = int(pd.to_numeric(orders_df[oid], errors='coerce').max() or 0) + 1
-                        order_no = f"SO-{date.today().strftime('%Y%m%d')}-{next_id:04d}"
+                        prow = product_label_to_row.get(prod_label)
+                        dep_rec = dep_label_to_rec.get(dep_label)
+                        if prow is not None and dep_rec is not None:
+                            pid = int(float(prow.get(prod_id_col)))
+                            warehouse = _safe_str(dep_rec.get(dep_name_col))
+                            avail = _available_units(pid, warehouse)
+                            st.caption(f"Available in deposit: {avail:g} units")
                     except Exception:
-                        order_no = f"SO-{date.today().strftime('%Y%m%d')}-{int(datetime.utcnow().timestamp())%100000:05d}"
+                        pass
 
-                    # build items rows with product_id + unit
-                    prod_map = {}
-                    if products_df is not None and not products_df.empty and prod_name_col and prod_id_col:
-                        for _, r in products_df.iterrows():
-                            prod_map[str(r.get(prod_name_col))] = {
-                                'id': int(r.get(prod_id_col)),
-                                'unit': _safe_str(r.get(prod_unit_col) or 'unit')
-                            }
+            with col2:
+                qty = st.number_input('Quantity', min_value=0.0, value=float(st.session_state.get(f'so_qty_{i}', 0.0) or 0.0), step=1.0, key=f'so_qty_{i}')
 
-                    subtotal = float(lines_clean['line_total'].sum() or 0)
+            with col3:
+                unit_price = st.number_input('Unit price', min_value=0.0, value=float(st.session_state.get(f'so_price_{i}', 0.0) or 0.0), step=1.0, format='%.2f', key=f'so_price_{i}')
 
-                    order_id = insert_data('sales_orders', {
-                        'order_no': order_no,
-                        'order_date': order_date,
-                        'delivery_date': delivery_date,
-                        'customer_id': cust_id,
-                        'customer_name': cust_name,
-                        'deposit_id': dep_id,
-                        'deposit_name': dep_name,
-                        'status': 'Draft',
-                        'currency': currency,
-                        'subtotal': subtotal,
-                        'total': subtotal,
-                        'notes': notes,
-                        'created_by': st.session_state.get('auth_user','admin'),
-                    })
+                if prod_label and qty > 0:
+                    st.write(f"**Line total:** {(qty * unit_price):.2f} {currency}")
 
-                    for _, r in lines_clean.iterrows():
-                        pname = str(r.get('product') or '').strip()
-                        qty = float(r.get('quantity') or 0)
-                        up = float(r.get('unit_price') or 0)
-                        if not pname or qty <= 0:
-                            continue
-                        meta = prod_map.get(pname, {})
-                        insert_data('sales_order_items', {
-                            'sales_order_id': int(order_id) if order_id is not None else None,
-                            'product_id': meta.get('id'),
-                            'product_name': pname,
-                            'quantity': qty,
-                            'unit': meta.get('unit', 'unit'),
-                            'unit_price': up,
-                            'line_total': float(qty*up),
-                        })
+            with col4:
+                if i > 0:
+                    if st.button('🗑️', key=f'so_remove_{i}'):
+                        # Remove the last line (simple + predictable)
+                        st.session_state['so_line_count'] = max(1, int(st.session_state.get('so_line_count', 1)) - 1)
+                        st.rerun()
 
-                    st.success(f"✅ Order created: {order_no}")
-                    # reset lines
-                    st.session_state['so_lines'] = pd.DataFrame([{'product':'','quantity':0.0,'unit_price':0.0}])
-                    st.rerun()
+            if prod_label and qty > 0:
+                prow = product_label_to_row.get(prod_label)
+                pname = _safe_str(prow.get(prod_name_col)) if prow is not None else prod_label
+                unit = _safe_str(prow.get(prod_unit_col) or 'unit') if prow is not None else 'unit'
+                line_items.append({
+                    'product_label': prod_label,
+                    'product_name': pname,
+                    'product_id': int(float(prow.get(prod_id_col))) if (prow is not None and prod_id_col) else None,
+                    'unit': unit,
+                    'quantity': float(qty),
+                    'unit_price': float(unit_price),
+                    'line_total': float(qty * unit_price),
+                })
+
+        if st.button('➕ Add another product', key='so_add_line'):
+            st.session_state['so_line_count'] = int(st.session_state.get('so_line_count', 1) or 1) + 1
+            st.rerun()
+
+        subtotal_preview = float(sum(li['line_total'] for li in line_items) or 0.0)
+        st.caption(f"Subtotal preview: {subtotal_preview:.2f} {currency}")
+
+        a1, a2 = st.columns([2, 1])
+        with a1:
+            create = st.button('Create order', type='primary', use_container_width=True, key='so_create_btn')
+        with a2:
+            if st.button('Reset form', use_container_width=True, key='so_reset_btn'):
+                _reset_order_form()
+                st.rerun()
+
+        if create:
+            require_admin_action()
+
+            if not cust_label or not dep_label:
+                st.error('Customer and deposit are required.')
+                st.stop()
+            if not line_items:
+                st.error('Add at least one item (product + quantity).')
+                st.stop()
+
+            cust = cust_label_to_rec.get(cust_label)
+            dep = dep_label_to_rec.get(dep_label)
+            cust_id = int(cust.get(cust_id_col)) if (cust and cust_id_col and cust.get(cust_id_col) is not None) else None
+            cust_name = _safe_str(cust.get(cust_name_col)) if (cust and cust_name_col) else ''
+            dep_id = int(dep.get(dep_id_col)) if (dep and dep_id_col and dep.get(dep_id_col) is not None) else None
+            dep_name = _safe_str(dep.get(dep_name_col)) if (dep and dep_name_col) else ''
+
+            # Order number
+            try:
+                next_id = 1
+                if orders_df is not None and not orders_df.empty:
+                    oid = _col(orders_df, 'id_sales_order', 'id')
+                    if oid:
+                        next_id = int(pd.to_numeric(orders_df[oid], errors='coerce').max() or 0) + 1
+                order_no = f"SO-{date.today().strftime('%Y%m%d')}-{next_id:04d}"
+            except Exception:
+                order_no = f"SO-{date.today().strftime('%Y%m%d')}-{int(datetime.utcnow().timestamp())%100000:05d}"
+
+            subtotal = float(sum(li['line_total'] for li in line_items) or 0.0)
+
+            order_id = insert_data('sales_orders', {
+                'order_no': order_no,
+                'order_date': order_date,
+                'delivery_date': delivery_date,
+                'customer_id': cust_id,
+                'customer_name': cust_name,
+                'deposit_id': dep_id,
+                'deposit_name': dep_name,
+                'status': 'Draft',
+                'currency': currency,
+                'subtotal': subtotal,
+                'total': subtotal,
+                'notes': notes,
+                'created_by': st.session_state.get('auth_user', 'admin'),
+            })
+
+            for li in line_items:
+                insert_data('sales_order_items', {
+                    'sales_order_id': int(order_id) if order_id is not None else None,
+                    'product_id': li.get('product_id'),
+                    'product_name': li.get('product_name'),
+                    'quantity': li.get('quantity'),
+                    'unit': li.get('unit', 'unit'),
+                    'unit_price': li.get('unit_price'),
+                    'line_total': li.get('line_total'),
+                })
+
+            st.success(f"✅ Order created: {order_no}")
+            _reset_order_form()
+            st.rerun()
 
     with tab_list:
         st.subheader('Orders list')
@@ -9618,4 +9685,3 @@ elif page == "Calendar":
 # -----------------------------
 st.sidebar.markdown("---")
 st.sidebar.caption("Brewery Manager v2.0 • Multiusuário (Postgres/SQLite)")
-
