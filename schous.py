@@ -111,12 +111,38 @@ def _check_password(plain: str, hashed: str) -> bool:
         return False
 
 def require_login():
+    """Username/password login.
+
+    This app supports a *Visualization mode* (read-only) session:
+    - users can browse and export reports
+    - all INSERT/UPDATE/DELETE are blocked (even for admins)
+
+    On Streamlit Cloud, this is handy when you want to share the app broadly
+    without risking accidental edits.
+    """
+
     # If already logged in, show quick status + logout
     if st.session_state.get("logged_in"):
         with st.sidebar:
-            st.caption(f"Signed in as: {st.session_state.get('auth_name')} ({st.session_state.get('auth_role')})")
+            mode = "Visualization" if is_visualization_mode() else "Edit"
+            st.caption(
+                f"Signed in as: {st.session_state.get('auth_name')} ({st.session_state.get('auth_role')})"
+            )
+            st.caption(f"Mode: {mode}")
+
+            # Allow admins to switch modes after login
+            if st.session_state.get("auth_role") == "admin":
+                st.toggle(
+                    "👁️ Visualization mode",
+                    key="visualization_mode",
+                    help="Read-only: disables all database writes for this session.",
+                )
+            else:
+                # Viewers are always read-only
+                st.session_state["visualization_mode"] = True
+
             if st.button("🚪 Sign out"):
-                for k in ["logged_in","auth_user","auth_name","auth_role"]:
+                for k in ["logged_in", "auth_user", "auth_name", "auth_role", "visualization_mode"]:
                     st.session_state.pop(k, None)
                 st.rerun()
         return
@@ -127,9 +153,14 @@ def require_login():
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("Username", value="", placeholder="ex: admin")
         password = st.text_input("Password", value="", type="password")
-        submitted = st.form_submit_button("Sign in")
 
-    if not submitted:
+        c1, c2 = st.columns(2)
+        with c1:
+            submitted = st.form_submit_button("Sign in")
+        with c2:
+            submitted_viz = st.form_submit_button("👁️ Sign in (Visualization mode)")
+
+    if not (submitted or submitted_viz):
         st.stop()
 
     users = _auth_users()
@@ -138,15 +169,23 @@ def require_login():
         st.stop()
 
     user_cfg = users[username]
-    if not _check_password(password, user_cfg.get("password","")):
+    if not _check_password(password, user_cfg.get("password", "")):
         st.error("Invalid username or password.")
         st.stop()
+
+    role = user_cfg.get("role", "viewer")
 
     st.session_state["logged_in"] = True
     st.session_state["auth_user"] = username
     st.session_state["auth_name"] = user_cfg.get("name", username)
-    st.session_state["auth_role"] = user_cfg.get("role", "viewer")
-    st.success("Signed in!")
+    st.session_state["auth_role"] = role
+
+    # Visualization mode rules:
+    # - If user clicked the visualization button -> force read-only for this session
+    # - If user isn't admin -> always read-only
+    st.session_state["visualization_mode"] = bool(submitted_viz) or (role != "admin")
+
+    st.success("Signed in!" + (" (Visualization mode)" if st.session_state["visualization_mode"] else ""))
     st.rerun()
 
 DEFAULT_SQLITE_FILE = os.getenv("SQLITE_FILE", "brewery_database.db")
@@ -243,12 +282,57 @@ def get_table_columns_cached(table_name: str, dialect: str | None = None) -> lis
     cols = _get_table_columns_cached(table_name, d)
     return cols if cols else []
 
-def is_admin() -> bool:
+def _secrets_read_only_default() -> bool:
+    """Optional default read-only mode via Streamlit secrets/env.
+
+    Streamlit Cloud secrets example:
+
+        [app]
+        read_only = true
+
+    Env vars accepted:
+      - VISUALIZATION_ONLY=1
+      - READ_ONLY=1
+    """
+    try:
+        if "app" in st.secrets and isinstance(st.secrets["app"], dict):
+            v = st.secrets["app"].get("read_only")
+            if isinstance(v, bool):
+                return v
+    except Exception:
+        pass
+
+    env = (os.getenv("VISUALIZATION_ONLY") or os.getenv("READ_ONLY") or "").strip().lower()
+    return env in {"1", "true", "yes", "y", "on"}
+
+
+def is_visualization_mode() -> bool:
+    """Session-level visualization (read-only) mode."""
+    default = _secrets_read_only_default()
+    return bool(st.session_state.get("visualization_mode", default))
+
+
+def is_admin_role() -> bool:
+    """Whether the authenticated user *role* is admin (independent of mode)."""
     return st.session_state.get("auth_role") == "admin"
 
+
+def can_write() -> bool:
+    """True only when the user is an admin AND not in visualization mode."""
+    return is_admin_role() and (not is_visualization_mode())
+
+
+def is_admin() -> bool:
+    """Backwards-compat: in this app, `is_admin()` means 'has write permissions'."""
+    return can_write()
+
+
 def require_admin_action():
-    """Bloqueio forte: viewers nunca escrevem no banco."""
-    if not is_admin():
+    """Strong guard: blocks all DB writes unless `can_write()` is True."""
+    if is_visualization_mode():
+        st.error("🔒 Visualization mode: changes are disabled in this session.")
+        st.stop()
+    if not is_admin_role():
         st.error("🔒 Admin-only action.")
         st.stop()
 
@@ -2639,7 +2723,7 @@ page = st.sidebar.radio("Navigation", [
     "Recipes", "Production", "Calendar"
 ], key="page")
 st.sidebar.markdown("---")
-st.sidebar.info(f"👤 Role: {st.session_state.get('auth_role','viewer')}")
+st.sidebar.info(f"👤 Role: {st.session_state.get('auth_role','viewer')} | Mode: {'Visualization' if is_visualization_mode() else 'Edit'}")
 
 # -----------------------------
 # Dashboard Page
