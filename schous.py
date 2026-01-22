@@ -2271,6 +2271,102 @@ def update_purchase_order_fast(
     bump_db_version()
 
 
+
+
+def delete_stock_movement_fast(stock_move_id: int, *, also_reverse_stock: bool = True) -> tuple[bool, str]:
+    """Delete one row from stock_movements.
+
+    If also_reverse_stock=True, it will ALSO reverse its inventory impact by applying:
+        ingredients.stock = ingredients.stock - movement.delta_qty
+
+    Notes:
+      - This is an admin-only action.
+      - If the movement references another entity (PO / production event), deleting it will NOT delete that entity.
+    """
+    require_admin_action()
+    engine = get_engine()
+    dialect = engine.dialect.name.lower()
+
+    # Resolve PK column for stock_movements
+    sm_cols = set(get_table_columns_cached('stock_movements', dialect) or [])
+    sm_id_col = 'id_stock_move' if 'id_stock_move' in sm_cols else ('id' if 'id' in sm_cols else None)
+
+    # Resolve stock column for ingredients
+    ing_cols = set(get_table_columns_cached('ingredients', dialect) or [])
+    ing_stock_col = 'stock' if 'stock' in ing_cols else ('quantity_in_stock' if 'quantity_in_stock' in ing_cols else None)
+    has_last_updated = ('last_updated' in ing_cols)
+
+    with engine.begin() as conn:
+        # Fetch movement row (best effort across schemas)
+        row = None
+        try:
+            if sm_id_col:
+                row = conn.execute(
+                    sql_text(f"SELECT * FROM stock_movements WHERE {sm_id_col} = :id"),
+                    {'id': int(stock_move_id)},
+                ).mappings().fetchone()
+        except Exception:
+            row = None
+
+        # Fallback if schema uses a different PK name
+        if row is None and not sm_id_col:
+            try:
+                row = conn.execute(
+                    sql_text("SELECT * FROM stock_movements WHERE id_stock_move = :id"),
+                    {'id': int(stock_move_id)},
+                ).mappings().fetchone()
+            except Exception:
+                row = None
+
+        if row is None:
+            return False, "Movement not found."
+
+        ing_name = str(row.get('ingredient_name') or row.get('ingredient') or '')
+        try:
+            delta = float(row.get('delta_qty') or row.get('qty') or row.get('quantity') or 0.0)
+        except Exception:
+            delta = 0.0
+
+        # Reverse inventory impact
+        if also_reverse_stock and ing_name and ing_stock_col and abs(delta) > 1e-12:
+            try:
+                if has_last_updated:
+                    conn.execute(
+                        sql_text(
+                            f"UPDATE ingredients SET {ing_stock_col} = COALESCE({ing_stock_col},0) - :d, last_updated = CURRENT_TIMESTAMP WHERE name = :n"
+                        ),
+                        {'d': float(delta), 'n': ing_name},
+                    )
+                else:
+                    conn.execute(
+                        sql_text(
+                            f"UPDATE ingredients SET {ing_stock_col} = COALESCE({ing_stock_col},0) - :d WHERE name = :n"
+                        ),
+                        {'d': float(delta), 'n': ing_name},
+                    )
+            except Exception:
+                # If we can't update stock, we still allow deleting the movement row.
+                pass
+
+        # Delete movement row
+        try:
+            if sm_id_col:
+                conn.execute(
+                    sql_text(f"DELETE FROM stock_movements WHERE {sm_id_col} = :id"),
+                    {'id': int(stock_move_id)},
+                )
+            else:
+                conn.execute(
+                    sql_text("DELETE FROM stock_movements WHERE id_stock_move = :id"),
+                    {'id': int(stock_move_id)},
+                )
+        except Exception as e:
+            return False, f"Delete failed: {e}"
+
+    bump_db_version()
+    return True, "Movement deleted."
+
+
 def delete_purchase_order_fast(po_id: int):
     """Hard-delete a purchase order + items, and reverse its inventory impact."""
     require_admin_action()
@@ -2827,6 +2923,14 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     from reportlab.lib.units import mm
     from datetime import datetime
 
+    # Optional: embed fermentation charts when readings exist
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        plt = None
+
     data2 = get_all_data()
     batches = data2.get('production_batches', pd.DataFrame())
     events = data2.get('production_events', pd.DataFrame())
@@ -3189,6 +3293,123 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
         story.append(t)
     else:
         story.append(Paragraph("<i>No events logged.</i>", small_grey))
+
+    # Fermentation readings (curve)
+    # Use the same Reading events (event_type == 'Reading') and plot Gravity/Temp/Pressure over time.
+    try:
+        dtcol = _col(ev, 'event_date') if (ev is not None and not ev.empty) else None
+        etcol = _col(ev, 'event_type', 'type') if (ev is not None and not ev.empty) else None
+        mcol = _col(ev, 'meta') if (ev is not None and not ev.empty) else None
+        ncol = _col(ev, 'notes') if (ev is not None and not ev.empty) else None
+        rpdf = pd.DataFrame()
+        if ev is not None and not ev.empty and etcol:
+            rpdf = ev[ev[etcol].astype(str).str.lower() == 'reading'].copy()
+        if rpdf is not None and not rpdf.empty:
+            if dtcol and dtcol in rpdf.columns:
+                rpdf[dtcol] = pd.to_datetime(rpdf[dtcol], errors='coerce')
+                rpdf = rpdf.sort_values(dtcol)
+
+            def _safe_json(_s):
+                try:
+                    if _s is None:
+                        return {}
+                    if isinstance(_s, dict):
+                        return _s
+                    ss = str(_s)
+                    if not ss or ss.strip().lower() in {'nan', 'none'}:
+                        return {}
+                    return json.loads(ss)
+                except Exception:
+                    return {}
+
+            if mcol and mcol in rpdf.columns:
+                metas = rpdf[mcol].apply(_safe_json)
+                rpdf['Gravity (°P)'] = metas.apply(lambda d: d.get('gravity_plato') if isinstance(d, dict) else None)
+                rpdf['Temp (°C)'] = metas.apply(lambda d: d.get('temp_c') if isinstance(d, dict) else None)
+                rpdf['Pressure (bar)'] = metas.apply(lambda d: d.get('pressure_bar') if isinstance(d, dict) else None)
+                rpdf['pH'] = metas.apply(lambda d: d.get('ph') if isinstance(d, dict) else None)
+            if ncol and ncol in rpdf.columns:
+                rpdf['Notes'] = rpdf[ncol]
+            else:
+                rpdf['Notes'] = ''
+
+            story.append(Paragraph("Fermentation readings", h2))
+
+            # Chart (optional): embed only if matplotlib is available
+            if plt is not None and dtcol and dtcol in rpdf.columns:
+                try:
+                    cdf = rpdf[[dtcol, 'Gravity (°P)', 'Temp (°C)', 'Pressure (bar)']].copy()
+                    cdf = cdf.dropna(subset=[dtcol])
+                    if not cdf.empty:
+                        for cc in ('Gravity (°P)', 'Temp (°C)', 'Pressure (bar)'):
+                            if cc in cdf.columns:
+                                cdf[cc] = pd.to_numeric(cdf[cc], errors='coerce')
+
+                        fig = plt.figure(figsize=(7.2, 2.2))
+                        ax = fig.add_subplot(111)
+                        ax.plot(cdf[dtcol], cdf['Gravity (°P)'], label='Gravity (°P)')
+                        if cdf['Temp (°C)'].notna().any():
+                            ax.plot(cdf[dtcol], cdf['Temp (°C)'], label='Temp (°C)')
+                        if cdf['Pressure (bar)'].notna().any():
+                            ax.plot(cdf[dtcol], cdf['Pressure (bar)'], label='Pressure (bar)')
+                        ax.set_xlabel('Date')
+                        ax.grid(True, alpha=0.25)
+                        ax.legend(fontsize=7, loc='best')
+                        fig.autofmt_xdate(rotation=30, ha='right')
+
+                        img_buf = io.BytesIO()
+                        fig.savefig(img_buf, format='png', dpi=160, bbox_inches='tight')
+                        plt.close(fig)
+                        img_buf.seek(0)
+
+                        img = RLImage(img_buf, width=(A4[0]-36*mm), height=42*mm)
+                        story.append(img)
+                        story.append(Spacer(1, 2*mm))
+                except Exception:
+                    pass
+
+            # Table
+            rows = [["Date/Time", "Gravity (°P)", "Temp (°C)", "Pressure (bar)", "pH", "Notes"]]
+            for _, rr in rpdf.iterrows():
+                d_raw = rr.get(dtcol, '') if dtcol else ''
+                try:
+                    d_txt = pd.to_datetime(d_raw).strftime('%Y-%m-%d %H:%M')
+                except Exception:
+                    d_txt = str(d_raw)[:16]
+                rows.append([
+                    d_txt,
+                    _fmt_num(rr.get('Gravity (°P)', ''), 2),
+                    _fmt_num(rr.get('Temp (°C)', ''), 1),
+                    _fmt_num(rr.get('Pressure (bar)', ''), 2),
+                    _fmt_num(rr.get('pH', ''), 2),
+                    _safe(rr.get('Notes', '')),
+                ])
+
+            rt = Table(rows, colWidths=[28*mm, 22*mm, 20*mm, 24*mm, 14*mm, (A4[0]-36*mm-28*mm-22*mm-20*mm-24*mm-14*mm)])
+            rt.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE", (0,0), (-1,0), 9),
+                ("FONTSIZE", (0,1), (-1,-1), 8.8),
+                ("VALIGN", (0,0), (-1,-1), "TOP"),
+                ("ALIGN", (1,1), (4,-1), "RIGHT"),
+                ("LINEBELOW", (0,0), (-1,0), 0.5, colors.lightgrey),
+                ("INNERGRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+                ("BOX", (0,0), (-1,-1), 0.5, colors.lightgrey),
+                ("LEFTPADDING", (0,0), (-1,-1), 6),
+                ("RIGHTPADDING", (0,0), (-1,-1), 6),
+                ("TOPPADDING", (0,0), (-1,-1), 4),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ]))
+            for i in range(1, len(rows)):
+                if i % 2 == 0:
+                    rt.setStyle(TableStyle([("BACKGROUND", (0,i), (-1,i), colors.Color(0.98,0.98,0.98))]))
+            story.append(rt)
+        else:
+            # Keep the section out if there are no readings
+            pass
+    except Exception:
+        pass
 
     # Consumptions
     story.append(Paragraph("Consumptions", h2))
@@ -5819,6 +6040,167 @@ elif page == "Ingredients":
                     dfh = dfh[(dfh[dcol] >= pd.Timestamp(d0)) & (dfh[dcol] <= pd.Timestamp(d1) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))]
             except Exception:
                 pass
+
+
+            # --- Admin tools: manual ADJUSTMENT + delete movement ---
+            idcol = _col(dfh, "id_stock_move", "id", "id_movement")
+
+            if can_write():
+                with st.expander("🧾 Manual stock movement: ADJUSTMENT (IN/OUT)", expanded=False):
+                    ingredients_df2 = data.get("ingredients", pd.DataFrame())
+                    ncol2 = _col(ingredients_df2, "name") if ingredients_df2 is not None else None
+                    if ingredients_df2 is None or ingredients_df2.empty or not ncol2:
+                        st.info("No ingredients found.")
+                    else:
+                        ing_label_map2 = _ingredient_name_label_map(ingredients_df2)
+                        ing_list = ingredients_df2[ncol2].dropna().astype(str).tolist()
+
+                        with st.form("stock_manual_adjustment_form", clear_on_submit=True):
+                            c1a, c2a, c3a = st.columns(3)
+                            with c1a:
+                                sel_ing = st.selectbox(
+                                    "Ingredient",
+                                    ing_list,
+                                    format_func=lambda x: ing_label_map2.get(str(x), str(x)),
+                                )
+                            with c2a:
+                                direction_adj = st.selectbox("Direction", ["IN", "OUT"], index=0)
+                            with c3a:
+                                qty_adj = st.number_input(
+                                    "Quantity",
+                                    min_value=0.0,
+                                    value=0.0,
+                                    step=0.1,
+                                    format="%.3f",
+                                )
+                            d_adj = st.date_input("Date", date.today())
+                            notes_adj = st.text_area("Notes", height=80)
+                            submit_adj = st.form_submit_button(
+                                "Record ADJUSTMENT", type="primary", use_container_width=True
+                            )
+
+                        if submit_adj:
+                            require_admin_action()
+                            if (not sel_ing) or (float(qty_adj or 0) <= 0):
+                                st.error("Select an ingredient and set a quantity > 0.")
+                            else:
+                                delta = float(qty_adj) if direction_adj == "IN" else -float(qty_adj)
+                                src = "ADJUSTMENT" if delta > 0 else "Inventory"
+                                dst = "Inventory" if delta > 0 else "ADJUSTMENT"
+                                adjust_stock_for_ingredient(
+                                    get_all_data(),
+                                    str(sel_ing),
+                                    float(delta),
+                                    reason="ADJUSTMENT",
+                                    source=src,
+                                    destination=dst,
+                                    ref_table="manual",
+                                    notes=str(notes_adj or ""),
+                                    movement_date=pd.Timestamp(d_adj),
+                                )
+                                st.success("✅ ADJUSTMENT recorded.")
+                                st.rerun()
+
+                with st.expander("🗑️ Delete a stock movement (admin)", expanded=False):
+                    if not idcol or idcol not in dfh.columns:
+                        st.warning(
+                            "This stock_movements table has no id column loaded, so delete-by-id is unavailable."
+                        )
+                    else:
+                        # Use the currently filtered view (max 500 rows)
+                        try:
+                            pick = dfh.copy()
+                            if dcol and dcol in pick.columns:
+                                pick = pick.sort_values(by=dcol, ascending=False)
+                            pick = pick.head(500)
+                        except Exception:
+                            pick = dfh.head(500)
+
+                        recs = pick.to_dict("records")
+
+                        def _mv_label(r):
+                            _id = r.get(idcol, "")
+                            _date = ""
+                            try:
+                                if dcol and r.get(dcol) is not None and str(r.get(dcol)) != "nan":
+                                    _date = str(pd.to_datetime(r.get(dcol), errors="coerce"))[:10]
+                            except Exception:
+                                _date = str(r.get(dcol) or "")[:10] if dcol else ""
+                            _ing = str(r.get(ingcol) or "")
+                            _dir = str(r.get(dircol) or "").upper()
+                            _qty = r.get(qtycol) if qtycol else ""
+                            try:
+                                _qty = f"{float(_qty):g}"
+                            except Exception:
+                                _qty = str(_qty)
+                            _unit = str(r.get(unitcol) or "")
+                            _reason = str(r.get(reasoncol) or "")
+                            return f"#{_id} • {_date} • {_ing} • {_dir} {_qty} {_unit} • {_reason}"
+
+                        sel_mv = st.selectbox(
+                            "Select movement",
+                            recs,
+                            format_func=_mv_label,
+                            key="stock_hist_delete_sel",
+                        )
+                        also_reverse = st.checkbox(
+                            "Also reverse its inventory impact",
+                            value=True,
+                            key="stock_hist_delete_reverse",
+                        )
+
+                        confirm_key = "stock_hist_delete_confirm"
+                        if st.button(
+                            "🗑️ Delete selected movement",
+                            type="secondary",
+                            use_container_width=True,
+                            key="stock_hist_delete_btn",
+                        ):
+                            st.session_state[confirm_key] = True
+
+                        if st.session_state.get(confirm_key, False):
+                            st.warning(
+                                "This will permanently delete the selected movement. "
+                                "If it came from a Purchase Order or Production event, deleting it won't delete the original transaction."
+                            )
+                            cdel1, cdel2 = st.columns(2)
+                            with cdel1:
+                                if st.button(
+                                    "✅ Yes, delete it",
+                                    type="primary",
+                                    use_container_width=True,
+                                    key="stock_hist_delete_yes",
+                                ):
+                                    require_admin_action()
+                                    mv_id = sel_mv.get(idcol)
+                                    try:
+                                        mv_id_int = int(mv_id)
+                                    except Exception:
+                                        mv_id_int = None
+
+                                    if mv_id_int is None:
+                                        st.error("Invalid movement id.")
+                                    else:
+                                        ok, msg = delete_stock_movement_fast(
+                                            mv_id_int, also_reverse_stock=bool(also_reverse)
+                                        )
+                                        if ok:
+                                            st.success("✅ " + str(msg))
+                                            st.session_state[confirm_key] = False
+                                            st.rerun()
+                                        else:
+                                            st.error(str(msg))
+                            with cdel2:
+                                if st.button(
+                                    "Cancel",
+                                    use_container_width=True,
+                                    key="stock_hist_delete_cancel",
+                                ):
+                                    st.session_state[confirm_key] = False
+                                    st.rerun()
+            else:
+                st.info("Admin edit mode required to record ADJUSTMENT or delete movements.")
+
 
             # Display (friendly column order)
             show_cols = []
@@ -10287,6 +10669,67 @@ elif page == "Production":
                                             show_cols.append(_c)
                                     st.dataframe(existing_r[show_cols], use_container_width=True)
 
+                                    # Delete a specific existing reading (with confirmation)
+                                    try:
+                                        _eid = _col(existing_r, 'id_event', 'event_id', 'id')
+                                    except Exception:
+                                        _eid = None
+                                    if _eid and _eid in existing_r.columns:
+                                        # Build labels for selection
+                                        _labels = {}
+                                        for _, _rr in existing_r.iterrows():
+                                            rid = _rr.get(_eid)
+                                            # Timestamp label
+                                            dlabel = ""
+                                            try:
+                                                if _edate and _edate in existing_r.columns:
+                                                    dlabel = pd.to_datetime(_rr.get(_edate), errors='coerce').strftime('%Y-%m-%d %H:%M')
+                                            except Exception:
+                                                dlabel = str(_rr.get(_edate, ''))[:16]
+                                            g = _rr.get('Gravity (°P)', None)
+                                            t = _rr.get('Temp (°C)', None)
+                                            p = _rr.get('Pressure (bar)', None)
+                                            parts = [dlabel]
+                                            if g is not None and not pd.isna(g):
+                                                parts.append(f"{g}°P")
+                                            if t is not None and not pd.isna(t):
+                                                parts.append(f"{t}°C")
+                                            if p is not None and not pd.isna(p):
+                                                parts.append(f"{p} bar")
+                                            _labels[rid] = " — ".join([parts[0], ", ".join(parts[1:])]) if len(parts) > 1 else parts[0]
+
+                                        st.markdown("**Delete a reading**")
+                                        sel_id = st.selectbox(
+                                            "Select an existing reading",
+                                            options=list(_labels.keys()),
+                                            format_func=lambda x: _labels.get(x, str(x)),
+                                            key=f"del_reading_select_{batch_id}",
+                                        )
+                                        _confirm_key = f"del_reading_confirm_{batch_id}"
+                                        if _confirm_key not in st.session_state:
+                                            st.session_state[_confirm_key] = False
+
+                                        if st.button("Delete selected reading", type="secondary", use_container_width=False, key=f"del_reading_btn_{batch_id}"):
+                                            st.session_state[_confirm_key] = True
+
+                                        if st.session_state.get(_confirm_key) and sel_id is not None:
+                                            st.warning("This will permanently delete the selected reading. Continue?")
+                                            cc1, cc2 = st.columns(2)
+                                            with cc1:
+                                                if st.button("Yes, delete", type="primary", use_container_width=True, key=f"del_reading_yes_{batch_id}"):
+                                                    require_admin_action()
+                                                    try:
+                                                        delete_data('production_events', f"{_eid} = :id", {'id': sel_id})
+                                                        st.success("✅ Reading deleted.")
+                                                    except Exception as _ex:
+                                                        st.error(f"Failed to delete reading: {_ex}")
+                                                    st.session_state[_confirm_key] = False
+                                                    st.rerun()
+                                            with cc2:
+                                                if st.button("Cancel", use_container_width=True, key=f"del_reading_cancel_{batch_id}"):
+                                                    st.session_state[_confirm_key] = False
+                                                    st.rerun()
+
                             st.markdown("**Add new readings**")
                             _editor_key = f"reading_editor_{batch_id}"
                             if _editor_key not in st.session_state:
@@ -10311,7 +10754,7 @@ elif page == "Production":
                             with c1:
                                 save_readings = st.button("Save readings", type="primary", use_container_width=True)
                             with c2:
-                                if st.button("Clear new rows", use_container_width=True):
+                                if st.button("Clear new rows (does not delete existing)", use_container_width=True):
                                     st.session_state[_editor_key] = pd.DataFrame([{
                                         'Date': date.today(),
                                         'Time': datetime.now().time().replace(second=0, microsecond=0),
