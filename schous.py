@@ -9233,11 +9233,19 @@ elif page == "Production":
                                             # Return stock
                                             if cons_u is not None and not cons_u.empty and c_eid and c_ing and c_qty:
                                                 try:
-                                                    sub = cons_u[cons_u[c_eid] == int(brew_event_id)]
-                                                    if c_bid:
-                                                        sub = sub[sub[c_bid] == int(batch_id)]
+                                                    sub = cons_u.copy()
+                                                    # Robust numeric filtering (handles DBs where ids are loaded as strings/objects)
+                                                    if c_bid and c_bid in sub.columns:
+                                                        sub = sub[pd.to_numeric(sub[c_bid], errors='coerce') == float(batch_id)]
+                                                    if c_eid and c_eid in sub.columns:
+                                                        sub = sub[pd.to_numeric(sub[c_eid], errors='coerce') == float(brew_event_id)]
                                                 except Exception:
                                                     sub = cons_u.copy()
+                                                if sub is None or sub.empty:
+                                                    st.error("I couldn't find any logged consumption lines for this Brew, so I can't return inventory safely. **Undo Brew was aborted** — nothing was deleted.")
+                                                    st.session_state[_confirm_key] = False
+                                                    st.stop()
+
                                                 for _, rr in sub.iterrows():
                                                     ingn = str(rr.get(c_ing) or '')
                                                     try:
@@ -9309,6 +9317,89 @@ elif page == "Production":
                                             st.rerun()
 
                             st.markdown("---")
+
+
+                        # ---- RECOVER ORPHANED BREW CONSUMPTIONS (safety net) ----
+                        # If a Brew was undone or partially deleted in older versions and the consumption rows remain,
+                        # this lets admins restore inventory + log movements.
+                        if not brew_event_exists:
+                            try:
+                                data_r = get_all_data()
+                                cons_r = data_r.get('production_consumptions', pd.DataFrame())
+                                if cons_r is not None and not cons_r.empty:
+                                    c_bid2 = _col(cons_r, 'batch_id')
+                                    c_meta2 = _col(cons_r, 'meta')
+                                    c_eid2 = _col(cons_r, 'prod_event_id')
+                                    c_ing2 = _col(cons_r, 'ingredient_name')
+                                    c_qty2 = _col(cons_r, 'quantity')
+                                    c_pk2 = _col(cons_r, 'id_consumption', 'id')
+                                    sub_orph = cons_r.copy()
+                                    if c_bid2 and c_bid2 in sub_orph.columns:
+                                        sub_orph = sub_orph[pd.to_numeric(sub_orph[c_bid2], errors='coerce') == float(batch_id)]
+                                    if c_meta2 and c_meta2 in sub_orph.columns:
+                                        sub_orph = sub_orph[sub_orph[c_meta2].astype(str).str.contains('"event"\s*:\s*"Brew"', case=False, regex=True, na=False)]
+                                    # pick the most recent prod_event_id if present
+                                    if sub_orph is not None and not sub_orph.empty and c_eid2 and c_eid2 in sub_orph.columns:
+                                        pe = pd.to_numeric(sub_orph[c_eid2], errors='coerce')
+                                        if pe.notna().any():
+                                            latest_eid = int(pe.dropna().max())
+                                            sub_orph = sub_orph[pd.to_numeric(sub_orph[c_eid2], errors='coerce') == float(latest_eid)]
+                                        else:
+                                            latest_eid = None
+                                    else:
+                                        latest_eid = None
+
+                                    if sub_orph is not None and not sub_orph.empty:
+                                        st.markdown("### 🛠️ Recover inventory (orphaned Brew)")
+                                        st.caption("Found Brew consumption rows without a Brew event. You can restore inventory and log Stock History.")
+                                        rec_key = f"recover_orphan_brew_{batch_id}"
+                                        if not st.session_state.get(rec_key, False):
+                                            if st.button("Restore inventory from orphaned Brew rows", key=f"recover_orphan_btn_{batch_id}", use_container_width=True):
+                                                st.session_state[rec_key] = True
+                                                st.rerun()
+                                        else:
+                                            st.warning("This will **add back** the consumed quantities to inventory and then delete those orphaned consumption rows.")
+                                            c1r, c2r = st.columns(2)
+                                            with c1r:
+                                                if st.button("✅ Yes, restore inventory", key=f"recover_orphan_yes_{batch_id}", use_container_width=True, type="primary"):
+                                                    require_admin_action()
+                                                    # Return stock + log movement
+                                                    if c_ing2 and c_qty2:
+                                                        for _, rr in sub_orph.iterrows():
+                                                            ingn = str(rr.get(c_ing2) or '')
+                                                            try:
+                                                                qty = float(rr.get(c_qty2) or 0)
+                                                            except Exception:
+                                                                qty = 0.0
+                                                            if ingn and qty > 0:
+                                                                adjust_stock_for_ingredient(
+                                                                    get_all_data(),
+                                                                    ingn,
+                                                                    float(qty),
+                                                                    reason='Recovery (orphaned Brew)',
+                                                                    source=f"Batch #{batch_id} (Recovery)",
+                                                                    destination='Inventory',
+                                                                    ref_table='production_consumptions',
+                                                                    ref_id=int(latest_eid) if latest_eid is not None else None,
+                                                                    batch_id=int(batch_id),
+                                                                    prod_event_id=int(latest_eid) if latest_eid is not None else None,
+                                                                )
+                                                    # Delete those consumption rows by PK (safe)
+                                                    if c_pk2 and c_pk2 in sub_orph.columns:
+                                                        for _id in sub_orph[c_pk2].dropna().tolist():
+                                                            try:
+                                                                delete_data('production_consumptions', f"{c_pk2} = :id", {'id': int(_id)})
+                                                            except Exception:
+                                                                pass
+                                                    st.session_state[rec_key] = False
+                                                    st.success("✅ Inventory restored from orphaned Brew rows.")
+                                                    st.rerun()
+                                            with c2r:
+                                                if st.button("Cancel", key=f"recover_orphan_cancel_{batch_id}", use_container_width=True):
+                                                    st.session_state[rec_key] = False
+                                                    st.rerun()
+                            except Exception:
+                                pass
 
                         action = st.selectbox("Add action", [
                             'Brew', 'Dry Hop', 'Add Adjunct', 'Conditioning', 'Transfer', 'Kegging', 'Finish Batch'
