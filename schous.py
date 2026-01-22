@@ -8737,6 +8737,57 @@ elif page == "Production":
                             else:
                                 st.caption("No kegging runs for this batch.")
 
+                    st.markdown('---')
+                    st.subheader("Reports")
+                    # Production Report is available only after Brew is recorded for this batch
+                    brew_done = False
+                    brew_dt = None
+
+                    # Detect via batch fields
+                    try:
+                        if float(selected_batch.get('brewed_volume_l') or 0) > 0 or float(selected_batch.get('og') or 0) > 0 or float(selected_batch.get('efficiency') or 0) > 0:
+                            brew_done = True
+                    except Exception:
+                        pass
+
+                    # Detect via events table
+                    try:
+                        if not brew_done and events_df is not None and not events_df.empty:
+                            _e_bid = _col(events_df, 'batch_id')
+                            _e_type = _col(events_df, 'event_type', 'type')
+                            _e_date = _col(events_df, 'event_date')
+                            if _e_bid and _e_type:
+                                _ev2 = events_df[events_df[_e_bid] == batch_id].copy()
+                                if not _ev2.empty:
+                                    _brew_rows = _ev2[_ev2[_e_type].astype(str).str.lower() == 'brew']
+                                    if not _brew_rows.empty:
+                                        brew_done = True
+                                        if _e_date and _e_date in _brew_rows.columns:
+                                            try:
+                                                brew_dt = pd.to_datetime(_brew_rows.iloc[-1][_e_date], errors='coerce')
+                                            except Exception:
+                                                brew_dt = None
+                    except Exception:
+                        pass
+
+                    if not brew_done:
+                        st.info("Production Report becomes available after you record the **Brew** action.")
+                    else:
+                        if brew_dt is not None and not pd.isna(brew_dt):
+                            st.caption(f"Brew recorded on {str(brew_dt)[:10]}.")
+                        _pdf_state_key = f"prod_pdf_bytes_{batch_id}"
+                        if st.button('Generate Production Report (PDF)', key=f'gen_prod_pdf_{batch_id}', use_container_width=True):
+                            st.session_state[_pdf_state_key] = generate_production_report_pdf_bytes(batch_id)
+                        if _pdf_state_key in st.session_state:
+                            st.download_button(
+                                '⬇️ Download Production Report',
+                                data=st.session_state[_pdf_state_key],
+                                file_name=f'production_report_batch_{batch_id}.pdf',
+                                mime='application/pdf',
+                                use_container_width=True,
+                                key=f'dl_prod_pdf_{batch_id}',
+                            )
+
                 if actions_tab is not None:
                     with actions_tab:
                         st.subheader("Actions")
@@ -8747,6 +8798,79 @@ elif page == "Production":
 
                         # ---- BREW ----
                         if action == 'Brew':
+                            # Prevent accidental double-consumption: if Brew already exists, we disable "Record Brew"
+                            brew_event_exists = False
+                            brew_event_id = None
+                            brew_event_date = None
+                            try:
+                                if events_df is not None and not events_df.empty:
+                                    _e_bid = _col(events_df, 'batch_id')
+                                    _e_type = _col(events_df, 'event_type', 'type')
+                                    _e_id = _col(events_df, 'id_prod_event', 'id_event', 'id')
+                                    _e_date = _col(events_df, 'event_date')
+                                    if _e_bid and _e_type:
+                                        _ev0 = events_df[events_df[_e_bid] == batch_id].copy()
+                                        if not _ev0.empty:
+                                            _brew0 = _ev0[_ev0[_e_type].astype(str).str.lower() == 'brew']
+                                            if not _brew0.empty:
+                                                brew_event_exists = True
+                                                if _e_id and _e_id in _brew0.columns:
+                                                    try:
+                                                        brew_event_id = int(_brew0.iloc[-1][_e_id])
+                                                    except Exception:
+                                                        brew_event_id = None
+                                                if _e_date and _e_date in _brew0.columns:
+                                                    try:
+                                                        brew_event_date = pd.to_datetime(_brew0.iloc[-1][_e_date], errors='coerce')
+                                                    except Exception:
+                                                        brew_event_date = None
+                            except Exception:
+                                pass
+
+                            if brew_event_exists:
+                                msg = "⚠️ Brew already recorded for this batch."
+                                if brew_event_date is not None and not pd.isna(brew_event_date):
+                                    msg += f" (Date: {str(brew_event_date)[:10]})"
+                                st.warning(msg)
+                                st.caption("Brew is disabled to avoid consuming inventory twice. You can still correct OG/Efficiency/Volume below (no inventory changes).")
+
+                                with st.form(f'brew_update_stats_{batch_id}', clear_on_submit=False):
+                                    c1, c2, c3 = st.columns(3)
+                                    with c1:
+                                        new_vol = st.number_input('Brewed volume (L)', min_value=0.0, value=float(selected_batch.get('brewed_volume_l') or planned_vol or 0), step=1.0)
+                                    with c2:
+                                        new_og = st.number_input('OG (°P)', min_value=0.0, value=float(selected_batch.get('og') or 0), step=0.1)
+                                    with c3:
+                                        new_eff = st.number_input('Efficiency (%)', min_value=0.0, max_value=100.0, value=float(selected_batch.get('efficiency') or 0), step=0.5)
+                                    notes2 = st.text_area('Notes (optional)', height=80)
+                                    upd = st.form_submit_button('Update Brew Stats', type='primary', use_container_width=True)
+
+                                if upd:
+                                    require_admin_action()
+                                    update_data('production_batches', {
+                                        'brewed_volume_l': float(new_vol),
+                                        'volume_remaining_l': float(new_vol),
+                                        'og': float(new_og) if new_og is not None else None,
+                                        'efficiency': float(new_eff) if new_eff is not None else None,
+                                    }, f"{b_id_col} = :id", {'id': batch_id})
+
+                                    if brew_event_id is not None:
+                                        try:
+                                            update_data('production_events', {
+                                                'meta': json.dumps({
+                                                    'action': 'Brew',
+                                                    'og': float(new_og) if new_og is not None else None,
+                                                    'efficiency': float(new_eff) if new_eff is not None else None,
+                                                    'volume_l': float(new_vol),
+                                                    'stats_updated': True,
+                                                    'notes_update': str(notes2 or ''),
+                                                }, ensure_ascii=False)
+                                            }, "id_prod_event = :eid", {'eid': brew_event_id})
+                                        except Exception:
+                                            pass
+
+                                    st.success("✅ Brew stats updated.")
+                                    st.rerun()
                             # Equipment options
                             eq_names = equipment_df[eq_name_col].astype(str).tolist() if equipment_df is not None and not equipment_df.empty and eq_name_col else []
                             fermenter_opts = eq_names
@@ -8902,10 +9026,50 @@ elif page == "Production":
                                         )
                                     if ex_ing and ex_qty > 0:
                                         extra_lines.append((str(ex_ing), float(ex_qty)))
-                                submit = st.form_submit_button('Record Brew', type='primary', use_container_width=True)
+                                submit = st.form_submit_button('Record Brew', type='primary', use_container_width=True, disabled=brew_event_exists)
 
                             if submit:
                                 require_admin_action()
+                                # --- Stock validation (prevents negative stock by default) ---
+                                required = {}
+                                for checked, ingn, qty, unit, orig_ing in confirmations:
+                                    if checked and ingn and float(qty) > 0:
+                                        required[str(ingn)] = float(required.get(str(ingn), 0.0)) + float(qty)
+                                for ingn, qty in extra_lines:
+                                    if ingn and float(qty) > 0:
+                                        required[str(ingn)] = float(required.get(str(ingn), 0.0)) + float(qty)
+
+                                insufficient = []
+                                unknown = []
+                                try:
+                                    if required and ingredients_df is not None and not ingredients_df.empty:
+                                        _n = _col(ingredients_df, 'name')
+                                        _s = _col(ingredients_df, 'stock', 'quantity_in_stock')
+                                        _u = _col(ingredients_df, 'unit')
+                                        if _n and _s:
+                                            for ingn, need in required.items():
+                                                m_ing = ingredients_df[ingredients_df[_n].astype(str) == str(ingn)]
+                                                if m_ing.empty:
+                                                    unknown.append((ingn, need))
+                                                    continue
+                                                row = m_ing.iloc[0]
+                                                have = float(row[_s] or 0)
+                                                unit0 = str(row[_u]) if _u and _u in ingredients_df.columns and row[_u] is not None else ''
+                                                if have + 1e-9 < float(need):
+                                                    insufficient.append((ingn, have, need, unit0))
+                                except Exception:
+                                    pass
+
+                                if insufficient:
+                                    st.error("Insufficient inventory for this Brew (nothing was recorded):")
+                                    for ingn, have, need, unit0 in insufficient:
+                                        st.write(f"- {ingn}: have {have:g} {unit0} / need {need:g} {unit0}")
+                                    st.stop()
+
+                                if unknown:
+                                    st.warning("Some ingredients were not found in the Ingredients table, so inventory won't be adjusted for them:")
+                                    for ingn, need in unknown:
+                                        st.write(f"- {ingn}: need {need:g}")
                                 if not fermenter:
                                     st.error('Please select a fermenter.')
                                 elif not _vessel_is_free(fermenter, batch_id):
@@ -8980,22 +9144,6 @@ elif page == "Production":
 
                                     st.success(f"✅ Brew recorded. Materials cost logged: {total_cost:.2f}")
                                     st.rerun()
-
-
-                            st.markdown('---')
-                            st.caption('Production report (PDF)')
-                            _pdf_state_key = f"prod_pdf_bytes_{batch_id}"
-                            if st.button('Generate Production Report (PDF)', key=f'gen_prod_pdf_brew_{batch_id}', use_container_width=True):
-                                st.session_state[_pdf_state_key] = generate_production_report_pdf_bytes(batch_id)
-                            if _pdf_state_key in st.session_state:
-                                st.download_button(
-                                    '⬇️ Download Production Report',
-                                    data=st.session_state[_pdf_state_key],
-                                    file_name=f'production_report_batch_{batch_id}.pdf',
-                                    mime='application/pdf',
-                                    use_container_width=True,
-                                    key=f'dl_prod_pdf_brew_{batch_id}',
-                                )
 
                         # ---- DRY HOP / ADJUNCT ----
                         if action in {'Dry Hop', 'Add Adjunct'}:
