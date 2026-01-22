@@ -1540,6 +1540,17 @@ def insert_data(table_name: str, data_dict: dict):
             pk_col = cand
             break
 
+
+    # Fallback: many tables use custom PK names like id_prod_event, id_ingredient, etc.
+    if pk_col not in set(actual_cols):
+        try:
+            id_like = [c for c in actual_cols if str(c).lower().startswith("id_")]
+            if id_like:
+                sing = str(singular).lower()
+                best = [c for c in id_like if sing and sing in str(c).lower()]
+                pk_col = best[0] if best else id_like[0]
+        except Exception:
+            pass
     if dialect in {"postgresql", "postgres"}:
         sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders}) RETURNING {pk_col}"
         try:
@@ -5625,7 +5636,7 @@ elif page == "Products":
                             'composite_id': int(comp_id) if comp_id is not None else None,
                             'component_type': 'Ingredient',
                             'component_name': ing,
-                            'quantity': float(qty),
+                            'quantity': float(qty_stock),
                             'unit': unit,
                         })
 
@@ -9242,6 +9253,25 @@ elif page == "Production":
                                                 except Exception:
                                                     sub = cons_u.copy()
                                                 if sub is None or sub.empty:
+                                                    # Fallback: some DB backends may not return the Brew event id during insert,
+                                                    # leaving prod_event_id NULL in the consumption lines. In that case, recover by batch + meta.
+                                                    try:
+                                                        sub_f = cons_u.copy()
+                                                        if c_bid and c_bid in sub_f.columns:
+                                                            sub_f = sub_f[pd.to_numeric(sub_f[c_bid], errors='coerce') == float(batch_id)]
+                                                        # Prefer NULL prod_event_id (or matching id if present)
+                                                        if c_eid and c_eid in sub_f.columns:
+                                                            ce = pd.to_numeric(sub_f[c_eid], errors='coerce')
+                                                            sub_f = sub_f[ce.isna() | (ce == float(brew_event_id))]
+                                                        mcol = _col(sub_f, 'meta')
+                                                        if mcol and mcol in sub_f.columns:
+                                                            sub_f = sub_f[sub_f[mcol].astype(str).str.contains('"event"\s*:\s*"Brew"', na=False)]
+                                                        if sub_f is not None and not sub_f.empty:
+                                                            sub = sub_f
+                                                    except Exception:
+                                                        pass
+
+                                                if sub is None or sub.empty:
                                                     st.error("I couldn't find any logged consumption lines for this Brew, so I can't return inventory safely. **Undo Brew was aborted** — nothing was deleted.")
                                                     st.session_state[_confirm_key] = False
                                                     st.stop()
@@ -9528,6 +9558,7 @@ elif page == "Production":
                                 ri_ing_col = _col(recipe_items_df, 'ingredient_name', 'ingredient')
                                 ri_qty_col = _col(recipe_items_df, 'quantity')
                                 ri_unit_col = _col(recipe_items_df, 'unit')
+                                ri_id_col = _col(recipe_items_df, 'id_recipe_item', 'id')
 
                                 items = recipe_items_df.copy() if recipe_items_df is not None else pd.DataFrame()
                                 if not items.empty and ri_recipe_col and rid:
@@ -9538,6 +9569,19 @@ elif page == "Production":
                                     st.warning("No recipe items found for this recipe.")
                                 else:
                                     for i, row in enumerate(items.to_dict('records')):
+                                        # Stable key base to avoid Streamlit state mismatches when the item order changes
+                                        _row_id = None
+                                        if ri_id_col:
+                                            try:
+                                                _row_id = row.get(ri_id_col)
+                                            except Exception:
+                                                _row_id = None
+                                        try:
+                                            _row_id = int(_row_id) if _row_id is not None and str(_row_id) != '' else None
+                                        except Exception:
+                                            _row_id = None
+                                        if _row_id is None:
+                                            _row_id = i
                                         original_ing = str(row.get(ri_ing_col) or '')
                                         base_qty = float(row.get(ri_qty_col) or 0)
                                         unit = str(row.get(ri_unit_col) or '')
@@ -9576,19 +9620,21 @@ elif page == "Production":
 
                                         cc1, cc2, cc3, cc4 = st.columns([1.1, 3, 2, 2])
                                         with cc1:
-                                            checked = st.checkbox(
+                                            _ui_use = st.checkbox(
                                                 "Use",
                                                 value=True,
-                                                key=f"brew_ing_use_{batch_id}_{i}",
-                                                help="Uncheck to skip consuming this item.",
+                                                key=f"brew_ing_use_{batch_id}_{_row_id}",
+                                                disabled=True,
+                                                help="All recipe ingredients are always consumed on Brew.",
                                             )
+                                            checked = True
                                         with cc2:
                                             chosen_ing = st.selectbox(
                                                 "Ingredient",
                                                 opts if opts else [''],
                                                 index=default_index if opts else 0,
                                                 format_func=lambda x: ing_label_map.get(str(x), str(x)) if str(x) else "",
-                                                key=f"brew_ing_pick_{batch_id}_{i}",
+                                                key=f"brew_ing_pick_{batch_id}_{_row_id}",
                                             )
                                         with cc3:
                                             actual_qty = st.number_input(
@@ -9596,7 +9642,7 @@ elif page == "Production":
                                                 min_value=0.0,
                                                 value=float(planned_qty),
                                                 step=0.1,
-                                                key=f"brew_ing_qty_{batch_id}_{i}",
+                                                key=f"brew_ing_qty_{batch_id}_{_row_id}",
                                                 help=f"Planned: {planned_qty:g} {unit}",
                                             )
                                         with cc4:
@@ -9640,9 +9686,42 @@ elif page == "Production":
                                 require_admin_action()
                                 # --- Stock validation (prevents negative stock by default) ---
                                 required = {}
+
+                                def _qty_to_stock_unit(qty_val: float, from_unit: str, to_unit: str) -> float:
+                                    """Convert qty between common brewery units (g<->kg, ml<->l). Falls back to identity."""
+                                    try:
+                                        q = float(qty_val)
+                                    except Exception:
+                                        return 0.0
+                                    fu = str(from_unit or '').strip().lower()
+                                    tu = str(to_unit or '').strip().lower()
+                                    if not fu or not tu or fu == tu:
+                                        return q
+                                    # grams / kilograms
+                                    if fu in {'g', 'gram', 'grams'} and tu in {'kg', 'kilogram', 'kilograms'}:
+                                        return q / 1000.0
+                                    if fu in {'kg', 'kilogram', 'kilograms'} and tu in {'g', 'gram', 'grams'}:
+                                        return q * 1000.0
+                                    # milliliters / liters
+                                    if fu in {'ml', 'milliliter', 'milliliters'} and tu in {'l', 'lt', 'liter', 'liters'}:
+                                        return q / 1000.0
+                                    if fu in {'l', 'lt', 'liter', 'liters'} and tu in {'ml', 'milliliter', 'milliliters'}:
+                                        return q * 1000.0
+                                    return q
+
                                 for checked, ingn, qty, unit, orig_ing in confirmations:
                                     if checked and ingn and float(qty) > 0:
-                                        required[str(ingn)] = float(required.get(str(ingn), 0.0)) + float(qty)
+                                        _stock_unit = ''
+                                        try:
+                                            if ingredients_df is not None and not ingredients_df.empty:
+                                                _u0 = _col(ingredients_df, 'unit')
+                                                _r0 = _find_ingredient_row_by_name(ingredients_df, str(ingn))
+                                                if _r0 is not None and _u0 and _u0 in ingredients_df.columns:
+                                                    _stock_unit = str(_r0.get(_u0) or '')
+                                        except Exception:
+                                            _stock_unit = ''
+                                        _need = _qty_to_stock_unit(float(qty), str(unit or ''), _stock_unit)
+                                        required[str(ingn)] = float(required.get(str(ingn), 0.0)) + float(_need)
                                 for ingn, qty in extra_lines:
                                     if ingn and float(qty) > 0:
                                         required[str(ingn)] = float(required.get(str(ingn), 0.0)) + float(qty)
@@ -9704,19 +9783,29 @@ elif page == "Production":
                                         if not checked or not ingn or qty <= 0:
                                             continue
                                         unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
-                                        line_cost = float(qty) * float(unit_cost or 0)
+                                        qty_stock = _qty_to_stock_unit(float(qty), str(unit or ''), str(unit0 or unit or ''))
+                                        line_cost = float(qty_stock) * float(unit_cost or 0)
                                         total_cost += line_cost
-                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty), reason='Brew', destination=f"Batch #{batch_id} (Brew)", ref_table='production_events', ref_id=int(ev_id) if ev_id is not None else None, batch_id=int(batch_id), prod_event_id=int(ev_id) if ev_id is not None else None)
+                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty_stock), reason='Brew', destination=f"Batch #{batch_id} (Brew)", ref_table='production_events', ref_id=int(ev_id) if ev_id is not None else None, batch_id=int(batch_id), prod_event_id=int(ev_id) if ev_id is not None else None)
                                         meta = {'event': 'Brew', 'source': 'recipe'}
+                                        _ing_id_val = ''
+                                        try:
+                                            _idc0 = _col(ingredients_df, 'id_ingredient', 'ingredient_id', 'id')
+                                            if _idc0:
+                                                _r0 = _find_ingredient_row_by_name(ingredients_df, ingn)
+                                                if _r0 is not None:
+                                                    _ing_id_val = str(_r0.get(_idc0) or '')
+                                        except Exception:
+                                            _ing_id_val = ''
                                         if orig_ing and str(orig_ing) != str(ingn):
                                             meta = {'event': 'Brew', 'source': 'substitute', 'original_ingredient': orig_ing}
                                         insert_data('production_consumptions', {
                                             'batch_id': batch_id,
                                             'prod_event_id': int(ev_id) if ev_id is not None else None,
-                                            'ingredient_id': '',
+                                            'ingredient_id': str(_ing_id_val or ''),
                                             'ingredient_name': ingn,
                                             'quantity': float(qty),
-                                            'unit': unit0 or unit,
+                                            'unit': str(unit0 or unit or ''),
                                             'unit_cost': float(unit_cost or 0),
                                             'total_cost': float(line_cost),
                                             'meta': json.dumps(meta, ensure_ascii=False),
@@ -9730,10 +9819,19 @@ elif page == "Production":
                                         line_cost = float(qty) * float(unit_cost or 0)
                                         total_cost += line_cost
                                         adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty), reason='Brew', destination=f"Batch #{batch_id} (Brew)", ref_table='production_events', ref_id=int(ev_id) if ev_id is not None else None, batch_id=int(batch_id), prod_event_id=int(ev_id) if ev_id is not None else None)
+                                        _ing_id_val = ''
+                                        try:
+                                            _idc0 = _col(ingredients_df, 'id_ingredient', 'ingredient_id', 'id')
+                                            if _idc0:
+                                                _r0 = _find_ingredient_row_by_name(ingredients_df, ingn)
+                                                if _r0 is not None:
+                                                    _ing_id_val = str(_r0.get(_idc0) or '')
+                                        except Exception:
+                                            _ing_id_val = ''
                                         insert_data('production_consumptions', {
                                             'batch_id': batch_id,
                                             'prod_event_id': int(ev_id) if ev_id is not None else None,
-                                            'ingredient_id': '',
+                                            'ingredient_id': str(_ing_id_val or ''),
                                             'ingredient_name': ingn,
                                             'quantity': float(qty),
                                             'unit': unit0 or '',
