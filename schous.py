@@ -2427,6 +2427,45 @@ def get_vessels_for_production(data: dict) -> list[str]:
     return sorted(dict.fromkeys(out))
 
 
+def _norm_ing_name(s: str) -> str:
+    """Normalize ingredient names for matching (case/whitespace tolerant)."""
+    try:
+        s = str(s)
+    except Exception:
+        return ''
+    s = s.strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _find_ingredient_row_by_name(ing_df: pd.DataFrame, ingredient_name: str):
+    """Best-effort ingredient lookup by name.
+
+    Tries exact match, then normalized (case/whitespace) match. Returns a Series or None.
+    """
+    if ing_df is None or ing_df.empty:
+        return None
+    ncol = _col(ing_df, 'name')
+    if not ncol:
+        return None
+    # Exact match
+    m = ing_df[ing_df[ncol].astype(str) == str(ingredient_name)]
+    if not m.empty:
+        return m.iloc[0]
+    # Normalized match
+    qn = _norm_ing_name(ingredient_name)
+    if not qn:
+        return None
+    try:
+        ser = ing_df[ncol].astype(str).map(_norm_ing_name)
+        m2 = ing_df[ser == qn]
+        if not m2.empty:
+            return m2.iloc[0]
+    except Exception:
+        pass
+    return None
+
+
 def get_ingredient_unit_and_cost(data: dict, ingredient_name: str):
     ing = data.get('ingredients', None)
     if ing is None or ing.empty:
@@ -2436,13 +2475,12 @@ def get_ingredient_unit_and_cost(data: dict, ingredient_name: str):
     ccol = _col(ing, 'unit_cost', 'cost_per_unit')
     if not ncol:
         return None, 0.0
-    match = ing[ing[ncol].astype(str) == str(ingredient_name)]
-    if match.empty:
+    row = _find_ingredient_row_by_name(ing, ingredient_name)
+    if row is None:
         return None, 0.0
-    row = match.iloc[0]
-    unit = row[ucol] if ucol and ucol in match.columns else None
+    unit = row.get(ucol) if ucol and ucol in ing.columns else None
     try:
-        cost = float(row[ccol]) if ccol and ccol in match.columns and row[ccol] is not None else 0.0
+        cost = float(row.get(ccol)) if ccol and ccol in ing.columns and row.get(ccol) is not None else 0.0
     except Exception:
         cost = 0.0
     return unit, cost
@@ -2458,10 +2496,9 @@ def adjust_stock_for_ingredient(data: dict, ingredient_name: str, delta_qty: flo
     idcol = _col(ing, 'id_ingredient', 'ingredient_id', 'id')
     if not (ncol and scol and idcol):
         return
-    match = ing[ing[ncol].astype(str) == str(ingredient_name)]
-    if match.empty:
+    row = _find_ingredient_row_by_name(ing, ingredient_name)
+    if row is None:
         return
-    row = match.iloc[0]
     new_stock = float(row[scol] or 0) + float(delta_qty)
     update_data('ingredients', {scol: new_stock}, f"{idcol} = :id", {'id': row[idcol]})
 
@@ -8965,8 +9002,30 @@ elif page == "Production":
                                         opts = list(all_ing_opts)
                                         if original_ing and original_ing not in opts:
                                             opts = [original_ing] + opts
+
+                                        # If the recipe stores a different casing/spacing than the Ingredients table,
+                                        # preselect the best exact normalized match so stock is adjusted by default.
+                                        if original_ing and str(original_ing) not in set(all_ing_opts):
+                                            try:
+                                                norm_orig = _norm_ing_name(original_ing)
+                                                ci_matches = [x for x in all_ing_opts if _norm_ing_name(x) == norm_orig]
+                                                if len(ci_matches) == 1 and ci_matches[0] in opts:
+                                                    # We'll keep original_ing for audit, but default the selectbox to the matched inventory name
+                                                    pass
+                                            except Exception:
+                                                pass
+                                        # Default selection: original name if present, else best normalized match (if unique)
+                                        _default_name = original_ing
+                                        if original_ing and str(original_ing) not in set(all_ing_opts):
+                                            try:
+                                                norm_orig = _norm_ing_name(original_ing)
+                                                ci_matches = [x for x in all_ing_opts if _norm_ing_name(x) == norm_orig]
+                                                if len(ci_matches) == 1:
+                                                    _default_name = ci_matches[0]
+                                            except Exception:
+                                                _default_name = original_ing
                                         try:
-                                            default_index = opts.index(original_ing) if original_ing else 0
+                                            default_index = opts.index(_default_name) if _default_name else 0
                                         except Exception:
                                             default_index = 0
 
@@ -9000,6 +9059,10 @@ elif page == "Production":
                                                 st.caption(f"Planned: {planned_qty:g} {unit}  •  Sub: {original_ing} → {chosen_ing}")
                                             else:
                                                 st.caption(f"Planned: {planned_qty:g} {unit}")
+
+                                            # Force substitutions for items that aren't registered in Ingredients
+                                            if checked and chosen_ing and (str(chosen_ing) not in set(all_ing_opts)):
+                                                st.caption("⚠️ This name isn't registered in **Ingredients**. Pick a substitute from the dropdown so inventory can be adjusted.")
 
                                         confirmations.append((checked, str(chosen_ing or original_ing), float(actual_qty), unit, original_ing))
 
@@ -9067,9 +9130,10 @@ elif page == "Production":
                                     st.stop()
 
                                 if unknown:
-                                    st.warning("Some ingredients were not found in the Ingredients table, so inventory won't be adjusted for them:")
+                                    st.error("Some ingredients are not registered in **Ingredients**, so I can't adjust inventory. Please choose substitutes from the dropdown before recording Brew:")
                                     for ingn, need in unknown:
                                         st.write(f"- {ingn}: need {need:g}")
+                                    st.stop()
                                 if not fermenter:
                                     st.error('Please select a fermenter.')
                                 elif not _vessel_is_free(fermenter, batch_id):
