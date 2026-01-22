@@ -2818,10 +2818,14 @@ def sum_production_costs(data: dict, batch_id: int):
 
 
 def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
-    """Build a production report PDF for the given batch and return raw PDF bytes."""
+    """Build a production report PDF for the given batch and return raw PDF bytes (A4)."""
     from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.platypus import Image as RLImage
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
     from reportlab.lib.units import mm
+    from datetime import datetime
 
     data2 = get_all_data()
     batches = data2.get('production_batches', pd.DataFrame())
@@ -2831,7 +2835,7 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     recipes = data2.get('recipes', pd.DataFrame())
 
     # Resolve batch row
-    b = {}
+    b: dict = {}
     if batches is not None and not batches.empty:
         bid_col = _col(batches, 'id_batch', 'batch_id', 'id')
         if bid_col:
@@ -2861,7 +2865,7 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     total_cost = sum_production_costs(data2, batch_id)
 
     # Pull some recipe stats if possible
-    recipe_stats = {}
+    recipe_stats: dict = {}
     try:
         rid = b.get('recipe_id', None)
         if rid is not None and recipes is not None and not recipes.empty:
@@ -2873,86 +2877,49 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     except Exception:
         recipe_stats = {}
 
-    def _safe(v):
+    def _safe(v) -> str:
         if v is None:
             return ''
         s = str(v)
         return '' if s.lower() == 'nan' else s
 
-    def _fmt_num(v, suffix=''):
+    def _fmt_num(v, decimals=None):
         try:
-            if v is None or str(v).lower() == 'nan':
+            if v is None or str(v).lower() == 'nan' or str(v).strip() == '':
                 return ''
-            return f"{float(v):g}{suffix}"
+            fv = float(v)
+            if decimals is None:
+                return f"{fv:g}"
+            return f"{fv:.{decimals}f}"
         except Exception:
             return _safe(v)
 
-    # Layout helpers
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    w, h = A4
-
-    def new_page():
-        nonlocal y
-        c.showPage()
-        y = h - 18 * mm
-        c.setFont('Helvetica-Bold', 14)
-        c.drawString(18 * mm, y, f"Production Report — Batch #{batch_id}")
-        y -= 8 * mm
-        c.setFont('Helvetica', 9)
-
-    def ensure_space(min_y=18*mm):
-        nonlocal y
-        if y < min_y:
-            new_page()
-
-    y = h - 18 * mm
-    c.setFont('Helvetica-Bold', 14)
-    c.drawString(18 * mm, y, f"Production Report — Batch #{batch_id}")
-    y -= 8 * mm
-
-    c.setFont('Helvetica', 10)
-    c.drawString(18 * mm, y, f"Beer/Recipe: {_safe(b.get('recipe_name',''))}")
-    y -= 6 * mm
+    def _first_nonempty(*vals):
+        for v in vals:
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s and s.lower() != 'nan':
+                return v
+        return ''
 
     # Batch basics
-    planned_vol = b.get('planned_volume_l', b.get('planned_volume', ''))
-    planned_date = b.get('planned_date', '')
-    brewed_vol = b.get('brewed_volume_l', b.get('volume_brewed_l', b.get('actual_volume_l', '')))
-    og = b.get('og', '')
-    eff = b.get('efficiency', '')
+    planned_vol = _first_nonempty(b.get('planned_volume_l'), b.get('planned_volume'))
+    planned_date = _first_nonempty(b.get('planned_date'))
+    brewed_vol = _first_nonempty(b.get('brewed_volume_l'), b.get('volume_brewed_l'), b.get('actual_volume_l'))
+    og = _first_nonempty(b.get('og'))
+    eff = _first_nonempty(b.get('efficiency'))
+    stage = _first_nonempty(b.get('stage'))
+    status = _first_nonempty(b.get('status'))
+    vessel = _first_nonempty(b.get('current_vessel'), b.get('vessel'), b.get('fermenter'))
 
-    c.setFont('Helvetica', 9)
-    c.drawString(18 * mm, y, f"Batch code: {_safe(b.get('batch_code',''))}   •   Brewery: {_safe(b.get('brewery_id',''))}   •   System: {_safe(b.get('brewhouse',''))}")
-    y -= 5 * mm
-    c.drawString(18 * mm, y, f"Planned: {_fmt_num(planned_vol, ' L')} on {_safe(planned_date)}")
-    y -= 5 * mm
-    if any([brewed_vol, og, eff]):
-        c.drawString(18 * mm, y, f"Brew day: Volume {_fmt_num(brewed_vol, ' L')}   •   OG {_fmt_num(og)}°P   •   Efficiency {_fmt_num(eff)}%")
-        y -= 5 * mm
+    ibu = _first_nonempty(recipe_stats.get('ibu'), recipe_stats.get('IBU'))
+    color_val = _first_nonempty(
+        recipe_stats.get('color'), recipe_stats.get('color_ebc'), recipe_stats.get('srm'),
+        recipe_stats.get('colour'), recipe_stats.get('color_srm')
+    )
 
-    c.drawString(18 * mm, y, f"Stage/Status: {_safe(b.get('stage',''))} / {_safe(b.get('status',''))}   •   Vessel: {_safe(b.get('current_vessel',''))}")
-    y -= 8 * mm
-
-    # Recipe stats (optional)
-    og_r = recipe_stats.get('og', recipe_stats.get('original_gravity', recipe_stats.get('og_plato')))
-    fg_r = recipe_stats.get('fg', recipe_stats.get('final_gravity', recipe_stats.get('fg_plato')))
-    ibu_r = recipe_stats.get('ibus', recipe_stats.get('ibu'))
-    col_r = recipe_stats.get('ebc', recipe_stats.get('color_ebc', recipe_stats.get('srm')))
-    if any([og_r, fg_r, ibu_r, col_r]):
-        c.setFont('Helvetica-Bold', 10)
-        c.drawString(18 * mm, y, "Recipe stats")
-        y -= 5 * mm
-        c.setFont('Helvetica', 9)
-        line = f"OG {_fmt_num(og_r)}°P  •  FG {_fmt_num(fg_r)}°P  •  IBU {_fmt_num(ibu_r)}  •  Color {_fmt_num(col_r)}"
-        c.drawString(18 * mm, y, line[:130])
-        y -= 8 * mm
-
-    # Events
-    c.setFont('Helvetica-Bold', 11)
-    c.drawString(18 * mm, y, "Events")
-    y -= 6 * mm
-    c.setFont('Helvetica', 9)
+    # Sort events by date if possible
     if ev is not None and not ev.empty:
         dtcol = _col(ev, 'event_date')
         try:
@@ -2961,69 +2928,289 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
                 ev = ev.sort_values(dtcol)
         except Exception:
             pass
-        for _, r in ev.iterrows():
-            ensure_space()
-            d = str(r.get(dtcol, r.get('event_date','')))[:19] if dtcol else str(r.get('event_date',''))[:19]
-            line = f"{d}: {r.get('event_type','')} {r.get('from_vessel','')} → {r.get('to_vessel','')}"
-            c.drawString(18 * mm, y, line[:130])
-            y -= 4.5 * mm
-            n = _safe(r.get('notes',''))
-            if n:
-                ensure_space()
-                c.setFont('Helvetica-Oblique', 8)
-                c.drawString(20 * mm, y, ("- " + n)[:150])
-                y -= 4.5 * mm
-                c.setFont('Helvetica', 9)
-    else:
-        c.drawString(18 * mm, y, "(no events)")
-        y -= 6 * mm
 
-    y -= 2 * mm
+    # PDF build
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=18*mm,
+        rightMargin=18*mm,
+        topMargin=22*mm,
+        bottomMargin=16*mm
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "Title",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=18,
+        spaceAfter=6
+    )
+    h2 = ParagraphStyle(
+        "H2",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        leading=14,
+        spaceBefore=10,
+        spaceAfter=6
+    )
+    small = ParagraphStyle(
+        "Small",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8.5,
+        leading=10.5
+    )
+    small_grey = ParagraphStyle(
+        "SmallGrey",
+        parent=small,
+        textColor=colors.grey
+    )
+    normal = ParagraphStyle(
+        "NormalTight",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9.5,
+        leading=12
+    )
+
+    logo_path = _find_logo_path()
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    def _on_page(canvas, _doc):
+        canvas.saveState()
+
+        # Header line + logo
+        y_top = A4[1] - 12*mm
+        x_left = _doc.leftMargin
+        x_right = A4[0] - _doc.rightMargin
+
+        logo_w = 0
+        if logo_path:
+            try:
+                # Keep a fixed height, preserve aspect ratio
+                img_h = 10*mm
+                # reportlab needs actual image dimensions to compute ratio; try to use RLImage helper
+                tmp = RLImage(logo_path)
+                iw, ih = tmp.imageWidth, tmp.imageHeight
+                if ih and iw:
+                    img_w = img_h * (iw/ih)
+                else:
+                    img_w = 24*mm
+                canvas.drawImage(logo_path, x_left, y_top - img_h + 1*mm, width=img_w, height=img_h, mask='auto')
+                logo_w = img_w + 4*mm
+            except Exception:
+                logo_w = 0
+
+        canvas.setFont("Helvetica-Bold", 12)
+        canvas.drawString(x_left + logo_w, y_top - 3*mm, f"Production Report — Batch #{batch_id}")
+
+        canvas.setFont("Helvetica", 8)
+        canvas.drawRightString(x_right, y_top - 3*mm, f"Generated: {generated_at}")
+
+        # Footer
+        canvas.setStrokeColor(colors.lightgrey)
+        canvas.setLineWidth(0.5)
+        canvas.line(x_left, 12*mm, x_right, 12*mm)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.grey)
+        canvas.drawRightString(x_right, 8*mm, f"Page {_doc.page}")
+        canvas.restoreState()
+
+    story = []
+    story.append(Spacer(1, 8*mm))
+
+    # Overview block
+    story.append(Paragraph(f"<b>{_safe(b.get('recipe_name','')) or 'Batch Overview'}</b>", title_style))
+
+    # Build a 2x4 grid (label/value pairs)
+    brewery = _first_nonempty(b.get('brewery_name'), b.get('brewery_id'))
+    system = _first_nonempty(b.get('brewhouse'), b.get('system'))
+    batch_code = _first_nonempty(b.get('batch_code'))
+
+    left_pairs = [
+        ("Batch code", _safe(batch_code)),
+        ("Brewery", _safe(brewery)),
+        ("System", _safe(system)),
+        ("Planned", f"{_fmt_num(planned_vol)} L — {_safe(planned_date)}" if planned_vol or planned_date else "")
+    ]
+    right_pairs = [
+        ("Brew day", f"{_fmt_num(brewed_vol)} L • OG {_fmt_num(og)}°P • Eff {_fmt_num(eff)}%" if any([brewed_vol, og, eff]) else ""),
+        ("Stage / Status", f"{_safe(stage)} / {_safe(status)}" if stage or status else ""),
+        ("Vessel", _safe(vessel)),
+        ("Total cost", _fmt_num(total_cost, 2))
+    ]
+
+    def _pair_row(p1, p2):
+        return [
+            Paragraph(f"<font color='#{'666666'}'>{p1[0]}</font>", small_grey),
+            Paragraph(_safe(p1[1]) or "—", normal),
+            Paragraph(f"<font color='#{'666666'}'>{p2[0]}</font>", small_grey),
+            Paragraph(_safe(p2[1]) or "—", normal),
+        ]
+
+    overview_table = Table(
+        [_pair_row(left_pairs[i], right_pairs[i]) for i in range(4)],
+        colWidths=[26*mm, 60*mm, 26*mm, 60*mm]
+    )
+    overview_table.setStyle(TableStyle([
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 3),
+        ("LINEBELOW", (0,0), (-1,-1), 0.25, colors.lightgrey),
+        ("LEFTPADDING", (0,0), (-1,-1), 0),
+        ("RIGHTPADDING", (0,0), (-1,-1), 0),
+    ]))
+    story.append(overview_table)
+
+    # KPI cards row
+    def _kpi_cell(label, value):
+        v = _safe(value) if _safe(value) else "—"
+        return Paragraph(f"<font size='8' color='#666666'>{label}</font><br/><font size='12'><b>{v}</b></font>", styles["Normal"])
+
+    kpi_items = [
+        ("Volume", f"{_fmt_num(brewed_vol)} L" if brewed_vol else ""),
+        ("OG", f"{_fmt_num(og)}°P" if og else ""),
+        ("Efficiency", f"{_fmt_num(eff)}%" if eff else ""),
+        ("IBU", _fmt_num(ibu) if ibu else ""),
+        ("Color", _fmt_num(color_val) if color_val else ""),
+        ("Cost", f"{_fmt_num(total_cost,2)}" if total_cost not in (None,'') else ""),
+    ]
+    kpi_table = Table([[ _kpi_cell(l, v) for (l, v) in kpi_items ]], colWidths=[(A4[0]-36*mm)/6]*6)
+    kpi_table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,-1), colors.whitesmoke),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ("RIGHTPADDING", (0,0), (-1,-1), 8),
+        ("TOPPADDING", (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ("BOX", (0,0), (-1,-1), 0.5, colors.lightgrey),
+        ("INNERGRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+    ]))
+    story.append(Spacer(1, 6*mm))
+    story.append(kpi_table)
+
+    # Events
+    story.append(Paragraph("Events", h2))
+    if ev is not None and not ev.empty:
+        dtcol = _col(ev, 'event_date')
+        rows = [["Date/Time", "Event", "Move", "Notes"]]
+        for _, r in ev.iterrows():
+            d_raw = r.get(dtcol, r.get('event_date','')) if dtcol else r.get('event_date','')
+            try:
+                d_txt = pd.to_datetime(d_raw).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                d_txt = str(d_raw)[:16]
+            ev_type = _safe(r.get('event_type',''))
+            move = f"{_safe(r.get('from_vessel',''))} → {_safe(r.get('to_vessel',''))}".strip()
+            note = _safe(r.get('notes',''))
+            rows.append([d_txt, ev_type or "—", move if move != "→" else "—", note or ""])
+        t = Table(rows, colWidths=[28*mm, 34*mm, 40*mm, (A4[0]-36*mm-28*mm-34*mm-40*mm)])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.black),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,0), 9),
+            ("FONTSIZE", (0,1), (-1,-1), 8.8),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LINEBELOW", (0,0), (-1,0), 0.5, colors.lightgrey),
+            ("INNERGRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+            ("BOX", (0,0), (-1,-1), 0.5, colors.lightgrey),
+            ("LEFTPADDING", (0,0), (-1,-1), 6),
+            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ]))
+        story.append(t)
+    else:
+        story.append(Paragraph("<i>No events logged.</i>", small_grey))
 
     # Consumptions
-    ensure_space()
-    c.setFont('Helvetica-Bold', 11)
-    c.drawString(18 * mm, y, "Consumptions")
-    y -= 6 * mm
-    c.setFont('Helvetica', 9)
+    story.append(Paragraph("Consumptions", h2))
     if co is not None and not co.empty:
+        # Determine columns
+        name_col = _col(co, 'ingredient_name', 'name')
+        qty_col = _col(co, 'quantity', 'qty', 'amount')
+        unit_col = _col(co, 'unit')
+        cost_col = _col(co, 'total_cost', 'cost')
+
+        rows = [["Ingredient", "Qty", "Unit", "Cost"]]
+        total_cost_calc = 0.0
         for _, r in co.iterrows():
-            ensure_space()
-            line = f"{_safe(r.get('ingredient_name',''))}: {_fmt_num(r.get('quantity',''))} {_safe(r.get('unit',''))} — cost {_fmt_num(r.get('total_cost',''))}"
-            c.drawString(18 * mm, y, line[:130])
-            y -= 4.5 * mm
+            ing = _safe(r.get(name_col,'') if name_col else r.get('ingredient_name',''))
+            qty = r.get(qty_col,'') if qty_col else r.get('quantity','')
+            unit = _safe(r.get(unit_col,'') if unit_col else r.get('unit',''))
+            cost = r.get(cost_col,'') if cost_col else r.get('total_cost','')
+            try:
+                total_cost_calc += float(cost) if str(cost).strip() else 0.0
+            except Exception:
+                pass
+            rows.append([ing or "—", _fmt_num(qty), unit or "—", _fmt_num(cost, 2)])
+        rows.append(["", "", Paragraph("<b>Total</b>", normal), Paragraph(f"<b>{_fmt_num(total_cost_calc, 2)}</b>", normal)])
+
+        t = Table(rows, colWidths=[78*mm, 22*mm, 18*mm, (A4[0]-36*mm-78*mm-22*mm-18*mm)])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,0), 9),
+            ("FONTSIZE", (0,1), (-1,-2), 8.8),
+            ("ALIGN", (1,1), (1,-1), "RIGHT"),
+            ("ALIGN", (3,1), (3,-1), "RIGHT"),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LINEBELOW", (0,0), (-1,0), 0.5, colors.lightgrey),
+            ("INNERGRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+            ("BOX", (0,0), (-1,-1), 0.5, colors.lightgrey),
+            ("LEFTPADDING", (0,0), (-1,-1), 6),
+            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ]))
+        # Zebra striping
+        for i in range(1, len(rows)-1):
+            if i % 2 == 0:
+                t.setStyle(TableStyle([("BACKGROUND", (0,i), (-1,i), colors.Color(0.98,0.98,0.98))]))
+        story.append(t)
     else:
-        c.drawString(18 * mm, y, "(no consumptions)")
-        y -= 6 * mm
+        story.append(Paragraph("<i>No consumptions logged.</i>", small_grey))
 
-    y -= 2 * mm
-
-    # Kegging runs
-    ensure_space()
-    c.setFont('Helvetica-Bold', 11)
-    c.drawString(18 * mm, y, "Kegging")
-    y -= 6 * mm
-    c.setFont('Helvetica', 9)
+    # Kegging
+    story.append(Paragraph("Kegging", h2))
     if kg is not None and not kg.empty:
+        rows = [["Units", "Unit", "Beer used (L)", "Warehouse", "SKU"]]
         for _, r in kg.iterrows():
-            ensure_space()
-            units = _safe(r.get('units_produced', ''))
-            out_unit = _safe(r.get('output_unit', ''))
-            line = f"{units} {out_unit} — Beer used: {_fmt_num(r.get('beer_volume_l',''), ' L')} — Warehouse: {_safe(r.get('warehouse',''))} — SKU: {_safe(r.get('composite_name',''))}"
-            c.drawString(18 * mm, y, line[:130])
-            y -= 4.5 * mm
+            rows.append([
+                _safe(r.get('units_produced','')) or "—",
+                _safe(r.get('output_unit','')) or "—",
+                _fmt_num(r.get('beer_volume_l',''), 2) or "—",
+                _safe(r.get('warehouse','')) or "—",
+                _safe(r.get('composite_name','')) or "—"
+            ])
+        t = Table(rows, colWidths=[18*mm, 18*mm, 26*mm, 38*mm, (A4[0]-36*mm-18*mm-18*mm-26*mm-38*mm)])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,0), 9),
+            ("FONTSIZE", (0,1), (-1,-1), 8.8),
+            ("ALIGN", (0,1), (2,-1), "RIGHT"),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LINEBELOW", (0,0), (-1,0), 0.5, colors.lightgrey),
+            ("INNERGRID", (0,0), (-1,-1), 0.25, colors.lightgrey),
+            ("BOX", (0,0), (-1,-1), 0.5, colors.lightgrey),
+            ("LEFTPADDING", (0,0), (-1,-1), 6),
+            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+        ]))
+        story.append(t)
     else:
-        c.drawString(18 * mm, y, "(no kegging runs)")
-        y -= 6 * mm
+        story.append(Paragraph("<i>No kegging runs logged.</i>", small_grey))
 
-    y -= 2 * mm
-    ensure_space()
-    c.setFont('Helvetica-Bold', 11)
-    c.drawString(18 * mm, y, f"Total logged materials cost: {total_cost:.2f}")
-
-    c.showPage()
-    c.save()
-    buf.seek(0)
+    # Build
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     return buf.getvalue()
 
 def check_supplier_usage(supplier_name):
@@ -3545,7 +3732,7 @@ def _find_logo_path():
 # -----------------------------
 _logo_path = _find_logo_path()
 if _logo_path:
-    st.sidebar.image(_logo_path, use_container_width=True)
+    st.sidebar.image(_logo_path, width=140)
 
 page = st.sidebar.radio("Navigation", [
     "Dashboard", "Breweries", "Ingredients", "Products", "Orders", "Purchases", 
