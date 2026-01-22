@@ -213,6 +213,9 @@ def get_engine() -> Engine:
     _ensure_columns(
         "production_batches",
         {
+            "og": "DOUBLE PRECISION",
+            "efficiency": "DOUBLE PRECISION",
+            "brewed_volume_l": "DOUBLE PRECISION",
             "loss_l": "DOUBLE PRECISION DEFAULT 0",
             "finished_date": "DATE",
         },
@@ -1410,6 +1413,9 @@ def init_database():
     _ensure_columns(
         "production_batches",
         {
+            "og": "DOUBLE PRECISION",
+            "efficiency": "DOUBLE PRECISION",
+            "brewed_volume_l": "DOUBLE PRECISION",
             "loss_l": "DOUBLE PRECISION DEFAULT 0",
             "finished_date": "DATE",
         },
@@ -2473,6 +2479,217 @@ def sum_production_costs(data: dict, batch_id: int):
         return float(sub[tcol].fillna(0).sum())
     except Exception:
         return 0.0
+
+
+def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
+    """Build a production report PDF for the given batch and return raw PDF bytes."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.units import mm
+
+    data2 = get_all_data()
+    batches = data2.get('production_batches', pd.DataFrame())
+    events = data2.get('production_events', pd.DataFrame())
+    cons = data2.get('production_consumptions', pd.DataFrame())
+    kegs = data2.get('production_keg_runs', pd.DataFrame())
+    recipes = data2.get('recipes', pd.DataFrame())
+
+    # Resolve batch row
+    b = {}
+    if batches is not None and not batches.empty:
+        bid_col = _col(batches, 'id_batch', 'batch_id', 'id')
+        if bid_col:
+            mm_b = batches[batches[bid_col] == batch_id]
+            if not mm_b.empty:
+                b = mm_b.iloc[0].to_dict()
+
+    # Related tables
+    ev = pd.DataFrame()
+    if events is not None and not events.empty:
+        e_bid = _col(events, 'batch_id')
+        if e_bid:
+            ev = events[events[e_bid] == batch_id].copy()
+
+    co = pd.DataFrame()
+    if cons is not None and not cons.empty:
+        c_bid = _col(cons, 'batch_id')
+        if c_bid:
+            co = cons[cons[c_bid] == batch_id].copy()
+
+    kg = pd.DataFrame()
+    if kegs is not None and not kegs.empty:
+        k_bid = _col(kegs, 'batch_id')
+        if k_bid:
+            kg = kegs[kegs[k_bid] == batch_id].copy()
+
+    total_cost = sum_production_costs(data2, batch_id)
+
+    # Pull some recipe stats if possible
+    recipe_stats = {}
+    try:
+        rid = b.get('recipe_id', None)
+        if rid is not None and recipes is not None and not recipes.empty:
+            rid_col = _col(recipes, 'id_recipe', 'recipe_id', 'id')
+            if rid_col:
+                mrec = recipes[recipes[rid_col].astype(str) == str(rid)]
+                if not mrec.empty:
+                    recipe_stats = mrec.iloc[0].to_dict()
+    except Exception:
+        recipe_stats = {}
+
+    def _safe(v):
+        if v is None:
+            return ''
+        s = str(v)
+        return '' if s.lower() == 'nan' else s
+
+    def _fmt_num(v, suffix=''):
+        try:
+            if v is None or str(v).lower() == 'nan':
+                return ''
+            return f"{float(v):g}{suffix}"
+        except Exception:
+            return _safe(v)
+
+    # Layout helpers
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+
+    def new_page():
+        nonlocal y
+        c.showPage()
+        y = h - 18 * mm
+        c.setFont('Helvetica-Bold', 14)
+        c.drawString(18 * mm, y, f"Production Report — Batch #{batch_id}")
+        y -= 8 * mm
+        c.setFont('Helvetica', 9)
+
+    def ensure_space(min_y=18*mm):
+        nonlocal y
+        if y < min_y:
+            new_page()
+
+    y = h - 18 * mm
+    c.setFont('Helvetica-Bold', 14)
+    c.drawString(18 * mm, y, f"Production Report — Batch #{batch_id}")
+    y -= 8 * mm
+
+    c.setFont('Helvetica', 10)
+    c.drawString(18 * mm, y, f"Beer/Recipe: {_safe(b.get('recipe_name',''))}")
+    y -= 6 * mm
+
+    # Batch basics
+    planned_vol = b.get('planned_volume_l', b.get('planned_volume', ''))
+    planned_date = b.get('planned_date', '')
+    brewed_vol = b.get('brewed_volume_l', b.get('volume_brewed_l', b.get('actual_volume_l', '')))
+    og = b.get('og', '')
+    eff = b.get('efficiency', '')
+
+    c.setFont('Helvetica', 9)
+    c.drawString(18 * mm, y, f"Batch code: {_safe(b.get('batch_code',''))}   •   Brewery: {_safe(b.get('brewery_id',''))}   •   System: {_safe(b.get('brewhouse',''))}")
+    y -= 5 * mm
+    c.drawString(18 * mm, y, f"Planned: {_fmt_num(planned_vol, ' L')} on {_safe(planned_date)}")
+    y -= 5 * mm
+    if any([brewed_vol, og, eff]):
+        c.drawString(18 * mm, y, f"Brew day: Volume {_fmt_num(brewed_vol, ' L')}   •   OG {_fmt_num(og)}°P   •   Efficiency {_fmt_num(eff)}%")
+        y -= 5 * mm
+
+    c.drawString(18 * mm, y, f"Stage/Status: {_safe(b.get('stage',''))} / {_safe(b.get('status',''))}   •   Vessel: {_safe(b.get('current_vessel',''))}")
+    y -= 8 * mm
+
+    # Recipe stats (optional)
+    og_r = recipe_stats.get('og', recipe_stats.get('original_gravity', recipe_stats.get('og_plato')))
+    fg_r = recipe_stats.get('fg', recipe_stats.get('final_gravity', recipe_stats.get('fg_plato')))
+    ibu_r = recipe_stats.get('ibus', recipe_stats.get('ibu'))
+    col_r = recipe_stats.get('ebc', recipe_stats.get('color_ebc', recipe_stats.get('srm')))
+    if any([og_r, fg_r, ibu_r, col_r]):
+        c.setFont('Helvetica-Bold', 10)
+        c.drawString(18 * mm, y, "Recipe stats")
+        y -= 5 * mm
+        c.setFont('Helvetica', 9)
+        line = f"OG {_fmt_num(og_r)}°P  •  FG {_fmt_num(fg_r)}°P  •  IBU {_fmt_num(ibu_r)}  •  Color {_fmt_num(col_r)}"
+        c.drawString(18 * mm, y, line[:130])
+        y -= 8 * mm
+
+    # Events
+    c.setFont('Helvetica-Bold', 11)
+    c.drawString(18 * mm, y, "Events")
+    y -= 6 * mm
+    c.setFont('Helvetica', 9)
+    if ev is not None and not ev.empty:
+        dtcol = _col(ev, 'event_date')
+        try:
+            if dtcol:
+                ev[dtcol] = pd.to_datetime(ev[dtcol], errors='coerce')
+                ev = ev.sort_values(dtcol)
+        except Exception:
+            pass
+        for _, r in ev.iterrows():
+            ensure_space()
+            d = str(r.get(dtcol, r.get('event_date','')))[:19] if dtcol else str(r.get('event_date',''))[:19]
+            line = f"{d}: {r.get('event_type','')} {r.get('from_vessel','')} → {r.get('to_vessel','')}"
+            c.drawString(18 * mm, y, line[:130])
+            y -= 4.5 * mm
+            n = _safe(r.get('notes',''))
+            if n:
+                ensure_space()
+                c.setFont('Helvetica-Oblique', 8)
+                c.drawString(20 * mm, y, ("- " + n)[:150])
+                y -= 4.5 * mm
+                c.setFont('Helvetica', 9)
+    else:
+        c.drawString(18 * mm, y, "(no events)")
+        y -= 6 * mm
+
+    y -= 2 * mm
+
+    # Consumptions
+    ensure_space()
+    c.setFont('Helvetica-Bold', 11)
+    c.drawString(18 * mm, y, "Consumptions")
+    y -= 6 * mm
+    c.setFont('Helvetica', 9)
+    if co is not None and not co.empty:
+        for _, r in co.iterrows():
+            ensure_space()
+            line = f"{_safe(r.get('ingredient_name',''))}: {_fmt_num(r.get('quantity',''))} {_safe(r.get('unit',''))} — cost {_fmt_num(r.get('total_cost',''))}"
+            c.drawString(18 * mm, y, line[:130])
+            y -= 4.5 * mm
+    else:
+        c.drawString(18 * mm, y, "(no consumptions)")
+        y -= 6 * mm
+
+    y -= 2 * mm
+
+    # Kegging runs
+    ensure_space()
+    c.setFont('Helvetica-Bold', 11)
+    c.drawString(18 * mm, y, "Kegging")
+    y -= 6 * mm
+    c.setFont('Helvetica', 9)
+    if kg is not None and not kg.empty:
+        for _, r in kg.iterrows():
+            ensure_space()
+            units = _safe(r.get('units_produced', ''))
+            out_unit = _safe(r.get('output_unit', ''))
+            line = f"{units} {out_unit} — Beer used: {_fmt_num(r.get('beer_volume_l',''), ' L')} — Warehouse: {_safe(r.get('warehouse',''))} — SKU: {_safe(r.get('composite_name',''))}"
+            c.drawString(18 * mm, y, line[:130])
+            y -= 4.5 * mm
+    else:
+        c.drawString(18 * mm, y, "(no kegging runs)")
+        y -= 6 * mm
+
+    y -= 2 * mm
+    ensure_space()
+    c.setFont('Helvetica-Bold', 11)
+    c.drawString(18 * mm, y, f"Total logged materials cost: {total_cost:.2f}")
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
 def check_supplier_usage(supplier_name):
     """Verifica se um fornecedor tem compras associadas"""
     # Support both legacy purchases and the new purchase-by-order model
@@ -8537,16 +8754,54 @@ elif page == "Production":
                                 fm = equipment_df[equipment_df[eq_type_col].astype(str).str.lower().str.contains('ferment', na=False)]
                                 fermenter_opts = fm[eq_name_col].astype(str).tolist() if not fm.empty else eq_names
 
+                            
+                            # Defaults (prefer existing batch values; fallback to recipe values when available)
+                            default_og = 0.0
+                            default_eff = 0.0
+                            try:
+                                default_og = float(selected_batch.get('og') or 0)
+                            except Exception:
+                                default_og = 0.0
+                            try:
+                                default_eff = float(selected_batch.get('efficiency') or 0)
+                            except Exception:
+                                default_eff = 0.0
+                            if (default_og <= 0 or default_eff <= 0) and recipes_df is not None and not recipes_df.empty:
+                                try:
+                                    rid0 = str(selected_batch.get(b_recipe_id_col) or '')
+                                    if rid0 and recipe_id_col:
+                                        mrec = recipes_df[recipes_df[recipe_id_col].astype(str) == rid0]
+                                        if not mrec.empty:
+                                            rrow = mrec.iloc[0]
+                                            if default_og <= 0:
+                                                og_col = _col(recipes_df, 'og', 'original_gravity', 'og_plato')
+                                                if og_col:
+                                                    default_og = float(rrow.get(og_col) or 0)
+                                            if default_eff <= 0:
+                                                eff_col = _col(recipes_df, 'efficiency', 'brewhouse_efficiency')
+                                                if eff_col:
+                                                    default_eff = float(rrow.get(eff_col) or 0)
+                                except Exception:
+                                    pass
+
                             with st.form(f'brew_action_{batch_id}', clear_on_submit=True):
-                                c1, c2, c3 = st.columns(3)
-                                with c1:
+                                r1, r2, r3, r4 = st.columns(4)
+                                with r1:
                                     brew_date = st.date_input('Brew date', date.today())
-                                    actual_volume = st.number_input('Actual volume (L)', min_value=0.0, value=float(planned_vol or 0), step=1.0)
-                                with c2:
+                                with r2:
+                                    actual_volume = st.number_input('Volume (L)', min_value=0.0, value=float(planned_vol or 0), step=1.0)
+                                with r3:
+                                    og_brew = st.number_input('OG (°P)', min_value=0.0, value=float(default_og or 0), step=0.1)
+                                with r4:
+                                    efficiency_brew = st.number_input('Efficiency (%)', min_value=0.0, max_value=100.0, value=float(default_eff or 0), step=0.5)
+
+                                c1, c2 = st.columns(2)
+                                with c1:
                                     fermenter = st.selectbox('Fermenter', fermenter_opts if fermenter_opts else [''], index=0)
+                                with c2:
                                     brewery = st.text_input('Brewery / location', value=str(selected_batch.get('brewery_id','') or ''))
-                                with c3:
-                                    notes = st.text_area('Notes', height=90)
+
+                                notes = st.text_area('Notes', height=90)
 
                                 st.markdown("**Ingredient consumption**")
                                 st.caption("You can substitute ingredients or add extra ingredients for this brew. Quantities entered here will be used for batch costing.")
@@ -8667,7 +8922,7 @@ elif page == "Production":
                                         'to_vessel': fermenter,
                                         'notes': notes,
                                         'created_by': st.session_state.get('auth_user', 'admin'),
-                                        'meta': json.dumps({'action': 'Brew'}, ensure_ascii=False),
+                                        'meta': json.dumps({'action': 'Brew', 'og': float(og_brew) if og_brew is not None else None, 'efficiency': float(efficiency_brew) if efficiency_brew is not None else None, 'volume_l': float(actual_volume)}, ensure_ascii=False),
                                     })
 
                                     # Consume ingredients
@@ -8718,10 +8973,29 @@ elif page == "Production":
                                         'stage': 'Fermenting',
                                         'current_vessel': fermenter,
                                         'volume_remaining_l': float(actual_volume),
-                                    }, f"{b_id_col} = :id", {'id': batch_id})
+                                        'brewed_volume_l': float(actual_volume),
+                                        'og': float(og_brew) if og_brew is not None else None,
+                                        'efficiency': float(efficiency_brew) if efficiency_brew is not None else None,
+                                    },  f"{b_id_col} = :id", {'id': batch_id})
 
                                     st.success(f"✅ Brew recorded. Materials cost logged: {total_cost:.2f}")
                                     st.rerun()
+
+
+                            st.markdown('---')
+                            st.caption('Production report (PDF)')
+                            _pdf_state_key = f"prod_pdf_bytes_{batch_id}"
+                            if st.button('Generate Production Report (PDF)', key=f'gen_prod_pdf_brew_{batch_id}', use_container_width=True):
+                                st.session_state[_pdf_state_key] = generate_production_report_pdf_bytes(batch_id)
+                            if _pdf_state_key in st.session_state:
+                                st.download_button(
+                                    '⬇️ Download Production Report',
+                                    data=st.session_state[_pdf_state_key],
+                                    file_name=f'production_report_batch_{batch_id}.pdf',
+                                    mime='application/pdf',
+                                    use_container_width=True,
+                                    key=f'dl_prod_pdf_brew_{batch_id}',
+                                )
 
                         # ---- DRY HOP / ADJUNCT ----
                         if action in {'Dry Hop', 'Add Adjunct'}:
@@ -9086,88 +9360,17 @@ elif page == "Production":
             total_cost = sum_production_costs(get_all_data(), batch_id)
             st.metric('Total logged materials cost', f"{total_cost:.2f}")
 
+            _pdf_key = f"prod_report_pdf_{batch_id}"
             if st.button('Generate PDF report', use_container_width=True):
-                from reportlab.lib.pagesizes import A4
-                from reportlab.pdfgen import canvas
-                from reportlab.lib.units import mm
-
-                data2 = get_all_data()
-                batches = data2.get('production_batches', pd.DataFrame())
-                events = data2.get('production_events', pd.DataFrame())
-                cons = data2.get('production_consumptions', pd.DataFrame())
-                kegs = data2.get('production_keg_runs', pd.DataFrame())
-
-                b = batches[batches[_col(batches,'id_batch','batch_id','id')] == batch_id].iloc[0].to_dict() if not batches.empty else {}
-                ev = events[events[_col(events,'batch_id')] == batch_id] if events is not None and not events.empty else pd.DataFrame()
-                co = cons[cons[_col(cons,'batch_id')] == batch_id] if cons is not None and not cons.empty else pd.DataFrame()
-                kg = kegs[kegs[_col(kegs,'batch_id')] == batch_id] if kegs is not None and not kegs.empty else pd.DataFrame()
-
-                buf = io.BytesIO()
-                c = canvas.Canvas(buf, pagesize=A4)
-                w, h = A4
-                y = h - 20*mm
-                c.setFont('Helvetica-Bold', 14)
-                c.drawString(20*mm, y, f"Production Report — Batch #{batch_id}")
-                y -= 10*mm
-                c.setFont('Helvetica', 10)
-                c.drawString(20*mm, y, f"Beer/Recipe: {b.get('recipe_name','')}")
-                y -= 6*mm
-                c.drawString(20*mm, y, f"Planned: {b.get('planned_volume_l','')} L on {b.get('planned_date','')}")
-                y -= 6*mm
-                c.drawString(20*mm, y, f"Stage/Status: {b.get('stage','')} / {b.get('status','')}")
-                y -= 10*mm
-
-                c.setFont('Helvetica-Bold', 11)
-                c.drawString(20*mm, y, "Events")
-                y -= 6*mm
-                c.setFont('Helvetica', 9)
-                if ev is not None and not ev.empty:
-                    for _, r in ev.sort_values(_col(ev,'event_date') or ev.columns[0]).iterrows():
-                        line = f"{str(r.get('event_date',''))[:19]}: {r.get('event_type','')} {r.get('from_vessel','')} → {r.get('to_vessel','')}"
-                        c.drawString(20*mm, y, line[:120])
-                        y -= 5*mm
-                        if y < 20*mm:
-                            c.showPage(); y = h - 20*mm
-                else:
-                    c.drawString(20*mm, y, "(no events)"); y -= 6*mm
-
-                c.setFont('Helvetica-Bold', 11)
-                c.drawString(20*mm, y, "Consumptions")
-                y -= 6*mm
-                c.setFont('Helvetica', 9)
-                if co is not None and not co.empty:
-                    for _, r in co.iterrows():
-                        line = f"{r.get('ingredient_name','')}: {r.get('quantity','')} {r.get('unit','')} — cost {r.get('total_cost','')}"
-                        c.drawString(20*mm, y, line[:120])
-                        y -= 5*mm
-                        if y < 20*mm:
-                            c.showPage(); y = h - 20*mm
-                else:
-                    c.drawString(20*mm, y, "(no consumptions)"); y -= 6*mm
-
-                c.setFont('Helvetica-Bold', 11)
-                c.drawString(20*mm, y, "Kegging")
-                y -= 6*mm
-                c.setFont('Helvetica', 9)
-                if kg is not None and not kg.empty:
-                    for _, r in kg.iterrows():
-                        units = r.get('units_produced', '')
-                        out_unit = r.get('output_unit', '')
-                        line = f"{units} {out_unit} — Beer used: {r.get('beer_volume_l','')} L — Warehouse: {r.get('warehouse','')} — SKU: {r.get('composite_name','')}"
-                        c.drawString(20*mm, y, line[:120])
-                        y -= 5*mm
-                        if y < 20*mm:
-                            c.showPage(); y = h - 20*mm
-                else:
-                    c.drawString(20*mm, y, "(no kegging runs)"); y -= 6*mm
-
-                y -= 4*mm
-                c.setFont('Helvetica-Bold', 11)
-                c.drawString(20*mm, y, f"Total logged materials cost: {total_cost:.2f}")
-
-                c.showPage(); c.save()
-                buf.seek(0)
-                st.download_button('⬇️ Download PDF', data=buf.getvalue(), file_name=f'batch_{batch_id}_report.pdf', mime='application/pdf', use_container_width=True)
+                st.session_state[_pdf_key] = generate_production_report_pdf_bytes(batch_id)
+            if _pdf_key in st.session_state:
+                st.download_button(
+                    '⬇️ Download PDF',
+                    data=st.session_state[_pdf_key],
+                    file_name=f'production_report_batch_{batch_id}.pdf',
+                    mime='application/pdf',
+                    use_container_width=True,
+                )
 elif page == "Calendar":
     st.title("📅 Production Calendar")
     
