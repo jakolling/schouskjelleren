@@ -9163,6 +9163,35 @@ elif page == "Production":
                 if actions_tab is not None:
                     with actions_tab:
                         st.subheader("Actions")
+                        
+                        # Detect whether Brew already exists for this batch (used by Undo Brew + disabling Brew)
+                        brew_event_exists = False
+                        brew_event_id = None
+                        brew_event_date = None
+                        try:
+                            if events_df is not None and not events_df.empty:
+                                _e_bid = _col(events_df, 'batch_id')
+                                _e_type = _col(events_df, 'event_type', 'type')
+                                _e_id = _col(events_df, 'id_prod_event', 'id_event', 'id')
+                                _e_date = _col(events_df, 'event_date')
+                                if _e_bid and _e_type:
+                                    _ev0 = events_df[events_df[_e_bid] == batch_id].copy()
+                                    if not _ev0.empty:
+                                        _brew0 = _ev0[_ev0[_e_type].astype(str).str.lower() == 'brew']
+                                        if not _brew0.empty:
+                                            brew_event_exists = True
+                                            if _e_id and _e_id in _brew0.columns:
+                                                try:
+                                                    brew_event_id = int(_brew0.iloc[-1][_e_id])
+                                                except Exception:
+                                                    brew_event_id = None
+                                            if _e_date and _e_date in _brew0.columns:
+                                                try:
+                                                    brew_event_date = pd.to_datetime(_brew0.iloc[-1][_e_date], errors='coerce')
+                                                except Exception:
+                                                    brew_event_date = None
+                        except Exception:
+                            pass
 
                         # ---- UNDO BREW ----
                         if brew_event_exists and brew_event_id is not None:
@@ -9287,35 +9316,8 @@ elif page == "Production":
 
                         # ---- BREW ----
                         if action == 'Brew':
-                            # Prevent accidental double-consumption: if Brew already exists, we disable "Record Brew"
-                            brew_event_exists = False
-                            brew_event_id = None
-                            brew_event_date = None
-                            try:
-                                if events_df is not None and not events_df.empty:
-                                    _e_bid = _col(events_df, 'batch_id')
-                                    _e_type = _col(events_df, 'event_type', 'type')
-                                    _e_id = _col(events_df, 'id_prod_event', 'id_event', 'id')
-                                    _e_date = _col(events_df, 'event_date')
-                                    if _e_bid and _e_type:
-                                        _ev0 = events_df[events_df[_e_bid] == batch_id].copy()
-                                        if not _ev0.empty:
-                                            _brew0 = _ev0[_ev0[_e_type].astype(str).str.lower() == 'brew']
-                                            if not _brew0.empty:
-                                                brew_event_exists = True
-                                                if _e_id and _e_id in _brew0.columns:
-                                                    try:
-                                                        brew_event_id = int(_brew0.iloc[-1][_e_id])
-                                                    except Exception:
-                                                        brew_event_id = None
-                                                if _e_date and _e_date in _brew0.columns:
-                                                    try:
-                                                        brew_event_date = pd.to_datetime(_brew0.iloc[-1][_e_date], errors='coerce')
-                                                    except Exception:
-                                                        brew_event_date = None
-                            except Exception:
-                                pass
-
+                            # Prevent accidental double-consumption: Brew already recorded will disable "Record Brew"
+                            # (brew_event_exists / brew_event_id / brew_event_date computed above)
                             if brew_event_exists:
                                 msg = "⚠️ Brew already recorded for this batch."
                                 if brew_event_date is not None and not pd.isna(brew_event_date):
