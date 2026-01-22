@@ -9522,6 +9522,7 @@ elif page == "Production":
     b_vessel_col = _col(batches_df, 'current_vessel')
     b_rem_col = _col(batches_df, 'volume_remaining_l')
     b_loss_col = _col(batches_df, 'loss_l')
+    b_code_col = _col(batches_df, 'batch_code')
 
     recipe_name_col = _col(recipes_df, 'name')
     recipe_id_col = _col(recipes_df, 'id_recipe', 'recipe_id', 'id')
@@ -9627,13 +9628,25 @@ elif page == "Production":
                                 brewhouse = st.text_input('Custom brewhouse / system', placeholder='e.g., Pilot system')
                             else:
                                 brewhouse = brewhouse_choice
-                            st.caption("Batch code is assigned automatically after you create the order.")
-                            batch_code = ""
+                            st.caption("Batch code: you can type one manually, or leave it blank to auto-assign (uses the Batch ID).")
+                            batch_code = st.text_input("Batch code (optional)", value="", placeholder="Leave blank to auto-assign", key="prod_create_batch_code")
                         notes = st.text_area('Notes')
                         submit = st.form_submit_button('Create order', type='primary', use_container_width=True)
 
                     if submit:
                         require_admin_action()
+
+                        # Validate manual batch code (when provided)
+                        bc_in = (batch_code or '').strip()
+                        if bc_in:
+                            try:
+                                if batches_df is not None and not batches_df.empty and (b_code_col or 'batch_code') in batches_df.columns and b_id_col:
+                                    if (batches_df[(b_code_col or 'batch_code')].astype(str) == bc_in).any():
+                                        st.error("Batch code already exists. Please choose a unique code.")
+                                        st.stop()
+                            except Exception:
+                                pass
+
                         rid = None
                         if recipe_name and recipes_df is not None and not recipes_df.empty and recipe_name_col and recipe_id_col:
                             m = recipes_df[recipes_df[recipe_name_col].astype(str) == str(recipe_name)]
@@ -9662,12 +9675,13 @@ elif page == "Production":
                             'created_by': st.session_state.get('auth_user', 'admin'),
                         })
 
-                        # Set batch code to the Batch ID (default)
-                        try:
-                            _id_col = b_id_col if 'b_id_col' in locals() and b_id_col else 'id'
-                            update_data('production_batches', {'batch_code': str(batch_id)}, f"{_id_col} = :id", {'id': batch_id})
-                        except Exception:
-                            pass
+                        # Auto-assign batch code only when user left it blank
+                        if not str(batch_code or '').strip():
+                            try:
+                                _id_col = b_id_col if 'b_id_col' in locals() and b_id_col else 'id'
+                                update_data('production_batches', {'batch_code': str(batch_id)}, f"{_id_col} = :id", {'id': batch_id})
+                            except Exception:
+                                pass
 
                         # Mark calendar
                         try:
@@ -9705,10 +9719,26 @@ elif page == "Production":
                     bid = r.get(b_id_col)
                     pdx = r.get(b_planned_date_col)
                     pdx_s = str(pdx)[:10] if pdx is not None else ''
-                    return f"#{bid} — {pdx_s} — {r.get('recipe_name','')} — {r.get(b_stage_col,'')}"
+                    code = (r.get(b_code_col) if b_code_col else r.get("batch_code"))
+                    code_s = str(code) if code is not None else ""
+                    code_s = code_s.strip()
+                    code_part = f" ({code_s})" if code_s else ""
+                    return f"#{bid}{code_part} — {pdx_s} — {r.get('recipe_name','')} — {r.get(b_stage_col,'')}"
 
                 records = view.to_dict('records')
-                selected_batch = st.selectbox('Select order', records, format_func=_label)
+                # Show only active (not completed/cancelled) orders here.
+                active_records = records
+                try:
+                    if b_status_col and b_status_col in view.columns:
+                        active_records = [r for r in records if _is_active_batch_status(str(r.get(b_status_col) or ''))]
+                except Exception:
+                    active_records = records
+
+                if not active_records:
+                    st.info('No active production orders. Finished/cancelled orders are available in the "Reports" tab.')
+                    selected_batch = None
+                else:
+                    selected_batch = st.selectbox('Select order', active_records, format_func=_label)
 
         with right:
             st.subheader("Order details")
@@ -9738,6 +9768,56 @@ elif page == "Production":
                     actions_tab = None
 
                 with view_tab:
+                    # ---- BATCH CODE (editable) ----
+                    try:
+                        _bcode_val = str(selected_batch.get(b_code_col) if b_code_col else selected_batch.get('batch_code') or '')
+                    except Exception:
+                        _bcode_val = ''
+                    st.markdown("#### Batch code")
+                    if _bcode_val.strip():
+                        st.write(f"**Current:** `{_bcode_val.strip()}`")
+                    else:
+                        st.write("**Current:** (blank)")
+
+                    if is_admin():
+                        with st.form(f"edit_batch_code_{batch_id}", clear_on_submit=False):
+                            new_code = st.text_input(
+                                "Edit batch code",
+                                value=_bcode_val.strip(),
+                                max_chars=50,
+                                help="Tip: use a unique, human-friendly code (e.g. 2026-01-PILS).",
+                            )
+                            save_code = st.form_submit_button("Save batch code", type="primary", use_container_width=True)
+
+                        if save_code:
+                            require_admin_action()
+                            nc = (new_code or '').strip()
+                            if not nc:
+                                st.error("Batch code can't be empty.")
+                                st.stop()
+                            # Uniqueness check
+                            try:
+                                if batches_df is not None and not batches_df.empty and b_id_col and b_code_col:
+                                    _dups = batches_df[
+                                        (batches_df[b_id_col].astype(int) != int(batch_id))
+                                        & (batches_df[b_code_col].astype(str) == nc)
+                                    ]
+                                    if not _dups.empty:
+                                        st.error("This batch code is already used by another batch. Choose a unique code.")
+                                        st.stop()
+                            except Exception:
+                                pass
+
+                            update_data(
+                                'production_batches',
+                                {(b_code_col or 'batch_code'): nc},
+                                f"{b_id_col} = :id",
+                                {'id': batch_id},
+                            )
+                            st.success("✅ Batch code updated.")
+                            st.rerun()
+
+                    st.markdown('---')
                     st.subheader("Timeline")
                     if events_df is None or events_df.empty:
                         st.caption("No events yet.")
@@ -11299,27 +11379,107 @@ elif page == "Production":
                                 st.rerun()
 
     with tab_reports:
-        st.subheader('Batch report')
-        if batches_df is None or batches_df.empty:
-            st.info('No batches yet.')
-        else:
-            records = batches_df.to_dict('records')
-            selected = st.selectbox('Select batch', records, format_func=lambda r: f"#{r.get(b_id_col)} {r.get('batch_code','')} {r.get('recipe_name','')}")
-            batch_id = int(selected.get(b_id_col))
-            total_cost = sum_production_costs(get_all_data(), batch_id)
-            st.metric('Total logged materials cost', f"{total_cost:.2f}")
+        rep_finished, rep_batch = st.tabs(["Finished Orders", "Batch report"])
 
-            _pdf_key = f"prod_report_pdf_{batch_id}"
-            if st.button('Generate PDF report', use_container_width=True):
-                st.session_state[_pdf_key] = generate_production_report_pdf_bytes(batch_id)
-            if _pdf_key in st.session_state:
-                st.download_button(
-                    '⬇️ Download PDF',
-                    data=st.session_state[_pdf_key],
-                    file_name=f'production_report_batch_{batch_id}.pdf',
-                    mime='application/pdf',
-                    use_container_width=True,
+        with rep_finished:
+            st.subheader("Finished orders")
+            if batches_df is None or batches_df.empty:
+                st.info("No batches yet.")
+            else:
+                viewf = batches_df.copy()
+
+                def _is_finished_status(s: str | None) -> bool:
+                    s0 = (s or "").strip().lower()
+                    return s0 in {"completed", "done", "finished", "cancelled", "canceled"}
+
+                # Filter finished/cancelled
+                try:
+                    if b_status_col and b_status_col in viewf.columns:
+                        viewf = viewf[viewf[b_status_col].astype(str).apply(lambda x: _is_finished_status(x))]
+                except Exception:
+                    pass
+
+                if viewf.empty:
+                    st.info('No finished/cancelled orders yet.')
+                else:
+                    # Sort (finished_date/cancelled_at/planned_date)
+                    sort_cols = []
+                    for c in ["finished_date", "cancelled_at", b_planned_date_col]:
+                        if c and c in viewf.columns:
+                            sort_cols.append(c)
+                    for c in sort_cols:
+                        try:
+                            viewf[c] = pd.to_datetime(viewf[c], errors="coerce")
+                        except Exception:
+                            pass
+                    if sort_cols:
+                        viewf = viewf.sort_values(sort_cols[0], ascending=False)
+
+                    # Nice view
+                    cols_show = []
+                    for c in [b_id_col, b_code_col, "recipe_name", b_planned_date_col, "finished_date", "cancelled_at", b_status_col, "cancelled_reason"]:
+                        if c and c in viewf.columns and c not in cols_show:
+                            cols_show.append(c)
+
+                    st.dataframe(viewf[cols_show], use_container_width=True)
+
+                    st.markdown("---")
+                    records_f = viewf.to_dict("records")
+                    sel_f = st.selectbox(
+                        "Select finished/cancelled order",
+                        records_f,
+                        format_func=lambda r: f"#{r.get(b_id_col)} {r.get(b_code_col) if b_code_col else r.get('batch_code','')} {r.get('recipe_name','')}",
+                        key="prod_finished_select",
+                    )
+                    if sel_f:
+                        fid = int(sel_f.get(b_id_col))
+                        fstatus = str(sel_f.get(b_status_col) or "")
+                        st.caption(f"Status: {fstatus}")
+                        # Quick PDF
+                        total_cost = sum_production_costs(get_all_data(), fid)
+                        st.metric("Total logged materials cost", f"{total_cost:.2f}")
+
+                        _pdf_key = f"prod_report_pdf_finished_{fid}"
+                        if st.button("Generate PDF report", key=f"gen_pdf_finished_{fid}", use_container_width=True):
+                            st.session_state[_pdf_key] = generate_production_report_pdf_bytes(fid)
+                        if _pdf_key in st.session_state:
+                            st.download_button(
+                                "⬇️ Download PDF",
+                                data=st.session_state[_pdf_key],
+                                file_name=f"production_report_batch_{fid}.pdf",
+                                mime="application/pdf",
+                                use_container_width=True,
+                                key=f"dl_pdf_finished_{fid}",
+                            )
+
+        with rep_batch:
+            st.subheader("Batch report")
+            if batches_df is None or batches_df.empty:
+                st.info("No batches yet.")
+            else:
+                records = batches_df.to_dict('records')
+                selected = st.selectbox(
+                    'Select batch',
+                    records,
+                    format_func=lambda r: f"#{r.get(b_id_col)} {r.get(b_code_col) if b_code_col else r.get('batch_code','')} {r.get('recipe_name','')}",
+                    key="prod_batch_report_select",
                 )
+                batch_id = int(selected.get(b_id_col))
+                total_cost = sum_production_costs(get_all_data(), batch_id)
+                st.metric('Total logged materials cost', f"{total_cost:.2f}")
+
+                _pdf_key = f"prod_report_pdf_{batch_id}"
+                if st.button('Generate PDF report', use_container_width=True, key=f"gen_pdf_any_{batch_id}"):
+                    st.session_state[_pdf_key] = generate_production_report_pdf_bytes(batch_id)
+                if _pdf_key in st.session_state:
+                    st.download_button(
+                        '⬇️ Download PDF',
+                        data=st.session_state[_pdf_key],
+                        file_name=f'production_report_batch_{batch_id}.pdf',
+                        mime='application/pdf',
+                        use_container_width=True,
+                        key=f"dl_pdf_any_{batch_id}",
+                    )
 elif page == "Calendar":
     st.title("📅 Production Calendar")
     
