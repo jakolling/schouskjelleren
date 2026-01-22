@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
 import io
+from pathlib import Path
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import calendar
@@ -3501,9 +3502,51 @@ def _on_page_change():
     st.session_state["_last_page"] = cur
 
 
+
+def _find_logo_path():
+    """Return path to a project logo image if present, else None.
+
+    Looks for common locations like assets/logo.(png|jpg|jpeg|webp) or logo.(png|...).
+    """
+    try:
+        base_dirs = []
+        # Prefer directory of this file, then current working directory
+        try:
+            base_dirs.append(Path(__file__).resolve().parent)
+        except Exception:
+            pass
+        try:
+            base_dirs.append(Path.cwd())
+        except Exception:
+            pass
+
+        candidates = [
+            Path("assets") / "logo.png",
+            Path("assets") / "logo.jpg",
+            Path("assets") / "logo.jpeg",
+            Path("assets") / "logo.webp",
+            Path("logo.png"),
+            Path("logo.jpg"),
+            Path("logo.jpeg"),
+            Path("logo.webp"),
+        ]
+        for bd in base_dirs:
+            for rel in candidates:
+                p = (bd / rel).resolve()
+                if p.exists() and p.is_file():
+                    return str(p)
+    except Exception:
+        return None
+    return None
+
+
 # -----------------------------
 # Navegação
 # -----------------------------
+_logo_path = _find_logo_path()
+if _logo_path:
+    st.sidebar.image(_logo_path, use_container_width=True)
+
 page = st.sidebar.radio("Navigation", [
     "Dashboard", "Breweries", "Ingredients", "Products", "Orders", "Purchases", 
     "Recipes", "Production", "Calendar"
@@ -3517,8 +3560,16 @@ st.sidebar.info(f"👤 Role: {st.session_state.get('auth_role','viewer')} | Mode
 # Dashboard Page
 # -----------------------------
 if page == "Dashboard":
-    st.title("🏭 Brewery Dashboard")
-    
+    logo_path = _find_logo_path()
+    if logo_path:
+        col_logo, col_title = st.columns([1, 6])
+        with col_logo:
+            st.image(logo_path, width=90)
+        with col_title:
+            st.title("🏭 Brewery Dashboard")
+    else:
+        st.title("🏭 Brewery Dashboard")
+
     # Métricas principais
     col1, col2, col3, col4 = st.columns(4)
     with col1:
