@@ -207,36 +207,6 @@ def get_engine() -> Engine:
     # pool_pre_ping evita conexões “mortas”
     return create_engine(db_url, pool_pre_ping=True)
 
-
-
-
-    # Production (v3) schema additions
-    _ensure_columns(
-        "production_batches",
-        {
-            "og": "DOUBLE PRECISION",
-            "efficiency": "DOUBLE PRECISION",
-            "brewed_volume_l": "DOUBLE PRECISION",
-            "loss_l": "DOUBLE PRECISION DEFAULT 0",
-            "finished_date": "DATE",
-        },
-    )
-    _ensure_columns(
-        "production_events",
-        {
-            "meta": "TEXT",
-        },
-    )
-    _ensure_columns(
-        "production_keg_runs",
-        {
-            "composite_id": "TEXT",
-            "composite_name": "TEXT",
-            "units_produced": "DOUBLE PRECISION",
-            "output_unit": "TEXT",
-        },
-    )
-
 # -----------------------------
 # PERFORMANCE HELPERS
 # -----------------------------
@@ -1459,6 +1429,10 @@ def init_database():
             "brewed_volume_l": "DOUBLE PRECISION",
             "loss_l": "DOUBLE PRECISION DEFAULT 0",
             "finished_date": "DATE",
+            # cancellation tracking (admin action: Cancel Order)
+            "cancelled_reason": "TEXT",
+            "cancelled_by": "TEXT",
+            "cancelled_at": "TIMESTAMPTZ",
         },
     )
     _ensure_columns(
@@ -9965,6 +9939,106 @@ elif page == "Production":
                                                     brew_event_date = None
                         except Exception:
                             pass
+
+                        # ---- CANCEL ORDER ----
+                        st.markdown("### 🛑 Cancel Order")
+                        _status_low = (str(status or '').strip().lower())
+                        if _status_low in {'cancelled', 'canceled'}:
+                            # Show reason if available
+                            try:
+                                cr = str(selected_batch.get('cancelled_reason') or '').strip()
+                            except Exception:
+                                cr = ''
+                            if cr:
+                                st.info(f"This order is already cancelled. Reason: {cr}")
+                            else:
+                                st.info("This order is already cancelled.")
+                        elif _status_low in {'completed', 'done', 'finished'}:
+                            st.info("Completed orders can't be cancelled.")
+                        else:
+                            # Only allow cancelling if no production events exist yet (safe: no inventory to revert)
+                            try:
+                                _e_bid2 = _col(events_df, 'batch_id')
+                                _has_events = False
+                                if events_df is not None and not events_df.empty and _e_bid2:
+                                    _has_events = not events_df[events_df[_e_bid2] == batch_id].empty
+                            except Exception:
+                                _has_events = False
+
+                            if _has_events:
+                                st.warning(
+                                    "Cancel Order is disabled because this batch already has actions recorded. "
+                                    "(Cancelling after actions would require inventory/process reversal.)"
+                                )
+                            else:
+                                with st.form(f"cancel_order_form_{batch_id}", clear_on_submit=True):
+                                    reason = st.text_area(
+                                        "Reason (max 200 characters)*",
+                                        max_chars=200,
+                                        height=80,
+                                        placeholder="Why are you cancelling this production order?",
+                                    )
+                                    submit_cancel = st.form_submit_button(
+                                        "🛑 Cancel order",
+                                        type="primary",
+                                        use_container_width=True,
+                                    )
+
+                                if submit_cancel:
+                                    require_admin_action()
+                                    r = (reason or '').strip()
+                                    if not r:
+                                        st.error("Cancellation reason is required (max 200 characters).")
+                                        st.stop()
+                                    if len(r) > 200:
+                                        st.error("Cancellation reason must be at most 200 characters.")
+                                        st.stop()
+
+                                    now_ts = datetime.now()
+
+                                    # Update batch
+                                    # Keep notes, but append cancellation note for quick visibility
+                                    try:
+                                        existing_notes = str(selected_batch.get('notes') or '').strip()
+                                    except Exception:
+                                        existing_notes = ''
+                                    cancel_line = f"Cancelled on {now_ts.date().isoformat()}: {r}"
+                                    merged_notes = (existing_notes + "\n" + cancel_line).strip() if existing_notes else cancel_line
+
+                                    update_data(
+                                        'production_batches',
+                                        {
+                                            'status': 'Cancelled',
+                                            'stage': 'Cancelled',
+                                            'current_vessel': '',
+                                            'cancelled_reason': r,
+                                            'cancelled_by': st.session_state.get('auth_user', 'admin'),
+                                            'cancelled_at': now_ts,
+                                            'notes': merged_notes,
+                                        },
+                                        f"{b_id_col} = :id",
+                                        {'id': batch_id},
+                                    )
+
+                                    # Log as production event
+                                    try:
+                                        insert_data('production_events', {
+                                            'batch_id': int(batch_id),
+                                            'event_type': 'Cancel Order',
+                                            'event_date': now_ts,
+                                            'from_vessel': str(current_vessel or ''),
+                                            'to_vessel': '',
+                                            'notes': r,
+                                            'created_by': st.session_state.get('auth_user', 'admin'),
+                                            'meta': json.dumps({'action': 'Cancel Order', 'reason': r}, ensure_ascii=False),
+                                        })
+                                    except Exception:
+                                        pass
+
+                                    st.success("✅ Production order cancelled.")
+                                    st.rerun()
+
+                        st.markdown("---")
 
                         # ---- UNDO BREW ----
                         if brew_event_exists and brew_event_id is not None:
