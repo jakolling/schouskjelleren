@@ -3039,11 +3039,11 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     # Build a 2x4 grid (label/value pairs)
     brewery = _first_nonempty(b.get('brewery_name'), b.get('brewery_id'))
     system = _first_nonempty(b.get('brewhouse'), b.get('system'))
-    # Batch code is the batch number
-    batch_number_txt = f"{batch_id}"
+    # Batch code (fallback to Batch ID)
+    batch_code_txt = _first_nonempty(b.get('batch_code'), f"{batch_id}")
 
     left_pairs = [
-        ("Batch number", _safe(batch_number_txt)),
+        ("Batch code", _safe(batch_code_txt)),
         ("Brewery", _safe(brewery)),
         ("System", _safe(system)),
         ("Planned", f"{_fmt_num(planned_vol)} L — {_safe(planned_date)}" if planned_vol or planned_date else "")
@@ -9220,7 +9220,7 @@ elif page == "Production":
                                 brewhouse = st.text_input('Custom brewhouse / system', placeholder='e.g., Pilot system')
                             else:
                                 brewhouse = brewhouse_choice
-                            st.caption("Batch number is assigned automatically after you create the order.")
+                            st.caption("Batch code is assigned automatically after you create the order.")
                             batch_code = ""
                         notes = st.text_area('Notes')
                         submit = st.form_submit_button('Create order', type='primary', use_container_width=True)
@@ -9255,7 +9255,7 @@ elif page == "Production":
                             'created_by': st.session_state.get('auth_user', 'admin'),
                         })
 
-                        # Batch code is the batch number (Batch ID)
+                        # Set batch code to the Batch ID (default)
                         try:
                             _id_col = b_id_col if 'b_id_col' in locals() and b_id_col else 'id'
                             update_data('production_batches', {'batch_code': str(batch_id)}, f"{_id_col} = :id", {'id': batch_id})
