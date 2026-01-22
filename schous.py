@@ -2957,6 +2957,23 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
         leading=18,
         spaceAfter=6
     )
+    beer_title_style = ParagraphStyle(
+        "BeerTitle",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=20,
+        leading=24,
+        spaceAfter=2
+    )
+    subtitle_style = ParagraphStyle(
+        "Subtitle",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=11,
+        leading=14,
+        textColor=colors.grey,
+        spaceAfter=10
+    )
     h2 = ParagraphStyle(
         "H2",
         parent=styles["Heading2"],
@@ -3032,7 +3049,7 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
         # Signature + confidentiality (left)
         canvas.setFont("Helvetica", 7.5)
         t = canvas.beginText(x_left, 9*mm)
-        t.textLine("Schous — Brewing & Production Software | Made by Joao Alberto Kolling")
+        t.textLine("Schouskjelleren — Brewing & Production Software | Made by Joao Alberto Kolling")
         t.textLine("CONFIDENTIAL: This document contains proprietary production data. For internal use only. Do not distribute without authorization.")
         canvas.drawText(t)
 
@@ -3045,11 +3062,12 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     story.append(Spacer(1, 8*mm))
 
     # Overview block
-    # Title block
-    story.append(Paragraph(f"<b>Production Report — Batch #{batch_id} - ({batch_code_txt})</b>", title_style))
+    # Title block: keep the report title in the header; make the beer name prominent in the body
     rec_name = _safe(b.get('recipe_name',''))
     if rec_name:
-        story.append(Paragraph(rec_name, normal))
+        story.append(Paragraph(f"<b>{rec_name}</b>", beer_title_style))
+    story.append(Paragraph(f"Batch #{batch_id} — Batch code: {batch_code_txt}", subtitle_style))
+
 
     # Build a 2x4 grid (label/value pairs)
     brewery = _first_nonempty(b.get('brewery_name'), b.get('brewery_id'))
@@ -4045,7 +4063,7 @@ if page == "Dashboard":
             for alert in alerts:
                 alert_class = f"alert-box alert-{alert['type']}"
                 st.markdown(f"""
-                <div class="{alert_class}">
+                <div class="{alert_class}" style="color:#000; font-weight:700;">
                     <div style="display: flex; justify-content: space-between; align-items: start;">
                         <div>
                             <strong>{alert['title']}</strong>
