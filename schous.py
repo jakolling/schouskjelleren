@@ -9401,6 +9401,66 @@ elif page == "Production":
                             else:
                                 st.caption("No events for this batch.")
 
+                    # Fermentation readings (multiple readings over time)
+                    st.markdown("### Fermentation readings")
+                    def _safe_json_load(_s):
+                        try:
+                            if _s is None:
+                                return {}
+                            if isinstance(_s, dict):
+                                return _s
+                            _ss = str(_s)
+                            if not _ss or _ss.strip().lower() in {"nan", "none"}:
+                                return {}
+                            return json.loads(_ss)
+                        except Exception:
+                            return {}
+
+                    try:
+                        _etype = _col(events_df, 'event_type', 'type')
+                        _emeta = _col(events_df, 'meta')
+                        if events_df is None or events_df.empty or not e_bid or not _etype:
+                            rview = pd.DataFrame()
+                        else:
+                            rview = events_df[events_df[e_bid] == batch_id].copy()
+                            rview = rview[rview[_etype].astype(str).str.lower() == 'reading']
+                            if not rview.empty and e_date:
+                                rview[e_date] = pd.to_datetime(rview[e_date], errors='coerce')
+                                rview = rview.sort_values(e_date)
+                            if not rview.empty and _emeta and _emeta in rview.columns:
+                                metas = rview[_emeta].apply(_safe_json_load)
+                                rview['Gravity (°P)'] = metas.apply(lambda d: d.get('gravity_plato') if isinstance(d, dict) else None)
+                                rview['Temp (°C)'] = metas.apply(lambda d: d.get('temp_c') if isinstance(d, dict) else None)
+                                rview['pH'] = metas.apply(lambda d: d.get('ph') if isinstance(d, dict) else None)
+                            elif not rview.empty:
+                                for _c in ('Gravity (°P)', 'Temp (°C)', 'pH'):
+                                    if _c not in rview.columns:
+                                        rview[_c] = None
+                    except Exception:
+                        rview = pd.DataFrame()
+
+                    if rview is None or rview.empty:
+                        st.caption("No fermentation readings yet.")
+                    else:
+                        # Chart: gravity + temperature over time (two series)
+                        try:
+                            if e_date and e_date in rview.columns:
+                                chart_df = rview[[e_date, 'Gravity (°P)', 'Temp (°C)']].copy()
+                                chart_df = chart_df.rename(columns={e_date: 'Date'}).set_index('Date')
+                                for _c in list(chart_df.columns):
+                                    chart_df[_c] = pd.to_numeric(chart_df[_c], errors='coerce')
+                                st.line_chart(chart_df)
+                        except Exception:
+                            pass
+
+                        cols_show = []
+                        if e_date and e_date in rview.columns:
+                            cols_show.append(e_date)
+                        for _c in ('Gravity (°P)', 'Temp (°C)', 'pH'):
+                            if _c in rview.columns:
+                                cols_show.append(_c)
+                        st.dataframe(rview[cols_show], use_container_width=True)
+
                     st.markdown('---')
                     st.subheader("Material consumption")
                     if cons_df is None or cons_df.empty:
@@ -9739,7 +9799,7 @@ elif page == "Production":
                                 pass
 
                         action = st.selectbox("Add action", [
-                            'Brew', 'Dry Hop', 'Add Adjunct', 'Conditioning', 'Transfer', 'Kegging', 'Finish Batch'
+                            'Brew', 'Reading', 'Dry Hop', 'Add Adjunct', 'Conditioning', 'Transfer', 'Kegging', 'Finish Batch'
                         ], key=f'action_type_{batch_id}')
 
                         # ---- BREW ----
@@ -10158,6 +10218,52 @@ elif page == "Production":
 
                                     st.success(f"✅ Brew recorded. Materials cost logged: {total_cost:.2f}")
                                     st.rerun()
+
+
+                        # ---- READING (Fermentation) ----
+                        if action == 'Reading':
+                            st.caption("Log a fermentation reading (you can add multiple readings over time).")
+                            with st.form(f'reading_action_{batch_id}', clear_on_submit=True):
+                                rc1, rc2, rc3, rc4 = st.columns(4)
+                                with rc1:
+                                    r_date = st.date_input('Date', date.today(), key=f'reading_date_{batch_id}')
+                                with rc2:
+                                    r_time = st.time_input('Time', datetime.now().time().replace(second=0, microsecond=0), key=f'reading_time_{batch_id}')
+                                with rc3:
+                                    gravity_p = st.number_input('Gravity (°P)', min_value=0.0, value=0.0, step=0.1, key=f'reading_grav_{batch_id}')
+                                with rc4:
+                                    temp_c = st.number_input('Temperature (°C)', value=0.0, step=0.1, key=f'reading_temp_{batch_id}')
+
+                                ph_val = st.number_input('pH (optional)', min_value=0.0, max_value=14.0, value=0.0, step=0.01, key=f'reading_ph_{batch_id}')
+                                r_notes = st.text_area('Notes (optional)', height=80, key=f'reading_notes_{batch_id}')
+                                r_submit = st.form_submit_button('Record Reading', type='primary', use_container_width=True)
+
+                            if r_submit:
+                                require_admin_action()
+                                try:
+                                    dt_val = datetime.combine(r_date, r_time)
+                                except Exception:
+                                    dt_val = datetime.now()
+
+                                insert_data('production_events', {
+                                    'batch_id': batch_id,
+                                    'event_type': 'Reading',
+                                    'event_date': pd.Timestamp(dt_val),
+                                    'from_vessel': current_vessel,
+                                    'to_vessel': current_vessel,
+                                    'notes': r_notes,
+                                    'created_by': st.session_state.get('auth_user', 'admin'),
+                                    'meta': json.dumps({
+                                        'action': 'Reading',
+                                        'gravity_plato': float(gravity_p) if gravity_p is not None else None,
+                                        'temp_c': float(temp_c) if temp_c is not None else None,
+                                        'ph': (float(ph_val) if ph_val and float(ph_val) > 0 else None),
+                                    }, ensure_ascii=False),
+                                })
+
+                                st.success("✅ Reading recorded.")
+                                st.rerun()
+
 
                         # ---- DRY HOP / ADJUNCT ----
                         if action in {'Dry Hop', 'Add Adjunct'}:
