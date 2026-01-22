@@ -1751,7 +1751,7 @@ def migrate_excel_to_sqlite(excel_file):
 
         return True
     except Exception as e:
-        st.error(f"Erro na migração: {e}")
+        st.error(f"Migration error: {e}")
         return False
 
 def export_to_excel():
@@ -3016,9 +3016,18 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
         canvas.setStrokeColor(colors.lightgrey)
         canvas.setLineWidth(0.5)
         canvas.line(x_left, 12*mm, x_right, 12*mm)
-        canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.grey)
-        canvas.drawRightString(x_right, 8*mm, f"Page {_doc.page}")
+
+        # Signature + confidentiality (left)
+        canvas.setFont("Helvetica", 7.5)
+        t = canvas.beginText(x_left, 9*mm)
+        t.textLine("Schous — Brewing & Production Software | Made by Joao Alberto Kolling")
+        t.textLine("CONFIDENTIAL: This document contains proprietary production data. For internal use only. Do not distribute without authorization.")
+        canvas.drawText(t)
+
+        # Page number (right)
+        canvas.setFont("Helvetica", 8)
+        canvas.drawRightString(x_right, 9*mm, f"Page {_doc.page}")
         canvas.restoreState()
 
     story = []
@@ -3030,10 +3039,11 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     # Build a 2x4 grid (label/value pairs)
     brewery = _first_nonempty(b.get('brewery_name'), b.get('brewery_id'))
     system = _first_nonempty(b.get('brewhouse'), b.get('system'))
-    batch_code = _first_nonempty(b.get('batch_code'))
+    # Batch code is the batch number
+    batch_number_txt = f"{batch_id}"
 
     left_pairs = [
-        ("Batch code", _safe(batch_code)),
+        ("Batch number", _safe(batch_number_txt)),
         ("Brewery", _safe(brewery)),
         ("System", _safe(system)),
         ("Planned", f"{_fmt_num(planned_vol)} L — {_safe(planned_date)}" if planned_vol or planned_date else "")
@@ -6336,7 +6346,7 @@ elif page == "Orders":
                             st.caption(f"Available in deposit: {avail:g} units")
                             # Warn if product is not available in this deposit
                             if avail <= 0:
-                                st.warning("⚠️ Este produto não tem estoque no depósito selecionado. Você pode adicionar ao pedido, mas não será possível dar baixa/expedir a partir deste depósito até que haja estoque.")
+                                st.warning("⚠️ This item has no stock in the selected warehouse. You can add it to the order, but you won’t be able to issue/consume it from this warehouse until stock is available.")
                     except Exception:
                         pass
 
@@ -6353,7 +6363,7 @@ elif page == "Orders":
                             warehouse = _safe_str(dep_rec.get(dep_name_col))
                             avail = _available_units(pid, warehouse)
                             if qty > avail + 1e-9:
-                                st.warning(f"⚠️ A quantidade solicitada ({qty:g}) é maior do que o estoque disponível ({avail:g}) neste depósito.")
+                                st.warning(f"⚠️ Requested quantity ({qty:g}) is greater than available stock ({avail:g}) in this warehouse.")
                     except Exception:
                         pass
 
@@ -9210,7 +9220,8 @@ elif page == "Production":
                                 brewhouse = st.text_input('Custom brewhouse / system', placeholder='e.g., Pilot system')
                             else:
                                 brewhouse = brewhouse_choice
-                            batch_code = st.text_input('Batch code (optional)', placeholder='e.g., A-2026-001')
+                            st.caption("Batch number is assigned automatically after you create the order.")
+                            batch_code = ""
                         notes = st.text_area('Notes')
                         submit = st.form_submit_button('Create order', type='primary', use_container_width=True)
 
@@ -9243,6 +9254,13 @@ elif page == "Production":
                             'notes': notes,
                             'created_by': st.session_state.get('auth_user', 'admin'),
                         })
+
+                        # Batch code is the batch number (Batch ID)
+                        try:
+                            _id_col = b_id_col if 'b_id_col' in locals() and b_id_col else 'id'
+                            update_data('production_batches', {'batch_code': str(batch_id)}, f"{_id_col} = :id", {'id': batch_id})
+                        except Exception:
+                            pass
 
                         # Mark calendar
                         try:
@@ -10997,4 +11015,4 @@ elif page == "Calendar":
 # RODAPÉ
 # -----------------------------
 st.sidebar.markdown("---")
-st.sidebar.caption("Brewery Manager v2.0 • Multiusuário (Postgres/SQLite)")
+st.sidebar.caption("Brewery Manager v2.0 • Multi-user (Postgres/SQLite)")
