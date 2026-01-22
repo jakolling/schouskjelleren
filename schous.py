@@ -485,6 +485,26 @@ def init_database():
                 notes TEXT,
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )""",
+"""CREATE TABLE IF NOT EXISTS stock_movements (
+                id_stock_move BIGSERIAL PRIMARY KEY,
+                movement_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                ingredient_name TEXT,
+                delta_qty DOUBLE PRECISION,
+                direction TEXT,
+                unit TEXT,
+                reason TEXT,
+                source TEXT,
+                destination TEXT,
+                ref_table TEXT,
+                ref_id BIGINT,
+                batch_id BIGINT,
+                prod_event_id BIGINT,
+                order_id BIGINT,
+                order_number TEXT,
+                created_by TEXT,
+                notes TEXT,
+                created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
 
             # New (2026): purchase header + line items (purchase by order, not by item)
             """CREATE TABLE IF NOT EXISTS purchase_orders (
@@ -793,6 +813,26 @@ def init_database():
                 unit TEXT,
                 total_cost REAL,
                 purchase_date DATE,
+                notes TEXT,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+"""CREATE TABLE IF NOT EXISTS stock_movements (
+                id_stock_move INTEGER PRIMARY KEY AUTOINCREMENT,
+                movement_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                ingredient_name TEXT,
+                delta_qty REAL,
+                direction TEXT,
+                unit TEXT,
+                reason TEXT,
+                source TEXT,
+                destination TEXT,
+                ref_table TEXT,
+                ref_id INTEGER,
+                batch_id INTEGER,
+                prod_event_id INTEGER,
+                order_id INTEGER,
+                order_number TEXT,
+                created_by TEXT,
                 notes TEXT,
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
@@ -1614,6 +1654,7 @@ def _get_all_data_uncached() -> dict[str, pd.DataFrame]:
     """Loads all tables from DB (no cache)."""
     table_names = [
         'ingredients',
+        'stock_movements',
         # legacy (kept for backwards compatibility)
         'purchases',
         # purchase-by-order (preferred)
@@ -1913,6 +1954,55 @@ def save_purchase_order_fast(
                         [{"n": u["n"], "q": u["q"]} for u in updates],
                     )
 
+
+        # --- Stock movement history (best-effort) ---
+        try:
+            unit_map = {}
+            for it in items_payload:
+                nm = str(it.get('ingredient') or '')
+                if nm and nm not in unit_map:
+                    unit_map[nm] = str(it.get('unit') or '')
+            mv_rows = []
+            for u in updates:
+                nm = str(u.get('n') or '')
+                dq = float(u.get('q') if 'q' in u else u.get('d') or 0)
+                if abs(dq) <= 1e-12 or not nm:
+                    continue
+                direction = 'IN' if dq > 0 else 'OUT'
+                src = supplier if direction == 'IN' else 'Inventory'
+                dst = 'Inventory' if direction == 'IN' else supplier
+                mv_rows.append({
+                    'movement_date': po_date,
+                    'ingredient_name': nm,
+                    'delta_qty': float(dq),
+                    'direction': direction,
+                    'unit': unit_map.get(nm, ''),
+                    'reason': str(transaction_type),
+                    'source': src,
+                    'destination': dst,
+                    'ref_table': 'purchase_orders',
+                    'ref_id': int(po_id),
+                    'order_id': int(po_id),
+                    'order_number': str(order_number),
+                    'created_by': str(recorded_by),
+                    'notes': (notes or ''),
+                })
+            if mv_rows:
+                conn.execute(
+                    sql_text(
+                        """
+                        INSERT INTO stock_movements
+                            (movement_date, ingredient_name, delta_qty, direction, unit,
+                             reason, source, destination, ref_table, ref_id, order_id, order_number, created_by, notes)
+                        VALUES
+                            (:movement_date, :ingredient_name, :delta_qty, :direction, :unit,
+                             :reason, :source, :destination, :ref_table, :ref_id, :order_id, :order_number, :created_by, :notes)
+                        """
+                    ),
+                    mv_rows,
+                )
+        except Exception:
+            pass
     bump_db_version()
     return po_id
 
@@ -2000,7 +2090,7 @@ def update_purchase_order_fast(
     with engine.begin() as conn:
         # Load old header + items
         old_hdr = conn.execute(
-            sql_text("SELECT transaction_type FROM purchase_orders WHERE id_purchase_order = :id"),
+            sql_text("SELECT transaction_type, supplier, order_number FROM purchase_orders WHERE id_purchase_order = :id"),
             {"id": int(po_id)},
         ).fetchone()
         old_type = str(old_hdr[0] if old_hdr else "Purchase")
@@ -2118,6 +2208,51 @@ def update_purchase_order_fast(
                 updates,
             )
 
+
+        # --- Stock movement history for PO edit (best-effort) ---
+        try:
+            mv_rows = []
+            for u in updates:
+                nm = str(u.get('n') or '')
+                dq = float(u.get('d') or 0.0)
+                if abs(dq) <= 1e-12 or not nm:
+                    continue
+                direction = 'IN' if dq > 0 else 'OUT'
+                src = supplier if direction == 'IN' else 'Inventory'
+                dst = 'Inventory' if direction == 'IN' else supplier
+                mv_rows.append({
+                    'movement_date': po_date,
+                    'ingredient_name': nm,
+                    'delta_qty': float(dq),
+                    'direction': direction,
+                    'unit': '',
+                    'reason': f'PO Update ({transaction_type})',
+                    'source': src,
+                    'destination': dst,
+                    'ref_table': 'purchase_orders',
+                    'ref_id': int(po_id),
+                    'order_id': int(po_id),
+                    'order_number': str(order_number),
+                    'created_by': str(recorded_by),
+                    'notes': (notes or ''),
+                })
+            if mv_rows:
+                conn.execute(
+                    sql_text(
+                        """
+                        INSERT INTO stock_movements
+                            (movement_date, ingredient_name, delta_qty, direction, unit,
+                             reason, source, destination, ref_table, ref_id, order_id, order_number, created_by, notes)
+                        VALUES
+                            (:movement_date, :ingredient_name, :delta_qty, :direction, :unit,
+                             :reason, :source, :destination, :ref_table, :ref_id, :order_id, :order_number, :created_by, :notes)
+                        """
+                    ),
+                    mv_rows,
+                )
+        except Exception:
+            pass
+
         # Recalc unit costs for affected ingredients
         _recalc_unit_cost_for_ingredients(conn, all_ings)
 
@@ -2135,6 +2270,8 @@ def delete_purchase_order_fast(po_id: int):
             {"id": int(po_id)},
         ).fetchone()
         old_type = str(hdr[0] if hdr else "Purchase")
+        supplier = str(hdr[1] if hdr and len(hdr) > 1 else "")
+        order_number = str(hdr[2] if hdr and len(hdr) > 2 else "")
 
         items = conn.execute(
             sql_text(
@@ -2174,6 +2311,50 @@ def delete_purchase_order_fast(po_id: int):
                 ),
                 updates,
             )
+
+        # --- Stock movement history for PO delete (best-effort) ---
+        try:
+            mv_rows = []
+            for u in updates:
+                nm = str(u.get('n') or '')
+                dq = float(u.get('d') or 0.0)
+                if abs(dq) <= 1e-12 or not nm:
+                    continue
+                direction = 'IN' if dq > 0 else 'OUT'
+                src = supplier if direction == 'IN' else 'Inventory'
+                dst = 'Inventory' if direction == 'IN' else supplier
+                mv_rows.append({
+                    'movement_date': pd.Timestamp.utcnow(),
+                    'ingredient_name': nm,
+                    'delta_qty': float(dq),
+                    'direction': direction,
+                    'unit': '',
+                    'reason': f'PO Delete (was {old_type})',
+                    'source': src,
+                    'destination': dst,
+                    'ref_table': 'purchase_orders',
+                    'ref_id': int(po_id),
+                    'order_id': int(po_id),
+                    'order_number': str(order_number),
+                    'created_by': str(st.session_state.get('auth_user', 'admin')),
+                    'notes': 'Purchase order deleted',
+                })
+            if mv_rows:
+                conn.execute(
+                    sql_text(
+                        """
+                        INSERT INTO stock_movements
+                            (movement_date, ingredient_name, delta_qty, direction, unit,
+                             reason, source, destination, ref_table, ref_id, order_id, order_number, created_by, notes)
+                        VALUES
+                            (:movement_date, :ingredient_name, :delta_qty, :direction, :unit,
+                             :reason, :source, :destination, :ref_table, :ref_id, :order_id, :order_number, :created_by, :notes)
+                        """
+                    ),
+                    mv_rows,
+                )
+        except Exception:
+            pass
 
         # Delete children then header
         conn.execute(
@@ -2486,21 +2667,127 @@ def get_ingredient_unit_and_cost(data: dict, ingredient_name: str):
     return unit, cost
 
 
-def adjust_stock_for_ingredient(data: dict, ingredient_name: str, delta_qty: float):
-    """delta_qty: negative to consume, positive to add."""
+
+def log_stock_movement(
+    *,
+    ingredient_name: str,
+    delta_qty: float,
+    unit: str | None = None,
+    reason: str | None = None,
+    source: str | None = None,
+    destination: str | None = None,
+    ref_table: str | None = None,
+    ref_id: int | None = None,
+    batch_id: int | None = None,
+    prod_event_id: int | None = None,
+    order_id: int | None = None,
+    order_number: str | None = None,
+    notes: str | None = None,
+    movement_date: datetime | date | None = None,
+    created_by: str | None = None,
+):
+    """Append a row to stock_movements (best-effort; never raises)."""
+    try:
+        created_by = created_by or st.session_state.get('auth_user', 'admin')
+    except Exception:
+        created_by = created_by or 'admin'
+
+    try:
+        dt = movement_date
+        if dt is None:
+            dt = pd.Timestamp.utcnow()
+        else:
+            dt = pd.Timestamp(dt)
+    except Exception:
+        dt = pd.Timestamp.utcnow()
+
+    direction = 'IN' if float(delta_qty) > 0 else 'OUT'
+    payload = {
+        'movement_date': dt,
+        'ingredient_name': str(ingredient_name),
+        'delta_qty': float(delta_qty),
+        'direction': direction,
+        'unit': (unit or ''),
+        'reason': reason or 'Adjustment',
+        'source': source or ('Unknown source' if direction == 'IN' else 'Inventory'),
+        'destination': destination or ('Inventory' if direction == 'IN' else 'Unknown usage'),
+        'ref_table': ref_table or '',
+        'ref_id': int(ref_id) if ref_id is not None else None,
+        'batch_id': int(batch_id) if batch_id is not None else None,
+        'prod_event_id': int(prod_event_id) if prod_event_id is not None else None,
+        'order_id': int(order_id) if order_id is not None else None,
+        'order_number': str(order_number) if order_number is not None else '',
+        'created_by': created_by,
+        'notes': str(notes) if notes is not None else '',
+    }
+    # Insert best-effort (ignore failures to avoid blocking stock updates)
+    try:
+        insert_data('stock_movements', payload)
+    except Exception:
+        pass
+
+
+def adjust_stock_for_ingredient(
+    data: dict,
+    ingredient_name: str,
+    delta_qty: float,
+    *,
+    reason: str | None = None,
+    source: str | None = None,
+    destination: str | None = None,
+    ref_table: str | None = None,
+    ref_id: int | None = None,
+    batch_id: int | None = None,
+    prod_event_id: int | None = None,
+    order_id: int | None = None,
+    order_number: str | None = None,
+    notes: str | None = None,
+    movement_date: datetime | date | None = None,
+):
+    """delta_qty: negative to consume, positive to add. Also logs to stock_movements."""
     ing = data.get('ingredients', None)
     if ing is None or ing.empty:
         return
     ncol = _col(ing, 'name')
     scol = _col(ing, 'stock', 'quantity_in_stock')
     idcol = _col(ing, 'id_ingredient', 'ingredient_id', 'id')
+    ucol = _col(ing, 'unit')
     if not (ncol and scol and idcol):
         return
     row = _find_ingredient_row_by_name(ing, ingredient_name)
     if row is None:
         return
-    new_stock = float(row[scol] or 0) + float(delta_qty)
+
+    try:
+        prev_stock = float(row.get(scol) or 0)
+    except Exception:
+        prev_stock = 0.0
+
+    new_stock = prev_stock + float(delta_qty)
     update_data('ingredients', {scol: new_stock}, f"{idcol} = :id", {'id': row[idcol]})
+
+    try:
+        unit0 = str(row.get(ucol) or '') if ucol and ucol in ing.columns else ''
+    except Exception:
+        unit0 = ''
+
+    # Log movement (best-effort)
+    log_stock_movement(
+        ingredient_name=str(ingredient_name),
+        delta_qty=float(delta_qty),
+        unit=unit0,
+        reason=reason,
+        source=source,
+        destination=destination,
+        ref_table=ref_table,
+        ref_id=ref_id,
+        batch_id=batch_id,
+        prod_event_id=prod_event_id,
+        order_id=order_id,
+        order_number=order_number,
+        notes=notes,
+        movement_date=movement_date,
+    )
 
 
 def sum_production_costs(data: dict, batch_id: int):
@@ -4838,6 +5125,23 @@ elif page == "Ingredients":
 
                         inserted_id = insert_data("ingredients", new_ingredient)
 
+                        # Log opening stock as a stock movement (so Stock History is complete)
+                        try:
+                            if float(opening_stock or 0) > 0:
+                                log_stock_movement(
+                                    ingredient_name=str(ing_name),
+                                    delta_qty=float(opening_stock),
+                                    unit=str(unit),
+                                    reason="Opening Stock",
+                                    source="Opening Balance",
+                                    destination="Inventory",
+                                    ref_table="ingredients",
+                                    ref_id=int(inserted_id) if inserted_id is not None else None,
+                                    notes="Initial stock when ingredient was created",
+                                )
+                        except Exception:
+                            pass
+
                         # If this ingredient is being registered with opening stock, persist the initial unit cost baseline.
                         # Some deployments have DB defaults/triggers that can overwrite inserted values; this explicit update
                         # ensures the cost is reflected immediately in the stock view.
@@ -4983,6 +5287,25 @@ elif page == "Ingredients":
                             if 'new_expiry' in locals():
                                 updates["expiry_date"] = new_expiry if new_expiry else None
                             
+                            # Log stock delta if user changed stock manually
+                            try:
+                                old_stock_val = float(ing_data.get("stock", 0) or 0)
+                                delta_stock = float(new_stock) - old_stock_val
+                                if abs(delta_stock) > 1e-12:
+                                    log_stock_movement(
+                                        ingredient_name=str(new_name),
+                                        delta_qty=float(delta_stock),
+                                        unit=str(new_unit),
+                                        reason="Manual Stock Edit",
+                                        source="Manual" if delta_stock > 0 else "Inventory",
+                                        destination="Inventory" if delta_stock > 0 else "Manual",
+                                        ref_table="ingredients",
+                                        ref_id=int(ing_data.get("id") or 0),
+                                        notes="Edited stock in Ingredients tab",
+                                    )
+                            except Exception:
+                                pass
+
                             update_data("ingredients", updates, "id = :id", {"id": ing_data["id"]})
                             data = get_all_data()
                             st.success(f"✅ Ingredient '{new_name}' updated successfully!")
@@ -5002,6 +5325,22 @@ elif page == "Ingredients":
                     with col_btn3:
                         if st.button("🔄 Reset Stock", use_container_width=True, key="reset_stock_btn"):
                             # Apenas resetar o estoque para 0
+                            try:
+                                old_stock_val = float(ing_data.get("stock", 0) or 0)
+                                if old_stock_val != 0:
+                                    log_stock_movement(
+                                        ingredient_name=str(selected_ingredient),
+                                        delta_qty=-float(old_stock_val),
+                                        unit=str(ing_data.get("unit") or ""),
+                                        reason="Reset Stock",
+                                        source="Inventory",
+                                        destination="Manual",
+                                        ref_table="ingredients",
+                                        ref_id=int(ing_data.get("id") or 0),
+                                        notes="Reset stock to 0 in Ingredients tab",
+                                    )
+                            except Exception:
+                                pass
                             update_data("ingredients", {"stock": 0}, "id = :id", {"id": ing_data["id"]})
                             data = get_all_data()
                             st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
@@ -5109,85 +5448,81 @@ elif page == "Ingredients":
     with tab_history:
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
         st.subheader("📜 Stock Movement History")
-        
-        # Mostrar as compras relacionadas
-        purchases_df = data.get("purchases", pd.DataFrame())
-        if not purchases_df.empty:
-            # Filtrar apenas compras
-            purchase_history = purchases_df[purchases_df["transaction_type"] == "Purchase"].copy()
-            
-            if len(purchase_history) > 0:
-                # Filtros
-                col_hist1, col_hist2 = st.columns(2)
-                with col_hist1:
-                    hist_ingredient = st.selectbox(
-                        "Filter by Ingredient",
-                        ["All"] + sorted(purchase_history["ingredient"].dropna().unique().tolist()),
-                        key="hist_ing_filter"
-                    )
-                with col_hist2:
-                    date_range = st.date_input(
-                        "Date Range",
-                        [datetime.now().date() - timedelta(days=30), datetime.now().date()],
-                        key="hist_date_range"
-                    )
-                
-                # Aplicar filtros
-                filtered_history = purchase_history.copy()
-                
-                if hist_ingredient != "All":
-                    filtered_history = filtered_history[filtered_history["ingredient"] == hist_ingredient]
-                
-                if len(date_range) == 2:
-                    start_date, end_date = date_range
-                    if "date" in filtered_history.columns:
-                        filtered_history["date"] = pd.to_datetime(filtered_history["date"])
-                        filtered_history = filtered_history[
-                            (filtered_history["date"] >= pd.Timestamp(start_date)) &
-                            (filtered_history["date"] <= pd.Timestamp(end_date))
-                        ]
-                
-                # Mostrar histórico
-                if len(filtered_history) > 0:
-                    display_cols = ["date", "ingredient", "quantity", "unit", "total_cost", "order_number", "notes"]
-                    display_df = filtered_history[display_cols].copy()
-                    display_df["date"] = pd.to_datetime(display_df["date"]).dt.date
-                    
-                    st.dataframe(
-                        display_df.rename(columns={
-                            "date": "Date",
-                            "ingredient": "Ingredient",
-                            "quantity": "Quantity",
-                            "unit": "Unit",
-                            "total_cost": "Total Cost",
-                            "order_number": "Order Number",
-                            "notes": "Notes"
-                        }),
-                        use_container_width=True
-                    )
-                    
-                    # Estatísticas do período
-                    st.markdown("---")
-                    st.subheader("📊 Period Summary")
-                    
-                    col_sum1, col_sum2, col_sum3 = st.columns(3)
-                    with col_sum1:
-                        total_quantity = filtered_history["quantity"].sum()
-                        st.metric("Total Quantity", f"{total_quantity:,.1f}")
-                    with col_sum2:
-                        total_cost = filtered_history["total_cost"].sum()
-                        st.metric("Total Cost", f"${total_cost:,.2f}")
-                    with col_sum3:
-                        avg_cost_per_unit = total_cost / total_quantity if total_quantity > 0 else 0
-                        st.metric("Avg. Cost per Unit", f"${avg_cost_per_unit:,.2f}")
-                else:
-                    st.info("No purchase history found for the selected filters.")
-            else:
-                st.info("No purchase history available.")
+
+        movements_df = data.get("stock_movements", pd.DataFrame())
+
+        if movements_df is None or movements_df.empty:
+            st.info("No stock movements logged yet. Movements will appear here after Purchases, Brews, Dry Hops, Kegging, manual stock edits, etc.")
+            # Legacy fallback: show purchases if available
+            purchases_df = data.get("purchases", pd.DataFrame())
+            if purchases_df is not None and not purchases_df.empty:
+                st.caption("Legacy purchases table (fallback):")
+                st.dataframe(purchases_df.sort_values(by=purchases_df.columns[0], ascending=False), use_container_width=True)
         else:
-            st.info("No purchase data available. Purchases will appear here once recorded.")
-        
+            # Normalize columns
+            dcol = _col(movements_df, "movement_date", "date", "created_date")
+            ingcol = _col(movements_df, "ingredient_name", "ingredient")
+            dircol = _col(movements_df, "direction", "type", "in_out")
+            qtycol = _col(movements_df, "delta_qty", "qty", "quantity", "delta")
+            unitcol = _col(movements_df, "unit")
+            reasoncol = _col(movements_df, "reason")
+            srccol = _col(movements_df, "source", "from_location", "from")
+            dstcol = _col(movements_df, "destination", "to_location", "to")
+            batchcol = _col(movements_df, "batch_id")
+            orderncol = _col(movements_df, "order_number", "order_no")
+            bycol = _col(movements_df, "created_by", "recorded_by", "user")
+            notescol = _col(movements_df, "notes")
+
+            dfh = movements_df.copy()
+
+            # Parse date for sorting/filtering
+            if dcol and dcol in dfh.columns:
+                dfh[dcol] = pd.to_datetime(dfh[dcol], errors="coerce")
+
+            with st.expander("Filters", expanded=False):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    ing_opts = sorted(dfh[ingcol].dropna().astype(str).unique().tolist()) if ingcol else []
+                    sel_ings = st.multiselect("Ingredient", ing_opts, default=[], key="stock_hist_filter_ing")
+                with c2:
+                    dir_opts = ["All", "IN", "OUT"]
+                    sel_dir = st.selectbox("Direction", dir_opts, index=0, key="stock_hist_filter_dir")
+                with c3:
+                    if dcol and dfh[dcol].notna().any():
+                        min_d = dfh[dcol].min().date()
+                        max_d = dfh[dcol].max().date()
+                    else:
+                        min_d = date.today() - timedelta(days=30)
+                        max_d = date.today()
+                    dr = st.date_input("Date range", value=(min_d, max_d), key="stock_hist_filter_dates")
+
+            # Apply filters
+            if sel_ings and ingcol:
+                dfh = dfh[dfh[ingcol].astype(str).isin([str(x) for x in sel_ings])]
+
+            if sel_dir != "All" and dircol:
+                dfh = dfh[dfh[dircol].astype(str).str.upper() == sel_dir]
+
+            try:
+                if dcol and isinstance(dr, (tuple, list)) and len(dr) == 2:
+                    d0, d1 = dr
+                    dfh = dfh[(dfh[dcol] >= pd.Timestamp(d0)) & (dfh[dcol] <= pd.Timestamp(d1) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))]
+            except Exception:
+                pass
+
+            # Display (friendly column order)
+            show_cols = []
+            for c in [dcol, ingcol, dircol, qtycol, unitcol, reasoncol, srccol, dstcol, batchcol, orderncol, bycol, notescol]:
+                if c and c in dfh.columns and c not in show_cols:
+                    show_cols.append(c)
+
+            if dcol:
+                dfh = dfh.sort_values(by=dcol, ascending=False)
+
+            st.dataframe(dfh[show_cols] if show_cols else dfh, use_container_width=True)
+
         st.markdown("</div>", unsafe_allow_html=True)
+
 
 # -----------------------------
 # Purchases Page
@@ -8829,6 +9164,123 @@ elif page == "Production":
                     with actions_tab:
                         st.subheader("Actions")
 
+                        # ---- UNDO BREW ----
+                        if brew_event_exists and brew_event_id is not None:
+                            st.markdown("### 🔁 Undo Brew")
+                            try:
+                                _ev2 = events_df.copy() if events_df is not None else pd.DataFrame()
+                                _bid = _col(_ev2, 'batch_id')
+                                _typ = _col(_ev2, 'event_type')
+                                _eid = _col(_ev2, 'id_prod_event', 'prod_event_id', 'id')
+                                if _bid and _typ and not _ev2.empty:
+                                    _sub = _ev2[_ev2[_bid] == batch_id]
+                                    _other = _sub[_sub[_typ].astype(str).str.lower() != 'brew']
+                                else:
+                                    _other = pd.DataFrame()
+                            except Exception:
+                                _other = pd.DataFrame()
+
+                            if _other is not None and not _other.empty:
+                                other_types = sorted(_other[_col(_other, 'event_type')].astype(str).unique().tolist()) if _col(_other, 'event_type') else []
+                                st.info("Undo Brew is disabled because this batch already has other actions recorded: " + ", ".join(other_types))
+                            else:
+                                _confirm_key = f"undo_brew_confirm_{batch_id}"
+                                if not st.session_state.get(_confirm_key, False):
+                                    if st.button("↩️ Undo Brew", key=f"undo_brew_btn_{batch_id}", use_container_width=True, type="secondary"):
+                                        st.session_state[_confirm_key] = True
+                                        st.rerun()
+                                else:
+                                    st.warning("This will delete the **Brew** event, remove its logged consumptions, and return all consumed ingredients back to inventory.")
+                                    c_undo1, c_undo2 = st.columns(2)
+                                    with c_undo1:
+                                        if st.button("✅ Yes, undo Brew", key=f"undo_brew_yes_{batch_id}", use_container_width=True, type="primary"):
+                                            require_admin_action()
+                                            data_u = get_all_data()
+                                            cons_u = data_u.get('production_consumptions', pd.DataFrame())
+                                            c_bid = _col(cons_u, 'batch_id')
+                                            c_eid = _col(cons_u, 'prod_event_id')
+                                            c_ing = _col(cons_u, 'ingredient_name')
+                                            c_qty = _col(cons_u, 'quantity')
+                                            # Return stock
+                                            if cons_u is not None and not cons_u.empty and c_eid and c_ing and c_qty:
+                                                try:
+                                                    sub = cons_u[cons_u[c_eid] == int(brew_event_id)]
+                                                    if c_bid:
+                                                        sub = sub[sub[c_bid] == int(batch_id)]
+                                                except Exception:
+                                                    sub = cons_u.copy()
+                                                for _, rr in sub.iterrows():
+                                                    ingn = str(rr.get(c_ing) or '')
+                                                    try:
+                                                        qty = float(rr.get(c_qty) or 0)
+                                                    except Exception:
+                                                        qty = 0.0
+                                                    if ingn and qty > 0:
+                                                        adjust_stock_for_ingredient(
+                                                            get_all_data(),
+                                                            ingn,
+                                                            float(qty),
+                                                            reason='Undo Brew',
+                                                            source=f"Batch #{batch_id} (Undo Brew)",
+                                                            destination='Inventory',
+                                                            ref_table='production_events',
+                                                            ref_id=int(brew_event_id),
+                                                            batch_id=int(batch_id),
+                                                            prod_event_id=int(brew_event_id),
+                                                        )
+                                            # Delete consumptions + event
+                                            try:
+                                                delete_data('production_consumptions', "prod_event_id = :eid AND batch_id = :bid", {'eid': int(brew_event_id), 'bid': int(batch_id)})
+                                            except Exception:
+                                                try:
+                                                    delete_data('production_consumptions', "prod_event_id = :eid", {'eid': int(brew_event_id)})
+                                                except Exception:
+                                                    pass
+                                            try:
+                                                # Delete Brew event
+                                                ev_df3 = get_all_data().get('production_events', pd.DataFrame())
+                                                e_id_col2 = _col(ev_df3, 'id_prod_event', 'id')
+                                                if e_id_col2:
+                                                    delete_data('production_events', f"{e_id_col2} = :id", {'id': int(brew_event_id)})
+                                                else:
+                                                    delete_data('production_events', "id_prod_event = :id", {'id': int(brew_event_id)})
+                                            except Exception:
+                                                pass
+
+                                            # Reset batch fields back to pre-brew state
+                                            try:
+                                                planned_col = _col(batches_df, 'planned_volume_l', 'planned_volume', 'batch_volume_l', 'volume_l')
+                                                planned_vol = float(selected_batch.get(planned_col) or 0) if planned_col else float(selected_batch.get('planned_volume_l') or 0)
+                                            except Exception:
+                                                planned_vol = 0.0
+                                            update_data('production_batches', {
+                                                'status': 'Planned',
+                                                'stage': 'Production Order',
+                                                'current_vessel': '',
+                                                'volume_remaining_l': planned_vol if planned_vol > 0 else None,
+                                                'brewed_volume_l': None,
+                                                'og': None,
+                                                'efficiency': None,
+                                            }, f"{b_id_col} = :id", {'id': batch_id})
+
+                                            # Clear any cached PDF bytes
+                                            try:
+                                                _pdf_state_key = f"prod_pdf_bytes_{batch_id}"
+                                                if _pdf_state_key in st.session_state:
+                                                    del st.session_state[_pdf_state_key]
+                                            except Exception:
+                                                pass
+
+                                            st.session_state[_confirm_key] = False
+                                            st.success("✅ Brew undone. Ingredients were returned to inventory.")
+                                            st.rerun()
+                                    with c_undo2:
+                                        if st.button("Cancel", key=f"undo_brew_cancel_{batch_id}", use_container_width=True):
+                                            st.session_state[_confirm_key] = False
+                                            st.rerun()
+
+                            st.markdown("---")
+
                         action = st.selectbox("Add action", [
                             'Brew', 'Dry Hop', 'Add Adjunct', 'Conditioning', 'Transfer', 'Kegging', 'Finish Batch'
                         ], key=f'action_type_{batch_id}')
@@ -9161,7 +9613,7 @@ elif page == "Production":
                                         unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
                                         line_cost = float(qty) * float(unit_cost or 0)
                                         total_cost += line_cost
-                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty))
+                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty), reason='Brew', destination=f"Batch #{batch_id} (Brew)", ref_table='production_events', ref_id=int(ev_id) if ev_id is not None else None, batch_id=int(batch_id), prod_event_id=int(ev_id) if ev_id is not None else None)
                                         meta = {'event': 'Brew', 'source': 'recipe'}
                                         if orig_ing and str(orig_ing) != str(ingn):
                                             meta = {'event': 'Brew', 'source': 'substitute', 'original_ingredient': orig_ing}
@@ -9184,7 +9636,7 @@ elif page == "Production":
                                         unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
                                         line_cost = float(qty) * float(unit_cost or 0)
                                         total_cost += line_cost
-                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty))
+                                        adjust_stock_for_ingredient(get_all_data(), ingn, -float(qty), reason='Brew', destination=f"Batch #{batch_id} (Brew)", ref_table='production_events', ref_id=int(ev_id) if ev_id is not None else None, batch_id=int(batch_id), prod_event_id=int(ev_id) if ev_id is not None else None)
                                         insert_data('production_consumptions', {
                                             'batch_id': batch_id,
                                             'prod_event_id': int(ev_id) if ev_id is not None else None,
@@ -9270,7 +9722,7 @@ elif page == "Production":
                                         unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ing)
                                         line_cost = float(qty) * float(unit_cost or 0)
                                         total_cost += line_cost
-                                        adjust_stock_for_ingredient(get_all_data(), ing, -float(qty))
+                                        adjust_stock_for_ingredient(get_all_data(), ing, -float(qty), reason=str(action), destination=f"Batch #{batch_id} ({action})", ref_table='production_events', ref_id=int(ev_id) if ev_id is not None else None, batch_id=int(batch_id), prod_event_id=int(ev_id) if ev_id is not None else None)
                                         insert_data('production_consumptions', {
                                             'batch_id': batch_id,
                                             'prod_event_id': int(ev_id) if ev_id is not None else None,
@@ -9476,7 +9928,7 @@ elif page == "Production":
                                                             unit0, unit_cost = get_ingredient_unit_and_cost(get_all_data(), ingn)
                                                             line_cost = float(need) * float(unit_cost or 0)
                                                             total_pack_cost += line_cost
-                                                            adjust_stock_for_ingredient(get_all_data(), ingn, -float(need))
+                                                            adjust_stock_for_ingredient(get_all_data(), ingn, -float(need), reason='Kegging', destination=f"Batch #{batch_id} (Kegging)", ref_table='production_events', ref_id=int(ev_id) if ev_id is not None else None, batch_id=int(batch_id), prod_event_id=int(ev_id) if ev_id is not None else None)
                                                             insert_data('production_consumptions', {
                                                                 'batch_id': batch_id,
                                                                 'prod_event_id': int(ev_id) if ev_id is not None else None,
