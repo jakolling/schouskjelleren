@@ -2905,7 +2905,15 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
 
     # Batch basics
     planned_vol = _first_nonempty(b.get('planned_volume_l'), b.get('planned_volume'))
-    planned_date = _first_nonempty(b.get('planned_date'))
+    planned_date = ''
+    try:
+        cd = b.get('created_date')
+        if cd is not None and str(cd).strip() and str(cd).lower() != 'nan':
+            dtv = pd.to_datetime(cd, errors='coerce')
+            if not pd.isna(dtv):
+                planned_date = dtv.date().isoformat()
+    except Exception:
+        planned_date = _safe(b.get('created_date'))
     brewed_vol = _first_nonempty(b.get('brewed_volume_l'), b.get('volume_brewed_l'), b.get('actual_volume_l'))
     og = _first_nonempty(b.get('og'))
     eff = _first_nonempty(b.get('efficiency'))
@@ -2978,6 +2986,9 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
         leading=12
     )
 
+    # Batch code (fallback to Batch ID)
+    batch_code_txt = str(b.get('batch_code') or batch_id)
+
     logo_path = _find_logo_path()
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -3007,7 +3018,7 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
                 logo_w = 0
 
         canvas.setFont("Helvetica-Bold", 12)
-        canvas.drawString(x_left + logo_w, y_top - 3*mm, f"Production Report — Batch #{batch_id}")
+        canvas.drawString(x_left + logo_w, y_top - 3*mm, f"Production Report — Batch #{batch_id} - ({batch_code_txt})")
 
         canvas.setFont("Helvetica", 8)
         canvas.drawRightString(x_right, y_top - 3*mm, f"Generated: {generated_at}")
@@ -3034,25 +3045,48 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     story.append(Spacer(1, 8*mm))
 
     # Overview block
-    story.append(Paragraph(f"<b>{_safe(b.get('recipe_name','')) or 'Batch Overview'}</b>", title_style))
+    # Title block
+    story.append(Paragraph(f"<b>Production Report — Batch #{batch_id} - ({batch_code_txt})</b>", title_style))
+    rec_name = _safe(b.get('recipe_name',''))
+    if rec_name:
+        story.append(Paragraph(rec_name, normal))
 
     # Build a 2x4 grid (label/value pairs)
     brewery = _first_nonempty(b.get('brewery_name'), b.get('brewery_id'))
+    # System: use the brewhouse/site where the current vessel is registered (equipment.brewery_id -> breweries.name)
     system = _first_nonempty(b.get('brewhouse'), b.get('system'))
-    # Batch code (fallback to Batch ID)
-    batch_code_txt = _first_nonempty(b.get('batch_code'), f"{batch_id}")
+    try:
+        eq = data2.get('equipment', pd.DataFrame())
+        br = data2.get('breweries', pd.DataFrame())
+        vname = _safe(vessel).strip().lower()
+        if vname and eq is not None and not eq.empty:
+            ncol = _col(eq, 'name')
+            bidcol = _col(eq, 'brewery_id')
+            if ncol and bidcol:
+                mm_eq = eq[eq[ncol].astype(str).str.strip().str.lower() == vname]
+                if not mm_eq.empty:
+                    vessel_brewery_id = str(mm_eq.iloc[0][bidcol])
+                    if br is not None and not br.empty:
+                        idcol = _col(br, 'id_brewery', 'brewery_id', 'id')
+                        namecol = _col(br, 'name')
+                        if idcol and namecol:
+                            mm_br = br[br[idcol].astype(str) == vessel_brewery_id]
+                            if not mm_br.empty:
+                                system = mm_br.iloc[0][namecol]
+    except Exception:
+        pass
 
     left_pairs = [
         ("Batch code", _safe(batch_code_txt)),
         ("Brewery", _safe(brewery)),
         ("System", _safe(system)),
-        ("Planned", f"{_fmt_num(planned_vol)} L — {_safe(planned_date)}" if planned_vol or planned_date else "")
+        ("Planned", f"{_safe(planned_date)}" if planned_date else "")
     ]
     right_pairs = [
         ("Brew day", f"{_fmt_num(brewed_vol)} L • OG {_fmt_num(og)}°P • Eff {_fmt_num(eff)}%" if any([brewed_vol, og, eff]) else ""),
         ("Stage / Status", f"{_safe(stage)} / {_safe(status)}" if stage or status else ""),
         ("Vessel", _safe(vessel)),
-        ("Total cost", _fmt_num(total_cost, 2))
+        ("Created by", _safe(b.get("created_by")))
     ]
 
     def _pair_row(p1, p2):
@@ -3087,10 +3121,9 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
         ("OG", f"{_fmt_num(og)}°P" if og else ""),
         ("Efficiency", f"{_fmt_num(eff)}%" if eff else ""),
         ("IBU", _fmt_num(ibu) if ibu else ""),
-        ("Color", _fmt_num(color_val) if color_val else ""),
-        ("Cost", f"{_fmt_num(total_cost,2)}" if total_cost not in (None,'') else ""),
+        ("Color (EBC)", _fmt_num(color_val) if color_val else ""),
     ]
-    kpi_table = Table([[ _kpi_cell(l, v) for (l, v) in kpi_items ]], colWidths=[(A4[0]-36*mm)/6]*6)
+    kpi_table = Table([[ _kpi_cell(l, v) for (l, v) in kpi_items ]], colWidths=[(A4[0]-36*mm)/5]*5)
     kpi_table.setStyle(TableStyle([
         ("BACKGROUND", (0,0), (-1,-1), colors.whitesmoke),
         ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
@@ -3148,7 +3181,7 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
         unit_col = _col(co, 'unit')
         cost_col = _col(co, 'total_cost', 'cost')
 
-        rows = [["Ingredient", "Qty", "Unit", "Cost"]]
+        rows = [["Ingredient", "Qty", "Unit", "Ingredient Cost"]]
         total_cost_calc = 0.0
         for _, r in co.iterrows():
             ing = _safe(r.get(name_col,'') if name_col else r.get('ingredient_name',''))
