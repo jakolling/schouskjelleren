@@ -9432,8 +9432,9 @@ elif page == "Production":
                                 rview['Gravity (°P)'] = metas.apply(lambda d: d.get('gravity_plato') if isinstance(d, dict) else None)
                                 rview['Temp (°C)'] = metas.apply(lambda d: d.get('temp_c') if isinstance(d, dict) else None)
                                 rview['pH'] = metas.apply(lambda d: d.get('ph') if isinstance(d, dict) else None)
+                                rview['Pressure (bar)'] = metas.apply(lambda d: d.get('pressure_bar') if isinstance(d, dict) else None)
                             elif not rview.empty:
-                                for _c in ('Gravity (°P)', 'Temp (°C)', 'pH'):
+                                for _c in ('Gravity (°P)', 'Temp (°C)', 'pH', 'Pressure (bar)'):
                                     if _c not in rview.columns:
                                         rview[_c] = None
                     except Exception:
@@ -9450,13 +9451,25 @@ elif page == "Production":
                                 for _c in list(chart_df.columns):
                                     chart_df[_c] = pd.to_numeric(chart_df[_c], errors='coerce')
                                 st.line_chart(chart_df)
+
+                                # Optional: pressure chart
+                                try:
+                                    if 'Pressure (bar)' in rview.columns:
+                                        p_df = rview[[e_date, 'Pressure (bar)']].copy()
+                                        p_df = p_df.rename(columns={e_date: 'Date'}).set_index('Date')
+                                        p_df['Pressure (bar)'] = pd.to_numeric(p_df['Pressure (bar)'], errors='coerce')
+                                        if p_df['Pressure (bar)'].notna().any():
+                                            st.line_chart(p_df)
+                                except Exception:
+                                    pass
+
                         except Exception:
                             pass
 
                         cols_show = []
                         if e_date and e_date in rview.columns:
                             cols_show.append(e_date)
-                        for _c in ('Gravity (°P)', 'Temp (°C)', 'pH'):
+                        for _c in ('Gravity (°P)', 'Temp (°C)', 'pH', 'Pressure (bar)'):
                             if _c in rview.columns:
                                 cols_show.append(_c)
                         st.dataframe(rview[cols_show], use_container_width=True)
@@ -10220,52 +10233,203 @@ elif page == "Production":
                                     st.rerun()
 
 
-                        # ---- READING (Fermentation) ----
+                                                # ---- READING (Fermentation) ----
                         if action == 'Reading':
-                            st.caption("Log a fermentation reading (you can add multiple readings over time).")
-                            with st.form(f'reading_action_{batch_id}', clear_on_submit=True):
-                                rc1, rc2, rc3, rc4 = st.columns(4)
-                                with rc1:
-                                    r_date = st.date_input('Date', date.today(), key=f'reading_date_{batch_id}')
-                                with rc2:
-                                    r_time = st.time_input('Time', datetime.now().time().replace(second=0, microsecond=0), key=f'reading_time_{batch_id}')
-                                with rc3:
-                                    gravity_p = st.number_input('Gravity (°P)', min_value=0.0, value=0.0, step=0.1, key=f'reading_grav_{batch_id}')
-                                with rc4:
-                                    temp_c = st.number_input('Temperature (°C)', value=0.0, step=0.1, key=f'reading_temp_{batch_id}')
+                            st.caption("Log fermentation readings (add as many as you want over time).")
 
-                                ph_val = st.number_input('pH (optional)', min_value=0.0, max_value=14.0, value=0.0, step=0.01, key=f'reading_ph_{batch_id}')
-                                r_notes = st.text_area('Notes (optional)', height=80, key=f'reading_notes_{batch_id}')
-                                r_submit = st.form_submit_button('Record Reading', type='primary', use_container_width=True)
-
-                            if r_submit:
-                                require_admin_action()
+                            # Existing readings for this batch
+                            def _safe_json_load(_s):
                                 try:
-                                    dt_val = datetime.combine(r_date, r_time)
+                                    if _s is None:
+                                        return {}
+                                    if isinstance(_s, dict):
+                                        return _s
+                                    _ss = str(_s)
+                                    if not _ss or _ss.strip().lower() in {"nan", "none"}:
+                                        return {}
+                                    return json.loads(_ss)
                                 except Exception:
-                                    dt_val = datetime.now()
+                                    return {}
 
-                                insert_data('production_events', {
-                                    'batch_id': batch_id,
-                                    'event_type': 'Reading',
-                                    'event_date': pd.Timestamp(dt_val),
-                                    'from_vessel': current_vessel,
-                                    'to_vessel': current_vessel,
-                                    'notes': r_notes,
-                                    'created_by': st.session_state.get('auth_user', 'admin'),
-                                    'meta': json.dumps({
-                                        'action': 'Reading',
-                                        'gravity_plato': float(gravity_p) if gravity_p is not None else None,
-                                        'temp_c': float(temp_c) if temp_c is not None else None,
-                                        'ph': (float(ph_val) if ph_val and float(ph_val) > 0 else None),
-                                    }, ensure_ascii=False),
-                                })
+                            try:
+                                _etype = _col(events_df, 'event_type', 'type')
+                                _edate = _col(events_df, 'event_date', 'date')
+                                _emeta = _col(events_df, 'meta')
+                                _ebid = _col(events_df, 'batch_id')
+                                _enotes = _col(events_df, 'notes')
+                                existing_r = pd.DataFrame()
+                                if events_df is not None and not events_df.empty and _etype and _ebid:
+                                    existing_r = events_df[events_df[_ebid] == batch_id].copy()
+                                    existing_r = existing_r[existing_r[_etype].astype(str).str.lower() == 'reading']
+                                    if not existing_r.empty and _edate:
+                                        existing_r[_edate] = pd.to_datetime(existing_r[_edate], errors='coerce')
+                                        existing_r = existing_r.sort_values(_edate)
+                                    if not existing_r.empty and _emeta and _emeta in existing_r.columns:
+                                        metas = existing_r[_emeta].apply(_safe_json_load)
+                                        existing_r['Gravity (°P)'] = metas.apply(lambda d: d.get('gravity_plato') if isinstance(d, dict) else None)
+                                        existing_r['Temp (°C)'] = metas.apply(lambda d: d.get('temp_c') if isinstance(d, dict) else None)
+                                        existing_r['Pressure (bar)'] = metas.apply(lambda d: d.get('pressure_bar') if isinstance(d, dict) else None)
+                                        existing_r['pH'] = metas.apply(lambda d: d.get('ph') if isinstance(d, dict) else None)
+                                    if _enotes and _enotes in existing_r.columns:
+                                        existing_r['Notes'] = existing_r[_enotes]
+                                    else:
+                                        existing_r['Notes'] = None
+                            except Exception:
+                                existing_r = pd.DataFrame()
 
-                                st.success("✅ Reading recorded.")
-                                st.rerun()
+                            if existing_r is not None and not existing_r.empty:
+                                with st.expander("Existing readings", expanded=False):
+                                    show_cols = []
+                                    if '_edate' in locals() and _edate and _edate in existing_r.columns:
+                                        show_cols.append(_edate)
+                                    for _c in ('Gravity (°P)', 'Temp (°C)', 'Pressure (bar)', 'pH', 'Notes'):
+                                        if _c in existing_r.columns:
+                                            show_cols.append(_c)
+                                    st.dataframe(existing_r[show_cols], use_container_width=True)
 
+                            st.markdown("**Add new readings**")
+                            _editor_key = f"reading_editor_{batch_id}"
+                            if _editor_key not in st.session_state:
+                                st.session_state[_editor_key] = pd.DataFrame([{
+                                    'Date': date.today(),
+                                    'Time': datetime.now().time().replace(second=0, microsecond=0),
+                                    'Gravity (°P)': None,
+                                    'Temp (°C)': None,
+                                    'Pressure (bar)': None,
+                                    'pH': None,
+                                    'Notes': '',
+                                }])
 
-                        # ---- DRY HOP / ADJUNCT ----
+                            new_readings_df = st.data_editor(
+                                st.session_state[_editor_key],
+                                num_rows="dynamic",
+                                use_container_width=True,
+                                key=f"reading_editor_widget_{batch_id}",
+                            )
+
+                            c1, c2 = st.columns([1, 3])
+                            with c1:
+                                save_readings = st.button("Save readings", type="primary", use_container_width=True)
+                            with c2:
+                                if st.button("Clear new rows", use_container_width=True):
+                                    st.session_state[_editor_key] = pd.DataFrame([{
+                                        'Date': date.today(),
+                                        'Time': datetime.now().time().replace(second=0, microsecond=0),
+                                        'Gravity (°P)': None,
+                                        'Temp (°C)': None,
+                                        'Pressure (bar)': None,
+                                        'pH': None,
+                                        'Notes': '',
+                                    }])
+                                    st.rerun()
+
+                            if save_readings:
+                                require_admin_action()
+                                if new_readings_df is None or new_readings_df.empty:
+                                    st.error("Please add at least one reading row.")
+                                else:
+                                    # Build a set of existing timestamps to avoid accidental duplicates
+                                    existing_ts = set()
+                                    try:
+                                        if existing_r is not None and not existing_r.empty and '_edate' in locals() and _edate and _edate in existing_r.columns:
+                                            for _v in pd.to_datetime(existing_r[_edate], errors='coerce').dropna().tolist():
+                                                existing_ts.add(pd.Timestamp(_v).to_pydatetime().replace(tzinfo=None))
+                                    except Exception:
+                                        existing_ts = set()
+
+                                    inserted = 0
+                                    skipped = 0
+                                    for _, row in new_readings_df.iterrows():
+                                        # Skip fully empty rows
+                                        vals = {
+                                            'Gravity (°P)': row.get('Gravity (°P)', None),
+                                            'Temp (°C)': row.get('Temp (°C)', None),
+                                            'Pressure (bar)': row.get('Pressure (bar)', None),
+                                            'pH': row.get('pH', None),
+                                        }
+                                        notes = row.get('Notes', '')
+                                        is_all_blank = True
+                                        for _vv in vals.values():
+                                            try:
+                                                if _vv is not None and not (isinstance(_vv, float) and pd.isna(_vv)) and str(_vv) != '':
+                                                    is_all_blank = False
+                                            except Exception:
+                                                pass
+                                        if isinstance(notes, str) and notes.strip():
+                                            is_all_blank = False
+                                        if is_all_blank:
+                                            continue
+
+                                        # Parse date/time
+                                        d0 = row.get('Date', date.today())
+                                        t0 = row.get('Time', datetime.now().time().replace(second=0, microsecond=0))
+                                        try:
+                                            if isinstance(d0, str):
+                                                d0 = pd.to_datetime(d0, errors='coerce').date()
+                                        except Exception:
+                                            d0 = date.today()
+                                        try:
+                                            if isinstance(t0, str):
+                                                _tt = pd.to_datetime(t0, errors='coerce')
+                                                if pd.isna(_tt):
+                                                    t0 = datetime.now().time().replace(second=0, microsecond=0)
+                                                else:
+                                                    t0 = _tt.time()
+                                        except Exception:
+                                            t0 = datetime.now().time().replace(second=0, microsecond=0)
+
+                                        try:
+                                            dt_val = datetime.combine(d0, t0)
+                                        except Exception:
+                                            dt_val = datetime.now()
+
+                                        dt_plain = dt_val.replace(tzinfo=None)
+                                        if dt_plain in existing_ts:
+                                            skipped += 1
+                                            continue
+
+                                        meta = {
+                                            'action': 'Reading',
+                                            'gravity_plato': (float(row.get('Gravity (°P)')) if row.get('Gravity (°P)') is not None and str(row.get('Gravity (°P)')) != '' and not pd.isna(row.get('Gravity (°P)')) else None),
+                                            'temp_c': (float(row.get('Temp (°C)')) if row.get('Temp (°C)') is not None and str(row.get('Temp (°C)')) != '' and not pd.isna(row.get('Temp (°C)')) else None),
+                                            'pressure_bar': (float(row.get('Pressure (bar)')) if row.get('Pressure (bar)') is not None and str(row.get('Pressure (bar)')) != '' and not pd.isna(row.get('Pressure (bar)')) else None),
+                                            'ph': (float(row.get('pH')) if row.get('pH') is not None and str(row.get('pH')) != '' and not pd.isna(row.get('pH')) else None),
+                                        }
+
+                                        insert_data('production_events', {
+                                            'batch_id': batch_id,
+                                            'event_type': 'Reading',
+                                            'event_date': pd.Timestamp(dt_val),
+                                            'from_vessel': current_vessel,
+                                            'to_vessel': current_vessel,
+                                            'notes': (notes if isinstance(notes, str) else ''),
+                                            'created_by': st.session_state.get('auth_user', 'admin'),
+                                            'meta': json.dumps(meta, ensure_ascii=False),
+                                        })
+
+                                        inserted += 1
+                                        existing_ts.add(dt_plain)
+
+                                    if inserted == 0 and skipped == 0:
+                                        st.error("No valid reading rows to save.")
+                                    else:
+                                        msg = f"✅ Saved {inserted} reading(s)."
+                                        if skipped:
+                                            msg += f" Skipped {skipped} duplicate timestamp(s)."
+                                        st.success(msg)
+
+                                        # Reset the editor to one empty row
+                                        st.session_state[_editor_key] = pd.DataFrame([{
+                                            'Date': date.today(),
+                                            'Time': datetime.now().time().replace(second=0, microsecond=0),
+                                            'Gravity (°P)': None,
+                                            'Temp (°C)': None,
+                                            'Pressure (bar)': None,
+                                            'pH': None,
+                                            'Notes': '',
+                                        }])
+                                        st.rerun()
+# ---- DRY HOP / ADJUNCT ----
                         if action in {'Dry Hop', 'Add Adjunct'}:
                             is_dryhop = (action == 'Dry Hop')
                             st.caption("Consumes ingredients from stock and logs an event.")
