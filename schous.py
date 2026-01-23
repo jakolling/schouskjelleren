@@ -270,6 +270,62 @@ def get_table_columns_cached(table_name: str, dialect: str | None = None) -> lis
     cols = _get_table_columns_cached(table_name, d)
     return cols if cols else []
 
+
+def _first_existing(cols: list[str], candidates: list[str]) -> str | None:
+    """Return the first candidate that exists in cols (case-insensitive)."""
+    if not cols:
+        return None
+    s = {str(c).lower() for c in cols}
+    for cand in candidates:
+        if str(cand).lower() in s:
+            # return the original col name from cols to preserve case
+            for c in cols:
+                if str(c).lower() == str(cand).lower():
+                    return c
+            return cand
+    return None
+
+def _normalize_id_value(v):
+    """Normalize ids for safe comparisons (e.g., 1.0 -> '1', UUID/text unchanged)."""
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    # floats like 1.0 coming from pandas when ints have NaNs
+    try:
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+    except Exception:
+        pass
+    return str(v).strip()
+
+def get_recipe_items_for_recipe(recipe_id) -> pd.DataFrame:
+    """Fetch recipe_items for a recipe directly from DB (bypasses get_all_data cache)."""
+    engine = get_engine()
+    dialect = engine.dialect.name.lower()
+    try:
+        recipe_items_cols = get_table_columns_cached('recipe_items', dialect) or []
+        fk_col = _first_existing(recipe_items_cols, ['recipe_id', 'id_recipe', 'id_receipt', 'recipe', 'recipe_fk', 'fk_recipe']) or 'recipe_id'
+        # safest: compare as text
+        q = f"SELECT * FROM recipe_items WHERE CAST({fk_col} AS TEXT) = :rid"
+        return query_to_df(q, {"rid": str(recipe_id)})
+    except Exception:
+        # fallback to cached snapshot
+        data = get_all_data()
+        df = data.get("recipe_items", pd.DataFrame())
+        if df is None or df.empty:
+            return pd.DataFrame()
+        # best effort filter
+        fk = _col(df, 'recipe_id', 'id_recipe', 'id_receipt')
+        if fk:
+            ridn = _normalize_id_value(recipe_id)
+            return df[df[fk].apply(_normalize_id_value) == ridn].copy()
+        return df
+
+
 def _secrets_read_only_default() -> bool:
     """Optional default read-only mode via Streamlit secrets/env.
 
@@ -9031,40 +9087,31 @@ elif page == "Recipes":
 
                         # Ingredients
                         st.write("**Ingredients:**")
-                        recipe_items_df = data.get("recipe_items", pd.DataFrame())
-                        if not recipe_items_df.empty:
-                            ri_recipe_col = _col(recipe_items_df, 'recipe_id', 'id_recipe', 'id_receipt')
-                            recipe_items = recipe_items_df.copy()
-                            if ri_recipe_col:
-                                recipe_items = recipe_items[recipe_items[ri_recipe_col].astype(str) == recipe_id_str]
-                            else:
-                                recipe_items = pd.DataFrame()
+                        recipe_items = get_recipe_items_for_recipe(recipe_id)
 
-                            if not recipe_items.empty:
-                                ingredients_df = data.get("ingredients", pd.DataFrame())
-                                ing_id_col = _col(ingredients_df, 'id_ingredient', 'id')
-                                ing_name_col = _col(ingredients_df, 'name')
+                        if recipe_items is not None and not recipe_items.empty:
+                            ingredients_df = data.get("ingredients", pd.DataFrame())
+                            ing_id_col = _col(ingredients_df, 'id_ingredient', 'ingredient_id', 'id')
+                            ing_name_col = _col(ingredients_df, 'name', 'ingredient_name', 'ingredient')
 
-                                it_ing_name_col = _col(recipe_items, 'ingredient_name', 'ingredient', 'name', 'item_name', 'ingredient_desc', 'ingredient_description')
-                                it_ing_id_col = _col(recipe_items, 'id_ingredient', 'ingredient_id')
-                                it_qty_col = _col(recipe_items, 'quantity')
-                                it_unit_col = _col(recipe_items, 'unit')
+                            it_ing_name_col = _col(recipe_items, 'ingredient_name', 'ingredient', 'name', 'item_name', 'ingredient_desc', 'ingredient_description')
+                            it_ing_id_col = _col(recipe_items, 'id_ingredient', 'ingredient_id', 'ing_id', 'fk_ingredient')
+                            it_qty_col = _col(recipe_items, 'quantity')
+                            it_unit_col = _col(recipe_items, 'unit')
 
-                                for _, item in recipe_items.iterrows():
-                                    ingredient_name = "Unknown"
+                            for _, item in recipe_items.iterrows():
+                                ingredient_name = "Unknown"
 
-                                    if it_ing_name_col and pd.notna(item.get(it_ing_name_col)):
-                                        ingredient_name = str(item.get(it_ing_name_col))
-                                    elif ingredients_df is not None and not ingredients_df.empty and it_ing_id_col and ing_id_col and ing_name_col:
-                                        ing = ingredients_df[ingredients_df[ing_id_col].astype(str) == str(item.get(it_ing_id_col))]
-                                        if not ing.empty:
-                                            ingredient_name = str(ing.iloc[0][ing_name_col])
+                                if it_ing_name_col and pd.notna(item.get(it_ing_name_col)) and str(item.get(it_ing_name_col)).strip():
+                                    ingredient_name = str(item.get(it_ing_name_col))
+                                elif ingredients_df is not None and not ingredients_df.empty and it_ing_id_col and ing_id_col and ing_name_col:
+                                    ing = ingredients_df[ingredients_df[ing_id_col].astype(str) == str(item.get(it_ing_id_col))]
+                                    if not ing.empty:
+                                        ingredient_name = str(ing.iloc[0][ing_name_col])
 
-                                    qty = item.get(it_qty_col) if it_qty_col else ''
-                                    unit = str(item.get(it_unit_col) or 'units') if it_unit_col else 'units'
-                                    st.write(f"- {ingredient_name}: {qty} {unit}")
-                            else:
-                                st.write("No ingredients defined")
+                                qty = item.get(it_qty_col) if it_qty_col else ''
+                                unit = str(item.get(it_unit_col) or 'units') if it_unit_col else 'units'
+                                st.write(f"- {ingredient_name}: {qty} {unit}")
                         else:
                             st.write("No ingredients defined")
         else:
