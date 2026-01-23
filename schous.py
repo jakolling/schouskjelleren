@@ -35,12 +35,27 @@ st.set_page_config(
 )
 
 def render_status_badge(status: str | None) -> str:
-    """Return a small HTML badge for statuses like Active/Inactive/Planned/Completed."""
-    s = (status or "").strip()
-    if not s:
-        s = "N/A"
+    """Return a small HTML badge for common statuses."""
+    s = (status or "").strip() or "N/A"
     s_low = s.lower()
 
+    # Map common statuses to CSS classes
+    if s_low in {"active", "enabled", "open", "in stock", "available"}:
+        cls = "badge-green"
+    elif s_low in {"inactive", "disabled", "closed", "out of stock", "unavailable"}:
+        cls = "badge-gray"
+    elif s_low in {"planned", "draft"}:
+        cls = "badge-blue"
+    elif s_low in {"in progress", "brewing", "fermenting"}:
+        cls = "badge-orange"
+    elif s_low in {"completed", "done", "finished"}:
+        cls = "badge-green"
+    elif s_low in {"cancelled", "canceled", "error"}:
+        cls = "badge-red"
+    else:
+        cls = "badge-gray"
+
+    return f"<span class='status-badge {cls}'>{s}</span>"
 
 def _to_python_scalar(value):
     """Convert numpy/pandas scalar types to plain Python types (psycopg2 can't adapt numpy.*)."""
@@ -11379,30 +11394,40 @@ elif page == "Production":
                                 st.rerun()
 
     with tab_reports:
-        rep_finished, rep_batch = st.tabs(["Finished Orders", "Batch report"])
+        st.subheader("Production reports")
 
-        with rep_finished:
-            st.subheader("Finished orders")
+        report_mode = st.radio(
+            "Report view",
+            ["Finished Orders", "Batch report"],
+            horizontal=True,
+            key="prod_reports_mode",
+        )
+
+        def _is_finished_status(s: str | None) -> bool:
+            s0 = (s or "").strip().lower()
+            return s0 in {"completed", "done", "finished", "cancelled", "canceled"}
+
+        if report_mode == "Finished Orders":
+            st.subheader("Finished / cancelled orders")
+
             if batches_df is None or batches_df.empty:
                 st.info("No batches yet.")
             else:
                 viewf = batches_df.copy()
 
-                def _is_finished_status(s: str | None) -> bool:
-                    s0 = (s or "").strip().lower()
-                    return s0 in {"completed", "done", "finished", "cancelled", "canceled"}
-
-                # Filter finished/cancelled
-                try:
-                    if b_status_col and b_status_col in viewf.columns:
-                        viewf = viewf[viewf[b_status_col].astype(str).apply(lambda x: _is_finished_status(x))]
-                except Exception:
-                    pass
+                # Filter finished/cancelled when we have a status column
+                if b_status_col and b_status_col in viewf.columns:
+                    try:
+                        viewf = viewf[viewf[b_status_col].astype(str).apply(_is_finished_status)]
+                    except Exception:
+                        pass
+                else:
+                    st.caption("Note: couldn't find a status column in production_batches, so showing all batches.")
 
                 if viewf.empty:
-                    st.info('No finished/cancelled orders yet.')
+                    st.info("No finished/cancelled orders yet.")
                 else:
-                    # Sort (finished_date/cancelled_at/planned_date)
+                    # Sort (finished_date/cancelled_at/planned_date) when available
                     sort_cols = []
                     for c in ["finished_date", "cancelled_at", b_planned_date_col]:
                         if c and c in viewf.columns:
@@ -11413,73 +11438,104 @@ elif page == "Production":
                         except Exception:
                             pass
                     if sort_cols:
-                        viewf = viewf.sort_values(sort_cols[0], ascending=False)
+                        try:
+                            viewf = viewf.sort_values(sort_cols[0], ascending=False)
+                        except Exception:
+                            pass
 
-                    # Nice view
                     cols_show = []
                     for c in [b_id_col, b_code_col, "recipe_name", b_planned_date_col, "finished_date", "cancelled_at", b_status_col, "cancelled_reason"]:
                         if c and c in viewf.columns and c not in cols_show:
                             cols_show.append(c)
+                    if not cols_show:
+                        cols_show = list(viewf.columns)[:12]
 
                     st.dataframe(viewf[cols_show], use_container_width=True)
 
                     st.markdown("---")
                     records_f = viewf.to_dict("records")
-                    sel_f = st.selectbox(
-                        "Select finished/cancelled order",
-                        records_f,
+
+                    # Only show selector + PDF if we can resolve an ID
+                    if not b_id_col:
+                        st.warning("Couldn't resolve the batch ID column, so PDF generation is disabled here.")
+                    else:
+                        sel_f = st.selectbox(
+                            "Select finished/cancelled order",
+                            records_f,
+                            format_func=lambda r: f"#{r.get(b_id_col)} {r.get(b_code_col) if b_code_col else r.get('batch_code','')} {r.get('recipe_name','')}",
+                            key="prod_finished_select",
+                        )
+                        if sel_f:
+                            try:
+                                fid = int(sel_f.get(b_id_col))
+                            except Exception:
+                                fid = None
+
+                            if fid is None:
+                                st.warning("Couldn't read this batch ID.")
+                            else:
+                                fstatus = str(sel_f.get(b_status_col) or "")
+                                if fstatus:
+                                    st.caption(f"Status: {fstatus}")
+
+                                total_cost = sum_production_costs(get_all_data(), fid)
+                                st.metric("Total logged materials cost", f"{total_cost:.2f}")
+
+                                _pdf_key = f"prod_report_pdf_finished_{fid}"
+                                if st.button("Generate PDF report", key=f"gen_pdf_finished_{fid}", use_container_width=True):
+                                    st.session_state[_pdf_key] = generate_production_report_pdf_bytes(fid)
+                                if _pdf_key in st.session_state:
+                                    st.download_button(
+                                        "⬇️ Download PDF",
+                                        data=st.session_state[_pdf_key],
+                                        file_name=f"production_report_batch_{fid}.pdf",
+                                        mime="application/pdf",
+                                        use_container_width=True,
+                                        key=f"dl_pdf_finished_{fid}",
+                                    )
+
+        else:  # Batch report
+            st.subheader("Batch report")
+
+            if batches_df is None or batches_df.empty:
+                st.info("No batches yet.")
+            else:
+                records = batches_df.to_dict("records")
+
+                if not b_id_col:
+                    st.warning("Couldn't resolve the batch ID column, so PDF generation is disabled here.")
+                else:
+                    selected = st.selectbox(
+                        "Select batch",
+                        records,
                         format_func=lambda r: f"#{r.get(b_id_col)} {r.get(b_code_col) if b_code_col else r.get('batch_code','')} {r.get('recipe_name','')}",
-                        key="prod_finished_select",
+                        key="prod_batch_report_select",
                     )
-                    if sel_f:
-                        fid = int(sel_f.get(b_id_col))
-                        fstatus = str(sel_f.get(b_status_col) or "")
-                        st.caption(f"Status: {fstatus}")
-                        # Quick PDF
-                        total_cost = sum_production_costs(get_all_data(), fid)
+
+                    try:
+                        batch_id = int(selected.get(b_id_col))
+                    except Exception:
+                        batch_id = None
+
+                    if batch_id is None:
+                        st.warning("Couldn't read this batch ID.")
+                    else:
+                        total_cost = sum_production_costs(get_all_data(), batch_id)
                         st.metric("Total logged materials cost", f"{total_cost:.2f}")
 
-                        _pdf_key = f"prod_report_pdf_finished_{fid}"
-                        if st.button("Generate PDF report", key=f"gen_pdf_finished_{fid}", use_container_width=True):
-                            st.session_state[_pdf_key] = generate_production_report_pdf_bytes(fid)
+                        _pdf_key = f"prod_report_pdf_{batch_id}"
+                        if st.button("Generate PDF report", use_container_width=True, key=f"gen_pdf_any_{batch_id}"):
+                            st.session_state[_pdf_key] = generate_production_report_pdf_bytes(batch_id)
                         if _pdf_key in st.session_state:
                             st.download_button(
                                 "⬇️ Download PDF",
                                 data=st.session_state[_pdf_key],
-                                file_name=f"production_report_batch_{fid}.pdf",
+                                file_name=f"production_report_batch_{batch_id}.pdf",
                                 mime="application/pdf",
                                 use_container_width=True,
-                                key=f"dl_pdf_finished_{fid}",
+                                key=f"dl_pdf_any_{batch_id}",
                             )
 
-        with rep_batch:
-            st.subheader("Batch report")
-            if batches_df is None or batches_df.empty:
-                st.info("No batches yet.")
-            else:
-                records = batches_df.to_dict('records')
-                selected = st.selectbox(
-                    'Select batch',
-                    records,
-                    format_func=lambda r: f"#{r.get(b_id_col)} {r.get(b_code_col) if b_code_col else r.get('batch_code','')} {r.get('recipe_name','')}",
-                    key="prod_batch_report_select",
-                )
-                batch_id = int(selected.get(b_id_col))
-                total_cost = sum_production_costs(get_all_data(), batch_id)
-                st.metric('Total logged materials cost', f"{total_cost:.2f}")
-
-                _pdf_key = f"prod_report_pdf_{batch_id}"
-                if st.button('Generate PDF report', use_container_width=True, key=f"gen_pdf_any_{batch_id}"):
-                    st.session_state[_pdf_key] = generate_production_report_pdf_bytes(batch_id)
-                if _pdf_key in st.session_state:
-                    st.download_button(
-                        '⬇️ Download PDF',
-                        data=st.session_state[_pdf_key],
-                        file_name=f'production_report_batch_{batch_id}.pdf',
-                        mime='application/pdf',
-                        use_container_width=True,
-                        key=f"dl_pdf_any_{batch_id}",
-                    )
 elif page == "Calendar":
     st.title("📅 Production Calendar")
     
