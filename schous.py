@@ -2579,6 +2579,79 @@ def _col(df, *names):
 
 
 
+def _is_active_status(status_val) -> bool:
+    """Consider a batch/order active unless explicitly completed/cancelled."""
+    s = (str(status_val or '')).strip().lower()
+    return s not in {'completed', 'cancelled', 'canceled'}
+
+
+def _capacity_to_l(capacity_raw, volume_l: float | None = None) -> float:
+    """Parse a capacity value and return liters.
+
+    Accepts:
+      - numbers (assumed liters by default)
+      - strings like '2000', '2,000', '20 hL', '20hl', '30 L', '10 bbl', '100 gal'
+    Heuristic:
+      - if no unit is given and volume_l is provided, treat small capacities as hL when that makes sense.
+    """
+    try:
+        import numpy as _np
+        number_types = (int, float, _np.number)
+    except Exception:
+        number_types = (int, float)
+
+    cap_num = 0.0
+    unit = None
+
+    if capacity_raw is None:
+        cap_num = 0.0
+    elif isinstance(capacity_raw, number_types):
+        cap_num = float(capacity_raw)
+    else:
+        s = str(capacity_raw).strip().lower()
+        # keep unit hint before stripping
+        if 'hl' in s:
+            unit = 'hl'
+        elif 'bbl' in s:
+            unit = 'bbl'
+        elif 'gal' in s:
+            unit = 'gal'
+        elif re.search(r'\bl\b', s) or s.endswith('l') or ' liters' in s or ' litre' in s:
+            unit = 'l'
+        # normalize number formatting: '2,000' -> '2000', '2,5' -> '2.5'
+        s_num = s.replace(' ', '')
+        # if both comma and dot exist, assume comma is thousands sep
+        if ',' in s_num and '.' in s_num:
+            s_num = s_num.replace(',', '')
+        else:
+            s_num = s_num.replace(',', '.')
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", s_num)
+        cap_num = float(m.group(0)) if m else 0.0
+
+    # Unit conversions
+    if unit == 'hl':
+        cap_l = cap_num * 100.0
+    elif unit == 'bbl':
+        cap_l = cap_num * 117.347765  # US beer barrel
+    elif unit == 'gal':
+        cap_l = cap_num * 3.78541     # US gallon
+    else:
+        cap_l = cap_num  # assume liters
+
+    # Heuristic: if no explicit unit and a volume is given, interpret as hL when it matches reality.
+    if unit is None and volume_l is not None:
+        try:
+            v = float(volume_l)
+        except Exception:
+            v = None
+        if v and cap_l > 0:
+            # Example: cap=20, volume=2000 => likely 20 hL
+            if cap_l < v and cap_l * 100.0 >= v - 1e-6:
+                cap_l = cap_l * 100.0
+
+    return float(cap_l)
+
+
 def _pick_col_from_cols(actual_cols, *candidates, contains_all=None, contains_any=None):
     """Pick a column name from a list of column names.
 
@@ -5023,6 +5096,62 @@ elif page == "Breweries":
                     equipment_df["manufacturer"] = ""
                 if "model" not in equipment_df.columns:
                     equipment_df["model"] = ""
+
+                # Live occupancy (derived from active batches assigned to vessels)
+                batches_live = data.get("production_batches", pd.DataFrame())
+                vcol = _col(batches_live, "current_vessel", "vessel", "fermenter", "tank")
+                scol = _col(batches_live, "status")
+                volcol = _col(
+                    batches_live,
+                    "brewed_volume_l", "volume_brewed_l", "actual_volume_l",
+                    "planned_volume_l", "batch_volume_l", "batch_size", "batch_volume"
+                )
+                codecol = _col(batches_live, "batch_code", "code", "batch")
+
+                occ_map: dict[str, dict] = {}
+                if batches_live is not None and not batches_live.empty and vcol:
+                    for _, br in batches_live.iterrows():
+                        if scol and not _is_active_status(br.get(scol)):
+                            continue
+                        vname = str(br.get(vcol) or "").strip()
+                        if not vname:
+                            continue
+                        vol = 0.0
+                        if volcol:
+                            try:
+                                vol = float(br.get(volcol) or 0.0)
+                            except Exception:
+                                vol = 0.0
+                        bcode = ""
+                        if codecol:
+                            bcode = str(br.get(codecol) or "").strip()
+                        if not bcode:
+                            bcode = str(br.get("id_batch") or "").strip()
+                        if vname not in occ_map:
+                            occ_map[vname] = {"volume": 0.0, "batches": []}
+                        occ_map[vname]["volume"] += vol
+                        if bcode:
+                            occ_map[vname]["batches"].append(bcode)
+
+                # Normalize capacities to liters (handles 'hL' etc.)
+                try:
+                    equipment_df["capacity_liters"] = equipment_df["capacity_liters"].apply(lambda x: _capacity_to_l(x))
+                except Exception:
+                    pass
+
+                # Override status/current volume for display based on active batches
+                if "name" in equipment_df.columns:
+                    equipment_df["active_batches"] = equipment_df["name"].apply(
+                        lambda n: ", ".join(occ_map.get(str(n).strip(), {}).get("batches", []))
+                    )
+                    equipment_df["current_volume"] = equipment_df.apply(
+                        lambda r: float(occ_map.get(str(r.get("name")).strip(), {}).get("volume", r.get("current_volume", 0.0)) or 0.0),
+                        axis=1
+                    )
+                    equipment_df["status"] = equipment_df.apply(
+                        lambda r: "In Use" if str(r.get("name")).strip() in occ_map else str(r.get("status") or "Empty"),
+                        axis=1
+                    )
                 # Filtros
                 col_eq_filter1, col_eq_filter2, col_eq_filter3 = st.columns(3)
                 
@@ -5107,6 +5236,7 @@ elif page == "Breweries":
                                     <p><strong>Brewery:</strong> {brewery_name}</p>
                                     <p><strong>Capacity:</strong> {eq['capacity_liters']:,}L</p>
                                     <p><strong>Current:</strong> {eq['current_volume']:,}L ({occupancy_pct:.1f}%)</p>
+                                    <p><strong>Active batch(es):</strong> {eq.get('active_batches','') or '—'}</p>
                                     <p><strong>Status:</strong> {render_status_badge(eq['status'])}</p>
                                     <p><strong>Manufacturer:</strong> {eq.get('manufacturer', 'N/A')}</p>
                                 </div>
@@ -9687,10 +9817,12 @@ elif page == "Production":
         if m.empty:
             return True
         try:
-            cap = float(m.iloc[0][eq_cap_col] or 0)
+            cap_raw = m.iloc[0][eq_cap_col]
         except Exception:
-            cap = 0
-        return (cap <= 0) or (float(volume_l) <= cap + 1e-9)
+            cap_raw = 0
+        cap_l = _capacity_to_l(cap_raw, volume_l=volume_l)
+        # If capacity is missing/zero, don't block the action.
+        return (cap_l <= 0) or (float(volume_l) <= cap_l + 1e-9)
 
     def _recipe_scale_factor(recipe_id: str | None, batch_volume_l: float) -> float:
         if not recipe_id or recipes_df is None or recipes_df.empty or not recipe_batch_col or not recipe_id_col:
