@@ -8955,20 +8955,21 @@ elif page == "Recipes":
                                     if col_val is not None and str(col_val) != 'nan':
                                         st.write(f"Color: {col_val} EBC")
                                 
-                                # Calcular ABV
-                                og_calc = recipe.get('og', recipe.get('original_gravity', recipe.get('og_plato')))
-                                fg_calc = recipe.get('fg', recipe.get('final_gravity', recipe.get('fg_plato')))
-                                if og_calc and fg_calc:
-                                    abv = (float(og_calc) - float(fg_calc)) * 0.524
-                                    st.write(f"**ABV:** {abv:.1f}%")
-                            
-                            # Descrição
-                            if recipe.get('description'):
-                                st.write("**Description:**")
-                                desc = recipe.get('description', recipe.get('notes', ''))
-                                if desc:
-                                    st.write(desc)
-                        
+                                # ABV (supports either stored 'abv' or derived from OG/FG)
+                                abv_stored = recipe.get('abv')
+                                if abv_stored is not None and str(abv_stored) != 'nan':
+                                    st.write(f"**ABV:** {abv_stored}%")
+                                else:
+                                    og_calc = recipe.get('og', recipe.get('original_gravity', recipe.get('og_plato')))
+                                    fg_calc = recipe.get('fg', recipe.get('final_gravity', recipe.get('fg_plato')))
+                                    if og_calc and fg_calc:
+                                        abv = (float(og_calc) - float(fg_calc)) * 0.524
+                                        st.write(f"**ABV:** {abv:.1f}%")
+# Description / notes (supports Postgres legacy 'notes' column)
+                            desc = recipe.get('description', recipe.get('notes', ''))
+                            if desc is not None and str(desc) != 'nan' and str(desc).strip() != '':
+                                st.write("**Description / Notes:**")
+                                st.write(desc)
                         with col_right:
                             # Ações
                             st.write("**Actions:**")
