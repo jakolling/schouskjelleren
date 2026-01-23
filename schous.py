@@ -8523,7 +8523,10 @@ elif page == "Recipes":
                     brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
 
                     # attempt to find current brewery id
-                    cur_brewery_id = recipe_row.get('brewery_id', recipe_row.get('id_brewery', recipe_row.get('target_brewery_id', recipe_row.get('target_brewery', recipe_row.get('brewery', None)))))
+                    cur_brewery_id = recipe_row.get('brewery_id', recipe_row.get('id_brewery', recipe_row.get('target_brewery_id', recipe_row.get('id_target_brewery', recipe_row.get('brewery_target_id', recipe_row.get('id_brewery_target', None))))))
+
+                    # Sometimes legacy schemas store the brewery as a *name* instead of an id
+                    cur_brewery_name = recipe_row.get('brewery_name', recipe_row.get('target_brewery_name', recipe_row.get('brewery_target_name', recipe_row.get('target_brewery', recipe_row.get('brewery_target', recipe_row.get('brewery', None))))))
 
                     with st.form(key=f'edit_recipe_form_{str(edit_id)}'):
                         c1, c2 = st.columns(2)
@@ -8534,9 +8537,16 @@ elif page == "Recipes":
                             if not breweries_df.empty and brewery_id_col and brewery_name_col:
                                 brewery_options = {row[brewery_id_col]: row[brewery_name_col] for _, row in breweries_df.iterrows()}
                                 ids = list(brewery_options.keys())
-                                # Determine index
+                                # Determine index (supports id stored as int/uuid/str OR stored as name)
+                                idx = 0
                                 try:
-                                    idx = ids.index(cur_brewery_id) if cur_brewery_id in ids else 0
+                                    ids_str = [str(x) for x in ids]
+                                    if cur_brewery_id is not None and str(cur_brewery_id) in ids_str:
+                                        idx = ids_str.index(str(cur_brewery_id))
+                                    elif cur_brewery_name is not None:
+                                        names = [str(brewery_options.get(_id, '')).strip() for _id in ids]
+                                        name_map = {nm.lower(): i for i, nm in enumerate(names) if nm}
+                                        idx = name_map.get(str(cur_brewery_name).strip().lower(), 0)
                                 except Exception:
                                     idx = 0
                                 new_brewery = st.selectbox('Target Brewery', options=ids, index=idx,
@@ -8628,7 +8638,9 @@ elif page == "Recipes":
                             _mfg = str(r.get(ing_mfg_col) or '').strip() if ing_mfg_col else ''
                             _label = f"{_mfg} — {_nm_s}" if _mfg else _nm_s
                             ing_lookup[_iid] = {
+                                'label': _label,
                                 'name': _label,
+                                'raw_name': _nm_s,
                                 'unit': str(r.get(ing_unit_col) or ''),
                             }
 
@@ -8706,7 +8718,7 @@ elif page == "Recipes":
 
                         # collect row
                         if ingredient_options:
-                            ing_name = ing_lookup.get(sel_ing, {}).get('name') if sel_ing is not None else ''
+                            ing_name = ing_lookup.get(sel_ing, {}).get('raw_name') if sel_ing is not None else ''
                             unit_val = ing_lookup.get(sel_ing, {}).get('unit') if sel_ing is not None else planned_unit
                             working_items.append({
                                 'id_ingredient': sel_ing,
@@ -8799,8 +8811,32 @@ elif page == "Recipes":
                             'srm': new_ebc,
                             'brewery_id': new_brewery,
                             'id_brewery': new_brewery,
+                            'target_brewery_id': new_brewery,
+                            'id_target_brewery': new_brewery,
+                            'brewery_target_id': new_brewery,
+                            'id_brewery_target': new_brewery,
+                            'target_brewery': new_brewery_name,  # some schemas store name here
+                            'brewery_target': new_brewery_name,
                             'brewery_name': new_brewery_name,
+                            'target_brewery_name': new_brewery_name,
+                            'brewery_target_name': new_brewery_name,
                         }
+
+                        # Compute and store ABV (rounded to 1 decimal) when possible
+                        try:
+                            if new_og is not None and new_fg is not None:
+                                _ogv = float(new_og)
+                                _fgv = float(new_fg)
+                                _abv = (_ogv - _fgv) * 0.524
+                                _abv = round(_abv, 1)
+                                update_dict.update({
+                                    'abv': _abv,
+                                    'abv_pct': _abv,
+                                    'abv_percent': _abv,
+                                    'alcohol_by_volume': _abv,
+                                })
+                        except Exception:
+                            pass
 
                         # Determine recipes table id column
                         engine = get_engine()
@@ -8819,9 +8855,9 @@ elif page == "Recipes":
                         # --- Update recipe_items to match edited ingredient list ---
                         try:
                             recipe_items_cols = get_table_columns_cached('recipe_items', dialect) or []
-                            items_fk_col = _first_existing(recipe_items_cols, ['recipe_id', 'id_recipe', 'id_receipt']) or 'recipe_id'
-                            items_ing_name_col = _first_existing(recipe_items_cols, ['ingredient_name', 'ingredient']) or 'ingredient_name'
-                            items_ing_id_col = _first_existing(recipe_items_cols, ['id_ingredient', 'ingredient_id'])
+                            items_fk_col = _first_existing(recipe_items_cols, ['recipe_id', 'id_recipe', 'id_receipt', 'recipe', 'recipe_fk', 'fk_recipe']) or 'recipe_id'
+                            items_ing_name_col = _first_existing(recipe_items_cols, ['ingredient_name', 'ingredient', 'name', 'item_name', 'ingredient_desc', 'ingredient_description']) or 'ingredient_name'
+                            items_ing_id_col = _first_existing(recipe_items_cols, ['id_ingredient', 'ingredient_id', 'ing_id', 'fk_ingredient'])
                             items_qty_col = _first_existing(recipe_items_cols, ['quantity']) or 'quantity'
                             items_unit_col = _first_existing(recipe_items_cols, ['unit']) or 'unit'
 
@@ -8924,9 +8960,9 @@ elif page == "Recipes":
                             st.write(f"**Efficiency:** {eff_txt}")
 
                             # Brewery name: use stored name if present, else map from breweries table
-                            brew_name = recipe.get('brewery_name', recipe.get('target_brewery_name'))
+                            brew_name = recipe.get('brewery_name', recipe.get('target_brewery_name', recipe.get('brewery_target_name', recipe.get('target_brewery', recipe.get('brewery_target')))))
                             if brew_name is None or str(brew_name) == 'nan' or str(brew_name).strip() == '':
-                                bid = recipe.get('brewery_id', recipe.get('id_brewery', recipe.get('target_brewery_id', recipe.get('id_target_brewery'))))
+                                bid = recipe.get('brewery_id', recipe.get('id_brewery', recipe.get('target_brewery_id', recipe.get('id_target_brewery', recipe.get('brewery_target_id', recipe.get('id_brewery_target'))))))
                                 breweries_df = data.get('breweries', pd.DataFrame())
                                 b_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
                                 b_name_col = _col(breweries_df, 'name', 'brewery_name')
@@ -8953,19 +8989,20 @@ elif page == "Recipes":
                                         st.write(f"IBU: {ibu_val}")
                                     col_val = recipe.get('ebc', recipe.get('color_ebc', recipe.get('srm')))
                                     if col_val is not None and str(col_val) != 'nan':
-                                        st.write(f"Color: {col_val} EBC")
-                                
-                                # ABV (supports either stored 'abv' or derived from OG/FG)
+                                        st.write(f"Color: {col_val} EBC")                                # ABV (supports either stored 'abv' or derived from OG/FG)
                                 abv_stored = recipe.get('abv')
                                 if abv_stored is not None and str(abv_stored) != 'nan':
-                                    st.write(f"**ABV:** {abv_stored}%")
+                                    try:
+                                        st.write(f"**ABV:** {float(abv_stored):.1f}%")
+                                    except Exception:
+                                        st.write(f"**ABV:** {abv_stored}%")
                                 else:
                                     og_calc = recipe.get('og', recipe.get('original_gravity', recipe.get('og_plato')))
                                     fg_calc = recipe.get('fg', recipe.get('final_gravity', recipe.get('fg_plato')))
                                     if og_calc and fg_calc:
                                         abv = (float(og_calc) - float(fg_calc)) * 0.524
                                         st.write(f"**ABV:** {abv:.1f}%")
-# Description / notes (supports Postgres legacy 'notes' column)
+                            # Description / notes (supports Postgres legacy 'notes' column)
                             desc = recipe.get('description', recipe.get('notes', ''))
                             if desc is not None and str(desc) != 'nan' and str(desc).strip() != '':
                                 st.write("**Description / Notes:**")
@@ -9008,7 +9045,7 @@ elif page == "Recipes":
                                 ing_id_col = _col(ingredients_df, 'id_ingredient', 'id')
                                 ing_name_col = _col(ingredients_df, 'name')
 
-                                it_ing_name_col = _col(recipe_items, 'ingredient_name', 'ingredient')
+                                it_ing_name_col = _col(recipe_items, 'ingredient_name', 'ingredient', 'name', 'item_name', 'ingredient_desc', 'ingredient_description')
                                 it_ing_id_col = _col(recipe_items, 'id_ingredient', 'ingredient_id')
                                 it_qty_col = _col(recipe_items, 'quantity')
                                 it_unit_col = _col(recipe_items, 'unit')
@@ -9019,7 +9056,7 @@ elif page == "Recipes":
                                     if it_ing_name_col and pd.notna(item.get(it_ing_name_col)):
                                         ingredient_name = str(item.get(it_ing_name_col))
                                     elif ingredients_df is not None and not ingredients_df.empty and it_ing_id_col and ing_id_col and ing_name_col:
-                                        ing = ingredients_df[ingredients_df[ing_id_col] == item.get(it_ing_id_col)]
+                                        ing = ingredients_df[ingredients_df[ing_id_col].astype(str) == str(item.get(it_ing_id_col))]
                                         if not ing.empty:
                                             ingredient_name = str(ing.iloc[0][ing_name_col])
 
@@ -9484,7 +9521,7 @@ elif page == "Recipes":
                             if it_ing_name_col and ing_name_col:
                                 ing = ingredients_df[ingredients_df[ing_name_col].astype(str) == str(item.get(it_ing_name_col))]
                             elif it_ing_id_col and ing_id_col:
-                                ing = ingredients_df[ingredients_df[ing_id_col] == item.get(it_ing_id_col)]
+                                ing = ingredients_df[ingredients_df[ing_id_col].astype(str) == str(item.get(it_ing_id_col))]
                             else:
                                 ing = pd.DataFrame()
                             if not ing.empty:
