@@ -10565,7 +10565,7 @@ elif page == "Production":
                                 notes = st.text_area('Notes', height=90)
 
                                 st.markdown("**Ingredient consumption**")
-                                st.caption("You can substitute ingredients or add extra ingredients for this brew. Quantities entered here will be used for batch costing.")
+                                st.caption("You can **skip** ingredients, substitute ingredients, or add extra ingredients for this brew. Quantities entered here will be used for batch costing.")
 
                                 rid = str(selected_batch.get(b_recipe_id_col) or '')
                                 scale = _recipe_scale_factor(rid, float(actual_volume))
@@ -10645,14 +10645,12 @@ elif page == "Production":
 
                                         cc1, cc2, cc3, cc4 = st.columns([1.1, 3, 2, 2])
                                         with cc1:
-                                            _ui_use = st.checkbox(
+                                            checked = st.checkbox(
                                                 "Use",
                                                 value=True,
                                                 key=f"brew_ing_use_{batch_id}_{_row_id}",
-                                                disabled=True,
-                                                help="All recipe ingredients are always consumed on Brew.",
+                                                help="Uncheck to skip this ingredient for this Brew (it won't be consumed or costed).",
                                             )
-                                            checked = True
                                         with cc2:
                                             chosen_ing = st.selectbox(
                                                 "Ingredient",
@@ -10660,6 +10658,7 @@ elif page == "Production":
                                                 index=default_index if opts else 0,
                                                 format_func=lambda x: ing_label_map.get(str(x), str(x)) if str(x) else "",
                                                 key=f"brew_ing_pick_{batch_id}_{_row_id}",
+                                                disabled=not checked,
                                             )
                                         with cc3:
                                             actual_qty = st.number_input(
@@ -10669,9 +10668,12 @@ elif page == "Production":
                                                 step=0.1,
                                                 key=f"brew_ing_qty_{batch_id}_{_row_id}",
                                                 help=f"Planned: {planned_qty:g} {unit}",
+                                                disabled=not checked,
                                             )
                                         with cc4:
-                                            if original_ing and chosen_ing and chosen_ing != original_ing:
+                                            if not checked:
+                                                st.caption("Skipped on this Brew")
+                                            elif original_ing and chosen_ing and chosen_ing != original_ing:
                                                 st.caption(f"Planned: {planned_qty:g} {unit}  •  Sub: {original_ing} → {chosen_ing}")
                                             else:
                                                 st.caption(f"Planned: {planned_qty:g} {unit}")
