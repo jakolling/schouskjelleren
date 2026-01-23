@@ -8848,7 +8848,16 @@ elif page == "Recipes":
                         except Exception as _e:
                             st.error(f"Could not update recipe ingredients: {_e}")
 
-                        update_data('recipes', update_dict, f"{recipes_id_col} = :rid", {'rid': edit_id})
+                        # Update recipe row (handle id-type differences across DBs)
+                        updated_rows = 0
+                        try:
+                            updated_rows = update_data('recipes', update_dict, f"{recipes_id_col} = :rid", {'rid': edit_id})
+                        except Exception:
+                            updated_rows = 0
+
+                        if updated_rows == 0:
+                            # Fallback: compare as TEXT (helps when DB column is numeric but edit_id is a string)
+                            updated_rows = update_data('recipes', update_dict, f"CAST({recipes_id_col} AS TEXT) = :rid", {'rid': str(edit_id)})
                         st.success('Recipe updated!')
                         st.session_state.edit_recipe = None
                         # refresh
