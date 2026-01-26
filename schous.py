@@ -3871,22 +3871,7 @@ def get_alerts():
                 "time": datetime.now().strftime("%H:%M")
             })
     
-    # Verificar equipamentos com limpeza vencida
-    equipment_df = data.get('equipment', pd.DataFrame())
-    if not equipment_df.empty and "cleaning_due" in equipment_df.columns:
-        try:
-            equipment_copy = equipment_df.copy()
-            equipment_copy["cleaning_due"] = pd.to_datetime(equipment_copy["cleaning_due"])
-            overdue_cleaning = equipment_copy[equipment_copy["cleaning_due"] < datetime.now()]
-            for _, eq in overdue_cleaning.iterrows():
-                alerts.append({
-                    "type": "warning",
-                    "title": "🧹 Cleaning Overdue",
-                    "message": f"{eq['name']} ({eq['type']}) is overdue for cleaning",
-                    "time": datetime.now().strftime("%H:%M")
-                })
-        except:
-            pass
+    # (Dashboard) cleaning alerts disabled (user cleans tanks after use)
     
     # Verificar ordens agendadas para hoje
     orders_df = data.get('production_orders', pd.DataFrame())
@@ -5394,47 +5379,7 @@ elif page == "Breweries":
             else:
                 st.info("Add equipment to see distribution charts")
             
-            # Próximas manutenções
-            st.markdown("---")
-            st.subheader("🛠️ Upcoming Maintenance")
-            
-            if not equipment_df.empty and "next_maintenance" in equipment_df.columns:
-                equipment_copy = equipment_df.copy()
-                equipment_copy["next_maintenance"] = pd.to_datetime(equipment_copy["next_maintenance"])
-                
-                upcoming_maintenance = equipment_copy[
-                    (equipment_copy["next_maintenance"] >= pd.Timestamp(datetime.now().date())) &
-                    (equipment_copy["next_maintenance"] <= pd.Timestamp(datetime.now().date() + timedelta(days=30)))
-                ].sort_values("next_maintenance")
-                
-                if len(upcoming_maintenance) > 0:
-                    for _, eq in upcoming_maintenance.iterrows():
-                        days_until = (eq["next_maintenance"].date() - datetime.now().date()).days
-                        
-                        brewery_name = ""
-                        brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
-                        brewery_id_col = _col(breweries_df, 'id_brewery', 'brewery_id', 'id')
-                        if (not breweries_df.empty) and brewery_id_col and brewery_name_col and (eq.get('brewery_id') in set(breweries_df[brewery_id_col].values)):
-                            brewery_name = breweries_df.loc[breweries_df[brewery_id_col] == eq.get('brewery_id'), brewery_name_col].iloc[0]
-                        
-                        col_m1, col_m2, col_m3 = st.columns([3, 2, 1])
-                        with col_m1:
-                            st.write(f"**{eq['name']}** ({brewery_name})")
-                            st.write(f"Type: {eq['type']}")
-                        with col_m2:
-                            st.write(f"**Due:** {eq['next_maintenance'].date()}")
-                        with col_m3:
-                            if days_until <= 7:
-                                st.error(f"**{days_until} days**")
-                            elif days_until <= 14:
-                                st.warning(f"**{days_until} days**")
-                            else:
-                                st.info(f"**{days_until} days**")
-                        st.markdown("---")
-                else:
-                    st.success("✅ No maintenance scheduled for the next 30 days")
-            else:
-                st.info("No maintenance data available")
+            # (Dashboard) maintenance reminders disabled
         else:
             st.info("Add breweries and equipment to see overview statistics")
         
