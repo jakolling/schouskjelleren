@@ -1676,9 +1676,24 @@ def update_data(table_name: str, data_dict: dict, where_clause: str, where_param
     # Fetch actual columns (cached) to avoid "UndefinedColumn" errors
     dialect = engine.dialect.name.lower()
     actual_cols = get_table_columns_cached(table_name, dialect) or list(data_dict.keys())
+    cols_set = set(actual_cols)
 
-    # Keep only columns that exist
-    filtered_updates = {k: _to_python_scalar(v) for k, v in data_dict.items() if k in set(actual_cols)}
+    # Keep only columns that exist (but be resilient to stale cache after schema changes)
+    filtered_updates = {k: _to_python_scalar(v) for k, v in data_dict.items() if k in cols_set}
+
+    # If cache is stale (common on Streamlit Cloud across deploys), refresh once
+    if data_dict and (not filtered_updates or len(filtered_updates) < len(data_dict)):
+        try:
+            get_table_columns_cached.clear()
+        except Exception:
+            try:
+                _get_table_columns_cached.clear()
+            except Exception:
+                pass
+        actual_cols = get_table_columns_cached(table_name, dialect) or list(data_dict.keys())
+        cols_set = set(actual_cols)
+        filtered_updates = {k: _to_python_scalar(v) for k, v in data_dict.items() if k in cols_set}
+
     if not filtered_updates:
         return 0
 
@@ -5487,7 +5502,13 @@ elif page == "Ingredients":
             
             # Aplicar filtros
             filtered_ingredients = ingredients_df.copy()
-            
+            # Effective unit cost respects manual overrides (if enabled)
+            if 'effective_unit_cost' not in filtered_ingredients.columns:
+                try:
+                    filtered_ingredients['effective_unit_cost'] = filtered_ingredients.apply(_ingredient_effective_unit_cost, axis=1)
+                except Exception:
+                    filtered_ingredients['effective_unit_cost'] = filtered_ingredients.get('unit_cost', 0)
+
             if category_filter != "All":
                 filtered_ingredients = filtered_ingredients[filtered_ingredients["category"] == category_filter]
             
@@ -5508,7 +5529,7 @@ elif page == "Ingredients":
                 total_items = len(filtered_ingredients)
                 st.metric("Total Items", total_items)
             with col_stat2:
-                total_stock_value = (filtered_ingredients["stock"] * filtered_ingredients["unit_cost"]).sum()
+                total_stock_value = (filtered_ingredients["stock"] * filtered_ingredients.get("effective_unit_cost", filtered_ingredients["unit_cost"])).sum()
                 st.metric("Total Stock Value", f"${total_stock_value:,.2f}")
             with col_stat3:
                 low_stock_count = len(filtered_ingredients[
@@ -5546,7 +5567,13 @@ elif page == "Ingredients":
                 )
             
             # Add valor total
-            display_df["Total Value"] = display_df["stock"] * display_df["unit_cost"]
+            # Total value uses the effective unit cost (manual override if set)
+            if 'effective_unit_cost' not in display_df.columns:
+                try:
+                    display_df['effective_unit_cost'] = display_df.apply(_ingredient_effective_unit_cost, axis=1)
+                except Exception:
+                    display_df['effective_unit_cost'] = display_df.get('unit_cost', 0)
+            display_df["Total Value"] = display_df["stock"] * display_df['effective_unit_cost']
             
             # Selecionar colunas para exibição
             display_cols = ["name", "manufacturer", "category", "stock", "unit", 
@@ -5563,7 +5590,8 @@ elif page == "Ingredients":
                 "category": "Category",
                 "stock": "Current Stock",
                 "unit": "Unit",
-                "unit_cost": "Unit Cost",
+                "unit_cost": "Calculated Unit Cost",
+                "effective_unit_cost": "Effective Unit Cost",
                 "low_stock_threshold": "Low Stock Threshold",
                 "Total Value": "Total Value",
                 "Status": "Status"
@@ -5572,7 +5600,8 @@ elif page == "Ingredients":
             display_df = display_df[display_cols].rename(columns=column_mapping)
             
             # Formatar valores
-            display_df["Unit Cost"] = display_df["Unit Cost"].apply(lambda x: f"${x:.2f}")
+            display_df["Calculated Unit Cost"] = display_df["Calculated Unit Cost"].apply(lambda x: f"${float(str(x).replace('$','') or 0):.4f}") if "Calculated Unit Cost" in display_df.columns else display_df.get("Calculated Unit Cost")
+            display_df["Effective Unit Cost"] = display_df["Effective Unit Cost"].apply(lambda x: f"${float(str(x).replace('$','') or 0):.4f}") if "Effective Unit Cost" in display_df.columns else display_df.get("Effective Unit Cost")
             display_df["Total Value"] = display_df["Total Value"].apply(lambda x: f"${x:.2f}")
             
             st.dataframe(
