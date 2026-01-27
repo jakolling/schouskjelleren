@@ -6108,23 +6108,43 @@ elif page == "Ingredients":
         
         ingredients_df = data.get("ingredients", pd.DataFrame())
         if not ingredients_df.empty:
-            # Análise por categoria
-            category_analysis = ingredients_df.groupby("category").agg({
-                "name": "count",
-                "stock": "sum",
-                "effective_unit_cost": "mean"
-            }).reset_index()
-            
-            # Calcular o valor total separadamente
-            category_analysis["Total Value"] = category_analysis["stock"] * category_analysis["unit_cost"]
-            
-            # Renomear colunas
-            category_analysis.columns = ["Category", "Item Count", "Total Stock", "Avg Unit Cost", "Total Value"]
-            
+            # Ensure required columns exist and compute effective cost/value before aggregations
+            ingredients_df = ingredients_df.copy()
+            if "category" not in ingredients_df.columns:
+                ingredients_df["category"] = "Uncategorized"
+
+            # Unit cost used everywhere (manual override > calculated)
+            try:
+                ingredients_df["effective_unit_cost"] = ingredients_df.apply(_ingredient_effective_unit_cost, axis=1)
+            except Exception:
+                # Fallback if something goes sideways (should be rare)
+                base = ingredients_df["unit_cost"] if "unit_cost" in ingredients_df.columns else (
+                    ingredients_df["cost_per_unit"] if "cost_per_unit" in ingredients_df.columns else 0.0
+                )
+                ingredients_df["effective_unit_cost"] = base
+
+            ingredients_df["effective_unit_cost"] = pd.to_numeric(ingredients_df["effective_unit_cost"], errors="coerce").fillna(0.0)
+            ingredients_df["stock"] = pd.to_numeric(ingredients_df.get("stock", 0.0), errors="coerce").fillna(0.0)
+            ingredients_df["total_value"] = ingredients_df["stock"] * ingredients_df["effective_unit_cost"]
+
+            # Análise por categoria (safe even if a column was missing before)
+            category_analysis = (
+                ingredients_df.groupby("category", dropna=False)
+                .agg(
+                    **{
+                        "Item Count": ("name", "count"),
+                        "Total Stock": ("stock", "sum"),
+                        "Avg Unit Cost": ("effective_unit_cost", "mean"),
+                        "Total Value": ("total_value", "sum"),
+                    }
+                )
+                .reset_index()
+                .rename(columns={"category": "Category"})
+            )
+
             # Formatar
             category_analysis["Avg Unit Cost"] = category_analysis["Avg Unit Cost"].round(2)
             category_analysis["Total Value"] = category_analysis["Total Value"].round(2)
-            
             col_cat1, col_cat2 = st.columns(2)
             
             with col_cat1:
