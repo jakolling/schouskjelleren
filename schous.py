@@ -1133,6 +1133,10 @@ def init_database():
             "unit": "TEXT",
             "stock": "DOUBLE PRECISION DEFAULT 0",
             "unit_cost": "DOUBLE PRECISION DEFAULT 0",
+            "use_manual_cost": "INTEGER DEFAULT 0",
+            "unit_cost_manual": "DOUBLE PRECISION",
+            "manual_cost_notes": "TEXT",
+            "manual_cost_updated": "TIMESTAMPTZ",
             "low_stock_threshold": "DOUBLE PRECISION DEFAULT 0",
             "alpha_acid": "DOUBLE PRECISION DEFAULT 0",
             "lot_number": "TEXT",
@@ -2873,6 +2877,52 @@ def _find_ingredient_row_by_name(ing_df: pd.DataFrame, ingredient_name: str):
     return None
 
 
+
+def _ingredient_effective_unit_cost(row) -> float:
+    """Return the unit cost that should be used in calculations.
+
+    If the ingredient has a manual override enabled, that value wins.
+    Falls back to unit_cost (or legacy cost_per_unit).
+    """
+    try:
+        use_manual = row.get("use_manual_cost", 0) if hasattr(row, "get") else 0
+        # Normalize booleans/strings
+        if isinstance(use_manual, str):
+            use_manual = 1 if use_manual.strip().lower() in {"1", "true", "yes", "y", "on"} else 0
+        try:
+            use_manual = int(float(use_manual or 0))
+        except Exception:
+            use_manual = 0
+
+        if use_manual:
+            v = None
+            try:
+                v = row.get("unit_cost_manual", None) if hasattr(row, "get") else None
+            except Exception:
+                v = None
+            if v is not None and str(v).strip().lower() not in {"", "nan", "none"}:
+                try:
+                    fv = float(v)
+                    if fv > 0:
+                        return float(fv)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Fallbacks (calculated costs)
+    for k in ("unit_cost", "cost_per_unit"):
+        try:
+            v = row.get(k, None) if hasattr(row, "get") else None
+            if v is None or str(v).strip().lower() in {"", "nan", "none"}:
+                continue
+            return float(v)
+        except Exception:
+            continue
+    return 0.0
+
+
+
 def get_ingredient_unit_and_cost(data: dict, ingredient_name: str):
     ing = data.get('ingredients', None)
     if ing is None or ing.empty:
@@ -2880,6 +2930,8 @@ def get_ingredient_unit_and_cost(data: dict, ingredient_name: str):
     ncol = _col(ing, 'name')
     ucol = _col(ing, 'unit')
     ccol = _col(ing, 'unit_cost', 'cost_per_unit')
+    mcol = _col(ing, 'unit_cost_manual')
+    umcol = _col(ing, 'use_manual_cost')
     if not ncol:
         return None, 0.0
     row = _find_ingredient_row_by_name(ing, ingredient_name)
@@ -2887,10 +2939,10 @@ def get_ingredient_unit_and_cost(data: dict, ingredient_name: str):
         return None, 0.0
     unit = row.get(ucol) if ucol and ucol in ing.columns else None
     try:
-        cost = float(row.get(ccol)) if ccol and ccol in ing.columns and row.get(ccol) is not None else 0.0
+        cost = _ingredient_effective_unit_cost(row)
     except Exception:
         cost = 0.0
-    return unit, cost
+    return unit, float(cost or 0.0)
 
 
 
@@ -5760,6 +5812,10 @@ elif page == "Ingredients":
                             # If user is setting opening stock, allow an initial cost baseline.
                             "unit_cost": float(opening_unit_cost) if opening_stock else 0.0,
                             "cost_per_unit": float(opening_unit_cost) if opening_stock else 0.0,
+                            "use_manual_cost": 0,
+                            "unit_cost_manual": None,
+                            "manual_cost_notes": None,
+                            "manual_cost_updated": None,
                             "low_stock_threshold": low_stock_threshold,
                             "alpha_acid": alpha_acid if category == "Hops" else 0.0,
                             "lot_number": lot_number,
@@ -5865,6 +5921,47 @@ elif page == "Ingredients":
                         current_cost = float(ing_data.get("unit_cost", 0) or 0)
                         st.metric("Current Unit Cost (calculated)", f"${current_cost:,.4f}")
 
+
+                        # Manual cost override (useful to correct historical wrong costs)
+                        try:
+                            use_manual0 = int(float(ing_data.get("use_manual_cost", 0) or 0))
+                        except Exception:
+                            use_manual0 = 0
+                        try:
+                            manual_cost0 = float(ing_data.get("unit_cost_manual", 0) or 0)
+                        except Exception:
+                            manual_cost0 = 0.0
+                        manual_note0 = str(ing_data.get("manual_cost_notes", "") or "")
+
+                        use_manual_new = st.checkbox(
+                            "Use manual unit cost override",
+                            value=bool(use_manual0),
+                            key="edit_ing_use_manual_cost",
+                            help="If enabled, this value will be used for recipe costing and stock valuation. Purchases will still update the calculated cost in the background.",
+                        )
+
+                        if use_manual_new:
+                            default_cost = manual_cost0 if manual_cost0 > 0 else current_cost
+                            manual_cost_new = st.number_input(
+                                "Manual unit cost",
+                                min_value=0.0,
+                                value=float(default_cost),
+                                step=0.01,
+                                format="%.4f",
+                                key="edit_ing_manual_cost",
+                            )
+                            manual_note_new = st.text_input(
+                                "Manual cost note (optional)",
+                                value=manual_note0,
+                                key="edit_ing_manual_note",
+                            )
+                        else:
+                            manual_cost_new = 0.0
+                            manual_note_new = manual_note0
+
+                        eff_cost_preview = float(manual_cost_new) if (use_manual_new and float(manual_cost_new or 0) > 0) else float(current_cost or 0)
+                        st.caption(f"Effective unit cost used in calculations: **${eff_cost_preview:,.4f}**")
+
                         # Supplier relationship
                         suppliers_df = data.get("suppliers", pd.DataFrame())
                         supplier_options = suppliers_df["name"].dropna().astype(str).tolist() if not suppliers_df.empty else []
@@ -5930,6 +6027,10 @@ elif page == "Ingredients":
                                 "supplier_name": None if new_supplier == "Select Supplier" else str(new_supplier),
                                 "supplier": None if new_supplier == "Select Supplier" else str(new_supplier),
                                 "low_stock_threshold": new_threshold,
+                                "use_manual_cost": 1 if bool(use_manual_new) else 0,
+                                "unit_cost_manual": float(manual_cost_new) if bool(use_manual_new) and float(manual_cost_new or 0) > 0 else None,
+                                "manual_cost_notes": str(manual_note_new).strip() if bool(use_manual_new) and str(manual_note_new).strip() else None,
+                                "manual_cost_updated": pd.Timestamp.utcnow() if bool(use_manual_new) else None,
                                 "alpha_acid": new_alpha,
                                 "lot_number": new_lot,
                                 "notes": new_notes
@@ -6011,7 +6112,7 @@ elif page == "Ingredients":
             category_analysis = ingredients_df.groupby("category").agg({
                 "name": "count",
                 "stock": "sum",
-                "unit_cost": "mean"
+                "effective_unit_cost": "mean"
             }).reset_index()
             
             # Calcular o valor total separadamente
@@ -6051,7 +6152,8 @@ elif page == "Ingredients":
             st.subheader("💵 Cost Analysis")
             
             # Top 10 ingredientes mais valiosos
-            ingredients_df["total_value"] = ingredients_df["stock"] * ingredients_df["unit_cost"]
+            ingredients_df["effective_unit_cost"] = ingredients_df.apply(_ingredient_effective_unit_cost, axis=1)
+            ingredients_df["total_value"] = ingredients_df["stock"] * ingredients_df["effective_unit_cost"]
             top_valuable = ingredients_df.nlargest(10, "total_value")
             
             fig3 = go.Figure(data=[
@@ -7677,6 +7779,41 @@ elif page == "Purchases":
             )
 
 
+            # Quick drill-down: pick an order and see all items that impacted stock in that entry
+            st.markdown("### 🔎 Open an order")
+            if order_summary is not None and not order_summary.empty:
+                order_recs = order_summary.to_dict("records")
+                def _po_label(r):
+                    try:
+                        dtv = r.get("date", "")
+                        dtv = str(dtv)[:10] if dtv is not None else ""
+                    except Exception:
+                        dtv = ""
+                    sup = str(r.get("supplier", "") or "")
+                    on = str(r.get("order_number", "") or r.get("purchase_order_id", ""))
+                    oid0 = r.get("purchase_order_id", "")
+                    typ = str(r.get("transaction_type", "") or "")
+                    return f"{dtv} • {sup} • #{on} • {typ} (ID {oid0})"
+
+                sel_order = st.selectbox(
+                    "Select an order to view its items",
+                    options=order_recs,
+                    format_func=_po_label,
+                    key="po_open_order_select",
+                )
+                sel_oid = int(sel_order.get("purchase_order_id") or 0)
+
+                sub = filtered[filtered["purchase_order_id"] == sel_oid].copy()
+                if sub is None or sub.empty:
+                    st.info("No line items found for this order.")
+                else:
+                    # Show the exact items that were added/removed in that order
+                    show_cols = [c for c in ["ingredient", "quantity", "unit", "unit_price", "freight_per_unit", "effective_unit_cost", "total_cost"] if c in sub.columns]
+                    st.dataframe(sub[show_cols].reset_index(drop=True), use_container_width=True, height=260)
+            else:
+                st.info("No orders in the selected date range.")
+
+
             # --- Corrections: Return / Adjustment (no editing the original order) ---
             st.markdown("---")
             st.subheader("🛠️ Corrections (Return / Adjustment)")
@@ -8412,7 +8549,7 @@ elif page == "Purchases":
                 # Top 10 ingredientes por gasto
                 ingredient_spending = purchases_df.groupby("ingredient").agg({
                     "total_cost": "sum",
-                    "unit_cost": "mean",
+                    "effective_unit_cost": "mean",
                     "quantity": "sum"
                 }).reset_index()
                 
@@ -9647,8 +9784,8 @@ elif page == "Recipes":
                             else:
                                 ing = pd.DataFrame()
                             if not ing.empty:
-                                unit_cost = ing.iloc[0].get('unit_cost', 0)
-                                total_cost += unit_cost * item['quantity']
+                                unit_cost = _ingredient_effective_unit_cost(ing.iloc[0])
+                                total_cost += float(unit_cost or 0) * float(item.get('quantity', 0) or 0)
                     
                     batch_vol = pd.to_numeric(recipe.get('batch_volume', recipe.get('batch_size', 0)), errors='coerce')
                     batch_vol = float(batch_vol) if pd.notna(batch_vol) else 0.0
