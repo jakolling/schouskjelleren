@@ -5902,6 +5902,10 @@ elif page == "Ingredients":
                     # Obter dados atuais
                     ing_data = ingredients_df[ingredients_df["name"] == selected_ingredient].iloc[0]
                     
+
+                    # Primary key column (supports legacy schemas)
+                    ing_pk_col = _col(ingredients_df, 'id_ingredient', 'id')
+                    ing_pk_val = ing_data.get(ing_pk_col) if ing_pk_col else None
                     col_edit1, col_edit2 = st.columns(2)
                     
                     with col_edit1:
@@ -6063,13 +6067,13 @@ elif page == "Ingredients":
                                         source="Manual" if delta_stock > 0 else "Inventory",
                                         destination="Inventory" if delta_stock > 0 else "Manual",
                                         ref_table="ingredients",
-                                        ref_id=int(ing_data.get("id") or 0),
+                                        ref_id=int(ing_pk_val or 0),
                                         notes="Edited stock in Ingredients tab",
                                     )
                             except Exception:
                                 pass
 
-                            update_data("ingredients", updates, "id = :id", {"id": ing_data["id"]})
+                            update_data("ingredients", updates, f"{ing_pk_col} = :id" if ing_pk_col else "id_ingredient = :id", {"id": ing_pk_val})
                             data = get_all_data()
                             st.success(f"✅ Ingredient '{new_name}' updated successfully!")
                             st.rerun()
@@ -6077,12 +6081,12 @@ elif page == "Ingredients":
                     with col_btn2:
                         if st.button("🗑️ Delete Ingredient", use_container_width=True, type="secondary", key="delete_ing_btn"):
                             # Verificar se o ingrediente está em uso em receitas
-                            in_use = check_ingredient_usage(ing_data["id"])
+                            in_use = check_ingredient_usage(ing_pk_val)
                             
                             if in_use:
                                 st.error("Cannot delete ingredient that is used in recipes! Remove it from recipes first.")
                             else:
-                                st.session_state.delete_confirmation = {"type": "ingredient", "id": ing_data["id"], "name": selected_ingredient}
+                                st.session_state.delete_confirmation = {"type": "ingredient", "id": ing_pk_val, "name": selected_ingredient}
                                 st.rerun()
                     
                     with col_btn3:
@@ -6099,12 +6103,12 @@ elif page == "Ingredients":
                                         source="Inventory",
                                         destination="Manual",
                                         ref_table="ingredients",
-                                        ref_id=int(ing_data.get("id") or 0),
+                                        ref_id=int(ing_pk_val or 0),
                                         notes="Reset stock to 0 in Ingredients tab",
                                     )
                             except Exception:
                                 pass
-                            update_data("ingredients", {"stock": 0}, "id = :id", {"id": ing_data["id"]})
+                            update_data("ingredients", {"stock": 0}, f"{ing_pk_col} = :id" if ing_pk_col else "id_ingredient = :id", {"id": ing_pk_val})
                             data = get_all_data()
                             st.warning(f"⚠️ Stock for '{selected_ingredient}' reset to 0!")
                             st.rerun()
