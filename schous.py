@@ -402,6 +402,10 @@ def _translate_sqlite_to_postgres(ddl: str) -> str:
 def _ensure_columns(table_name: str, columns_sql: dict[str, str]) -> None:
     """Add missing columns to an existing table (best-effort, safe for fresh deploys).
     columns_sql: {column_name: SQL_TYPE or 'SQL_TYPE DEFAULT ...'}
+
+    IMPORTANT:
+    - We clear the cached column list after ALTER TABLE so insert/update helpers
+      don't silently drop newly-added fields.
     """
     engine = get_engine()
     dialect = engine.dialect.name.lower()
@@ -429,10 +433,17 @@ def _ensure_columns(table_name: str, columns_sql: dict[str, str]) -> None:
     if not missing:
         return
 
-    with engine.begin() as conn:
-        for col in missing:
-            col_def = columns_sql[col]
-            conn.execute(sql_text(f"ALTER TABLE {table_name} ADD COLUMN {col} {col_def}"))
+    try:
+        with engine.begin() as conn:
+            for col in missing:
+                col_def = columns_sql[col]
+                conn.execute(sql_text(f"ALTER TABLE {table_name} ADD COLUMN {col} {col_def}"))
+    finally:
+        # Clear cached column metadata so subsequent writes can see new columns
+        try:
+            _get_table_columns_cached.clear()
+        except Exception:
+            pass
 
 
 def init_database():
