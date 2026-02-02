@@ -739,6 +739,11 @@ def init_database():
                 beer_recipe_name TEXT,
                 output_unit TEXT DEFAULT 'unit',
                 beer_liters_per_unit DOUBLE PRECISION DEFAULT 0,
+                manual_unit_price DOUBLE PRECISION,
+                price_currency TEXT DEFAULT 'NOK',
+                kegging_unit_cost DOUBLE PRECISION,
+                unit_price_source TEXT DEFAULT 'manual',
+                last_unit_price_update TIMESTAMPTZ,
                 notes TEXT,
                 status TEXT DEFAULT 'Active',
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -1078,6 +1083,11 @@ def init_database():
                 recipe_name TEXT,
                 output_unit TEXT DEFAULT 'unit',
                 beer_liters_per_unit REAL DEFAULT 0,
+                manual_unit_price REAL,
+                price_currency TEXT DEFAULT 'NOK',
+                kegging_unit_cost REAL,
+                unit_price_source TEXT DEFAULT 'manual',
+                last_unit_price_update TIMESTAMP,
                 notes TEXT,
                 status TEXT DEFAULT 'Active',
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1507,6 +1517,11 @@ def init_database():
             "recipe_id": "TEXT",
             "recipe_name": "TEXT",
             "output_unit": "TEXT",
+            "manual_unit_price": "DOUBLE PRECISION",
+            "price_currency": "TEXT DEFAULT 'NOK'",
+            "kegging_unit_cost": "DOUBLE PRECISION",
+            "unit_price_source": "TEXT DEFAULT 'manual'",
+            "last_unit_price_update": "TIMESTAMPTZ",
             "notes": "TEXT",
             "status": "TEXT",
         },
@@ -7678,6 +7693,14 @@ elif page == "Products":
                     recipe_name = st.selectbox("Beer / Recipe", recipe_options, index=0 if recipe_options else None)
                     beer_l_per_unit = st.number_input("Beer (L) per unit", min_value=0.0, value=30.0, step=1.0)
                 with c3:
+                    manual_price = st.number_input(
+                        "Unit price (optional)",
+                        min_value=0.0,
+                        value=0.0,
+                        step=0.01,
+                        format="%.2f",
+                    )
+                    price_currency = st.text_input("Currency", value="NOK")
                     notes = st.text_area("Notes", height=90)
 
                 st.markdown("**Packaging / other components (per 1 unit)**")
@@ -7722,6 +7745,8 @@ elif page == "Products":
                         'recipe_id': rid,
                         'recipe_name': recipe_name,
                         'output_unit': (output_unit or 'unit').strip() or 'unit',
+                        'manual_unit_price': (float(manual_price) if float(manual_price or 0) > 0 else None),
+                        'price_currency': (price_currency or 'NOK').strip() or 'NOK',
                         'notes': notes,
                         'status': 'Active',
                     })
@@ -7762,6 +7787,11 @@ elif page == "Products":
             rname_col_e = _col(composites_df, 'recipe_name', 'beer_recipe_name')
             rid_col_e = _col(composites_df, 'recipe_id', 'beer_recipe_id')
             beer_l_col_e = _col(composites_df, 'beer_liters_per_unit', 'beer_liters_per_unit_l', 'beer_l_per_unit')
+            man_price_col_e = _col(composites_df, 'manual_unit_price')
+            cur_col_e = _col(composites_df, 'price_currency')
+            keg_cost_col_e = _col(composites_df, 'kegging_unit_cost')
+            src_col_e = _col(composites_df, 'unit_price_source')
+            last_upd_col_e = _col(composites_df, 'last_unit_price_update')
 
             comp_records_e = composites_df.to_dict('records') if composites_df is not None and not composites_df.empty else []
 
@@ -7795,6 +7825,21 @@ elif page == "Products":
                     current_notes = str(sel_e.get(notes_col_e) or '')
                     current_status = str(sel_e.get(status_col_e) or 'Active')
                     current_recipe_name = str(sel_e.get(rname_col_e) or '')
+
+                    try:
+                        current_manual_price = float(sel_e.get(man_price_col_e) or 0) if man_price_col_e else 0.0
+                    except Exception:
+                        current_manual_price = 0.0
+
+                    current_currency = (str(sel_e.get(cur_col_e) or 'NOK') if cur_col_e else 'NOK').strip() or 'NOK'
+
+                    try:
+                        current_kegging_cost = float(sel_e.get(keg_cost_col_e) or 0) if keg_cost_col_e else 0.0
+                    except Exception:
+                        current_kegging_cost = 0.0
+
+                    current_price_source = (str(sel_e.get(src_col_e) or 'manual') if src_col_e else 'manual').strip() or 'manual'
+                    current_last_update = sel_e.get(last_upd_col_e) if last_upd_col_e else None
 
                     # Beer liters per unit: prefer BOM beer row; fall back to composite column if present
                     beer_l_val = 0.0
@@ -7849,6 +7894,19 @@ elif page == "Products":
                                 new_recipe_name_e = st.text_input("Beer / Recipe", value=current_recipe_name)
                             new_beer_l_e = st.number_input("Beer (L) per unit", min_value=0.0, value=float(beer_l_val or 0.0), step=1.0)
                         with e3:
+                            new_manual_price_e = st.number_input(
+                                "Unit price (manual)",
+                                min_value=0.0,
+                                value=float(current_manual_price or 0.0),
+                                step=0.01,
+                                format="%.2f",
+                            )
+                            new_currency_e = st.text_input("Currency", value=str(current_currency or 'NOK'))
+                            if float(current_kegging_cost or 0) > 0:
+                                msg = f"Last kegging unit cost: {float(current_kegging_cost):.2f} (source: {current_price_source})"
+                                if current_last_update is not None:
+                                    msg += f" | updated: {current_last_update}"
+                                st.caption(msg)
                             new_notes_e = st.text_area("Notes", value=current_notes, height=90)
 
                         st.markdown("**Components (per 1 unit)**")
@@ -7891,6 +7949,14 @@ elif page == "Products":
                                 payload_e[cname_col_e] = str(new_name_e).strip()
                             if out_unit_col_e:
                                 payload_e[out_unit_col_e] = (str(new_output_unit_e or 'unit')).strip() or 'unit'
+                            if man_price_col_e:
+                                try:
+                                    _mp = float(new_manual_price_e or 0)
+                                except Exception:
+                                    _mp = 0.0
+                                payload_e[man_price_col_e] = (_mp if _mp > 0 else None)
+                            if cur_col_e:
+                                payload_e[cur_col_e] = (str(new_currency_e or 'NOK').strip() or 'NOK')
                             if notes_col_e:
                                 payload_e[notes_col_e] = new_notes_e
                             if status_col_e:
@@ -7960,10 +8026,48 @@ elif page == "Products":
             rname_col = _col(composites_df, 'recipe_name')
 
             # Show list + BOM
+            # Precompute on-hand units per product (all warehouses)
+            on_hand_map = {}
+            try:
+                if composite_inv_df is not None and not composite_inv_df.empty and cid_col:
+                    _inv_cid = _col(composite_inv_df, 'composite_id')
+                    _inv_qty = _col(composite_inv_df, 'quantity_units')
+                    if _inv_cid and _inv_qty:
+                        tmp = composite_inv_df[[_inv_cid, _inv_qty]].copy()
+                        tmp[_inv_qty] = pd.to_numeric(tmp[_inv_qty], errors='coerce').fillna(0.0)
+                        on_hand_map = tmp.groupby(_inv_cid)[_inv_qty].sum().to_dict()
+            except Exception:
+                on_hand_map = {}
+
+            man_price_col = _col(composites_df, 'manual_unit_price')
+            keg_cost_col = _col(composites_df, 'kegging_unit_cost')
+            cur_col = _col(composites_df, 'price_currency')
+
             for _, c in composites_df.sort_values(cid_col or composites_df.columns[0], ascending=False).iterrows():
                 with st.expander(f"{c.get(cname_col,'')}  (#{c.get(cid_col,'')})"):
                     st.write(f"**Beer / Recipe:** {c.get(rname_col,'')}")
                     st.write(f"**Output unit:** {c.get(out_unit_col,'unit')}")
+                    # Pricing / valuation
+                    try:
+                        _mp = float(c.get(man_price_col) or 0) if man_price_col else 0.0
+                    except Exception:
+                        _mp = 0.0
+                    try:
+                        _kc = float(c.get(keg_cost_col) or 0) if keg_cost_col else 0.0
+                    except Exception:
+                        _kc = 0.0
+                    _ccy = (str(c.get(cur_col) or 'NOK') if cur_col else 'NOK').strip() or 'NOK'
+                    eff = (_kc if _kc > 0 else _mp)
+                    st.write(f"**Unit price (manual):** {(_mp if _mp else 0):.2f} {_ccy}")
+                    if _kc > 0:
+                        st.write(f"**Unit cost (last kegging):** {_kc:.2f} {_ccy}")
+                    if eff > 0:
+                        try:
+                            _on = float(on_hand_map.get(c.get(cid_col), 0) or 0)
+                        except Exception:
+                            _on = 0.0
+                        st.write(f"**On hand (all warehouses):** {_on:g} {c.get(out_unit_col,'unit')}")
+                        st.write(f"**Stock value (using effective unit price):** {(_on * eff):.2f} {_ccy}")
                     if composite_items_df is not None and not composite_items_df.empty and cid_col:
                         icid = _col(composite_items_df, 'composite_id')
                         if icid:
@@ -8028,6 +8132,42 @@ elif page == "Products":
                         axis=1,
                     )
 
+            # Merge manual/effective product pricing (saved on composite product)
+            try:
+                if composites_df is not None and not composites_df.empty and cid:
+                    _pid = _col(composites_df, 'id_composite', 'id')
+                    _mp = _col(composites_df, 'manual_unit_price')
+                    _kc = _col(composites_df, 'kegging_unit_cost')
+                    _ccy = _col(composites_df, 'price_currency')
+                    keep = [c for c in [_pid, _mp, _kc, _ccy] if c]
+                    if keep:
+                        pmap = composites_df[keep].copy()
+                        # standardize
+                        if _pid and _pid != 'composite_id':
+                            pmap = pmap.rename(columns={_pid: 'composite_id'})
+                        if _mp and _mp != 'manual_unit_price':
+                            pmap = pmap.rename(columns={_mp: 'manual_unit_price'})
+                        if _kc and _kc != 'kegging_unit_cost':
+                            pmap = pmap.rename(columns={_kc: 'kegging_unit_cost'})
+                        if _ccy and _ccy != 'price_currency':
+                            pmap = pmap.rename(columns={_ccy: 'price_currency'})
+
+                        inv_agg = inv_agg.merge(pmap, on='composite_id', how='left')
+                        inv_agg['manual_unit_price'] = pd.to_numeric(inv_agg.get('manual_unit_price'), errors='coerce')
+                        inv_agg['kegging_unit_cost'] = pd.to_numeric(inv_agg.get('kegging_unit_cost'), errors='coerce')
+                        inv_agg['effective_unit_price'] = inv_agg.apply(
+                            lambda r: (float(r.get('kegging_unit_cost')) if pd.notna(r.get('kegging_unit_cost')) and float(r.get('kegging_unit_cost') or 0) > 0
+                                      else (float(r.get('manual_unit_price')) if pd.notna(r.get('manual_unit_price')) else np.nan)),
+                            axis=1,
+                        )
+                        inv_agg['stock_value_price'] = inv_agg.apply(
+                            lambda r: (float(r.get('on_hand_units') or 0) * float(r.get('effective_unit_price') or 0))
+                            if pd.notna(r.get('effective_unit_price')) else np.nan,
+                            axis=1,
+                        )
+            except Exception:
+                pass
+
         # --- Filters ---
         dep_name_col = _col(deposits_df, 'name')
         deposit_names = deposits_df[dep_name_col].dropna().astype(str).tolist() if (deposits_df is not None and not deposits_df.empty and dep_name_col) else []
@@ -8049,7 +8189,19 @@ elif page == "Products":
         if view is None or view.empty:
             st.info('No stock rows to display (after filters).')
         else:
-            show_cols = [c for c in ['warehouse', 'composite_name', 'composite_id', 'on_hand_units', 'avg_unit_cost', 'stock_value_est'] if c in view.columns]
+            show_cols = [
+                c for c in [
+                    'warehouse',
+                    'composite_name',
+                    'composite_id',
+                    'on_hand_units',
+                    'effective_unit_price',
+                    'stock_value_price',
+                    'avg_unit_cost',
+                    'stock_value_est',
+                    'price_currency',
+                ] if c in view.columns
+            ]
             st.dataframe(view.sort_values(['warehouse','composite_name'] if 'composite_name' in view.columns else view.columns[0]), use_container_width=True)
 
         st.markdown('---')
@@ -13319,6 +13471,35 @@ elif page == "Production":
                                                             'total_cost': float(actual_cost_val),
                                                             'notes': notes,
                                                         })
+
+                                                        # Memorize latest kegging-based unit cost on the composite product
+                                                        try:
+                                                            update_data(
+                                                                'composite_products',
+                                                                {
+                                                                    'kegging_unit_cost': float(unit_cost_val),
+                                                                    'unit_price_source': 'kegging',
+                                                                    'last_unit_price_update': pd.Timestamp.utcnow(),
+                                                                    'price_currency': 'NOK',
+                                                                },
+                                                                "id_composite = :id",
+                                                                {'id': int(comp_id)},
+                                                            )
+                                                        except Exception:
+                                                            try:
+                                                                update_data(
+                                                                    'composite_products',
+                                                                    {
+                                                                        'kegging_unit_cost': float(unit_cost_val),
+                                                                        'unit_price_source': 'kegging',
+                                                                        'last_unit_price_update': pd.Timestamp.utcnow(),
+                                                                        'price_currency': 'NOK',
+                                                                    },
+                                                                    "id = :id",
+                                                                    {'id': int(comp_id)},
+                                                                )
+                                                            except Exception:
+                                                                pass
 
                                                         # Keg run record
                                                         insert_data('production_keg_runs', {
