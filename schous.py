@@ -4941,6 +4941,8 @@ elif page == "Analytics":
         c1, c2, c3, c4 = st.columns([1,1,1,1])
 
         # Date bounds from whatever has dates
+        # Normalize everything to UTC-aware timestamps to avoid mixing
+        # tz-aware and tz-naive values (which can crash min/max).
         all_dates = []
         for df, colnames in [
             (purchases_df, ['date']),
@@ -4953,14 +4955,17 @@ elif page == "Analytics":
                 continue
             for c in colnames:
                 if c in df.columns:
-                    s = pd.to_datetime(df[c], errors='coerce')
-                    if s.notna().any():
+                    # Force UTC so all series share the same tz awareness.
+                    s = pd.to_datetime(df[c], errors='coerce', utc=True).dropna()
+                    if len(s):
                         all_dates.append(s)
                         break
 
         if all_dates:
-            mind = pd.concat(all_dates).min().date()
-            maxd = pd.concat(all_dates).max().date()
+            _dates = pd.concat(all_dates)
+            # _dates is tz-aware (UTC). min/max are safe; .date() yields a python date.
+            mind = _dates.min().date()
+            maxd = _dates.max().date()
         else:
             mind = date.today() - timedelta(days=90)
             maxd = date.today()
