@@ -25,7 +25,7 @@ import json
 # - Configure usuários/senhas (hash bcrypt) e cookie em .streamlit/secrets.toml
 # - Configure DATABASE_URL (Postgres recomendado). Ex:
 #   DATABASE_URL="postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME"
-from sqlalchemy import create_engine, text as sql_text, inspect
+from sqlalchemy import create_engine, text as sql_text
 from sqlalchemy.engine import Engine
 
 st.set_page_config(
@@ -2102,139 +2102,6 @@ def load_admin_backup_bytes(backup_id: int) -> bytes:
     return bytes(b)
 
 
-
-def _coerce_df_to_table(conn, table_name: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Coerce dataframe values to match DB column types to avoid DataError on restore."""
-    try:
-        cols = inspect(conn).get_columns(table_name)
-    except Exception:
-        # If reflection fails, fall back to generic cleaning
-        df2 = df.copy()
-        df2 = df2.where(pd.notnull(df2), None)
-        return df2
-
-    colinfo = {c["name"]: c for c in cols}
-
-    # Keep only columns that exist in the table (Excel may include extra helper columns)
-    df2 = df.copy()
-    keep_cols = [c for c in df2.columns if c in colinfo]
-    df2 = df2[keep_cols]
-
-    # Basic NA normalization
-    df2 = df2.where(pd.notnull(df2), None)
-
-    from sqlalchemy.sql.sqltypes import (
-        Integer, BigInteger, SmallInteger,
-        Numeric, Float,
-        Boolean,
-        DateTime, Date,
-        String, Text,
-        LargeBinary,
-    )
-
-    for col in df2.columns:
-        info = colinfo.get(col)
-        if not info:
-            continue
-        typ = info.get("type")
-        s = df2[col]
-
-        # remove timezone info if present
-        if pd.api.types.is_datetime64tz_dtype(s):
-            s = s.dt.tz_convert(None)
-
-        # Integers (Excel often turns them into floats)
-        if isinstance(typ, (Integer, BigInteger, SmallInteger)):
-            nums = pd.to_numeric(s, errors="coerce")
-            nums = nums.astype("Int64")
-            df2[col] = nums.where(~nums.isna(), None).astype(object)
-
-        # Floats / numeric
-        elif isinstance(typ, (Numeric, Float)):
-            nums = pd.to_numeric(s, errors="coerce")
-            nums = nums.replace([np.inf, -np.inf], np.nan)
-            df2[col] = nums.where(~pd.isna(nums), None).astype(object)
-
-        # Booleans
-        elif isinstance(typ, Boolean):
-            def _to_bool(x):
-                if x is None:
-                    return None
-                if isinstance(x, bool):
-                    return x
-                if isinstance(x, (int, np.integer)):
-                    return bool(int(x))
-                if isinstance(x, str):
-                    t = x.strip().lower()
-                    if t in {"true", "t", "yes", "y", "1"}:
-                        return True
-                    if t in {"false", "f", "no", "n", "0"}:
-                        return False
-                return None
-
-            df2[col] = s.apply(_to_bool).astype(object)
-
-        # Datetimes
-        elif isinstance(typ, DateTime):
-            dt = pd.to_datetime(s, errors="coerce", utc=False)
-            if pd.api.types.is_datetime64tz_dtype(dt):
-                dt = dt.dt.tz_convert(None)
-            df2[col] = dt.where(~pd.isna(dt), None).astype(object)
-
-        # Dates
-        elif isinstance(typ, Date):
-            dt = pd.to_datetime(s, errors="coerce")
-            dates = dt.dt.date
-            df2[col] = pd.Series(dates, index=df2.index).where(~pd.isna(dt), None).astype(object)
-
-        # Text / strings (also handles JSON-ish objects)
-        elif isinstance(typ, (String, Text)):
-            max_len = getattr(typ, "length", None)
-
-            def _to_str(x):
-                if x is None:
-                    return None
-                if isinstance(x, (dict, list, set, tuple)):
-                    x = json.dumps(x, ensure_ascii=False)
-                else:
-                    x = str(x)
-                if max_len and isinstance(max_len, int) and len(x) > max_len:
-                    x = x[:max_len]
-                return x
-
-            df2[col] = s.apply(_to_str).astype(object)
-
-        # Binary
-        elif isinstance(typ, LargeBinary):
-            def _to_bytes(x):
-                if x is None:
-                    return None
-                if isinstance(x, (bytes, bytearray)):
-                    return bytes(x)
-                if isinstance(x, str):
-                    return x.encode("utf-8")
-                return None
-
-            df2[col] = s.apply(_to_bytes).astype(object)
-
-        else:
-            # Generic: normalize containers and numpy scalars
-            def _norm(x):
-                if x is None:
-                    return None
-                if isinstance(x, float) and np.isnan(x):
-                    return None
-                if isinstance(x, (dict, list, set, tuple)):
-                    return json.dumps(x, ensure_ascii=False)
-                return _to_python_scalar(x)
-
-            df2[col] = s.apply(_norm).astype(object)
-
-    # Final NA cleanup
-    df2 = df2.where(pd.notnull(df2), None)
-    return df2
-
-
 def restore_from_excel_backup_bytes(xlsx_bytes: bytes) -> dict[str, int]:
     """Restore database tables from an Excel backup. Returns {table: rows_inserted}."""
     require_admin_action()
@@ -2257,7 +2124,6 @@ def restore_from_excel_backup_bytes(xlsx_bytes: bytes) -> dict[str, int]:
         "production_events",
         "production_consumptions",
         "calendar_events",
-        "admin_backups",
     ]
     tables = [t for t in preferred_order if t in data] + [t for t in data.keys() if t not in preferred_order]
 
@@ -2276,23 +2142,15 @@ def restore_from_excel_backup_bytes(xlsx_bytes: bytes) -> dict[str, int]:
                 inserted[table] = 0
                 continue
 
-            df2 = _coerce_df_to_table(conn, table, df)
+            # Replace pandas NA with None for SQLAlchemy
+            df2 = df.where(pd.notnull(df), None)
 
-            try:
-                df2.to_sql(
-                    table,
-                    con=conn,
-                    if_exists="append",
-                    index=False,
-                    method="multi",
-                    chunksize=500,
-                )
-            except Exception as e:
-                # Raise a clearer error that isn't redacted by Streamlit/SQLAlchemy
-                raise ValueError(f"Erro ao restaurar a tabela '{table}': {type(e).__name__}: {e}") from e
+            # Write
+            df2.to_sql(table, con=conn, if_exists="append", index=False, method="multi")
 
             # Align sequences if needed
             _reset_serial_sequences(conn, table, df2)
+
             inserted[table] = int(len(df2))
 
     bump_db_version()
@@ -4148,6 +4006,194 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     return buf.getvalue()
 
+
+def generate_inventory_sheet_pdf_bytes(
+    warehouse: str | None = None,
+    as_of: date | None = None,
+    include_inactive_ingredients: bool = False,
+    include_zero_rows: bool = True,
+) -> bytes:
+    """Generate a printable monthly inventory sheet PDF.
+
+    Lists finished products (composite_inventory) and raw materials (ingredients)
+    with a blank column for counted quantities.
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+
+    as_of = as_of or date.today()
+
+    # Pull a fresh snapshot (fast because get_all_data is cached via db_version)
+    snapshot = get_all_data()
+    prod_inv = snapshot.get("composite_inventory", pd.DataFrame())
+    ingredients = snapshot.get("ingredients", pd.DataFrame())
+
+    # Normalize inputs
+    wh = (warehouse or "").strip()
+    wh_is_all = (not wh) or (wh.lower() == "all")
+
+    # -----------------------------
+    # Finished products (composite_inventory)
+    # -----------------------------
+    products_rows = []
+    if prod_inv is not None and not prod_inv.empty:
+        dfp = prod_inv.copy()
+
+        # Expected columns: composite_name, warehouse, quantity_units
+        name_col = _col(dfp, "composite_name") or _col(dfp, "name") or _col(dfp, "product") or "composite_name"
+        wh_col = _col(dfp, "warehouse") or "warehouse"
+        qty_col = _col(dfp, "quantity_units") or _col(dfp, "quantity") or "quantity_units"
+
+        # Filter warehouse if chosen
+        if (wh_col in dfp.columns) and (not wh_is_all):
+            dfp = dfp[dfp[wh_col].astype(str).str.strip() == wh]
+
+        # Build a grouped view if showing "All"
+        if wh_is_all and (name_col in dfp.columns) and (qty_col in dfp.columns):
+            # Aggregate across warehouses
+            dfp_grp = dfp.groupby(dfp[name_col].astype(str), dropna=False, as_index=False)[qty_col].sum()
+            dfp_grp = dfp_grp.rename(columns={name_col: "Item", qty_col: "System Qty"})
+            dfp_grp["Unit"] = "units"
+            dfp_grp = dfp_grp[["Item", "Unit", "System Qty"]]
+        else:
+            # Keep per-warehouse rows if a specific warehouse is selected
+            cols = []
+            if name_col in dfp.columns:
+                cols.append(name_col)
+            if qty_col in dfp.columns:
+                cols.append(qty_col)
+            if wh_col in dfp.columns and (not wh_is_all):
+                cols.append(wh_col)
+            dfp2 = dfp[cols].copy() if cols else dfp.copy()
+            if name_col in dfp2.columns:
+                dfp2 = dfp2.rename(columns={name_col: "Item"})
+            if qty_col in dfp2.columns:
+                dfp2 = dfp2.rename(columns={qty_col: "System Qty"})
+            dfp2["Unit"] = "units"
+            # Display Item/Unit/System Qty; warehouse is already fixed
+            dfp_grp = dfp2[["Item", "Unit", "System Qty"]] if set(["Item","Unit","System Qty"]).issubset(dfp2.columns) else dfp2
+
+        # Optional filtering of zero rows
+        if (not include_zero_rows) and ("System Qty" in dfp_grp.columns):
+            dfp_grp = dfp_grp[pd.to_numeric(dfp_grp["System Qty"], errors="coerce").fillna(0) != 0]
+
+        dfp_grp = dfp_grp.sort_values(by=["Item"]) if ("Item" in dfp_grp.columns) else dfp_grp
+        for _, r in dfp_grp.iterrows():
+            item = str(r.get("Item", "")).strip()
+            unit = str(r.get("Unit", "")).strip() or "units"
+            sysqty = r.get("System Qty", "")
+            try:
+                sysqty = float(sysqty) if sysqty is not None and sysqty != "" else ""
+            except Exception:
+                pass
+            products_rows.append([item, unit, sysqty, "", "", ""])
+
+    # -----------------------------
+    # Ingredients (raw materials)
+    # -----------------------------
+    ingredients_rows = []
+    if ingredients is not None and not ingredients.empty:
+        dfi = ingredients.copy()
+        name_col = _col(dfi, "name") or "name"
+        unit_col = _col(dfi, "unit") or "unit"
+        status_col = _col(dfi, "status")
+        stock_col = _col(dfi, "quantity_in_stock") or _col(dfi, "stock") or "quantity_in_stock"
+
+        if (not include_inactive_ingredients) and status_col and (status_col in dfi.columns):
+            dfi = dfi[dfi[status_col].astype(str).str.lower().str.strip().isin(["active", "ativo", "1", "true", "yes"])]
+
+        # If there is a warehouse column for ingredients in your schema, you can extend here later
+
+        # Optional filtering of zero rows
+        if (not include_zero_rows) and (stock_col in dfi.columns):
+            dfi = dfi[pd.to_numeric(dfi[stock_col], errors="coerce").fillna(0) != 0]
+
+        if name_col in dfi.columns:
+            dfi = dfi.sort_values(by=[name_col])
+
+        for _, r in dfi.iterrows():
+            item = str(r.get(name_col, "")).strip()
+            unit = str(r.get(unit_col, "")).strip()
+            sysqty = r.get(stock_col, "")
+            try:
+                sysqty = float(sysqty) if sysqty is not None and sysqty != "" else ""
+            except Exception:
+                pass
+            ingredients_rows.append([item, unit, sysqty, "", "", ""])
+
+    # -----------------------------
+    # Build PDF
+    # -----------------------------
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=14 * mm,
+        rightMargin=14 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
+        title="Inventory Sheet",
+    )
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    h_style = styles["Heading2"]
+    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=9, leading=11)
+
+    wh_label = "All warehouses" if wh_is_all else wh
+    story = []
+    story.append(Paragraph("Monthly Inventory Sheet", title_style))
+    story.append(Paragraph(f"As of: {as_of.isoformat()}  |  Warehouse: {wh_label}", small))
+    story.append(Spacer(1, 8))
+
+    def _build_table(rows, section_title: str):
+        story.append(Paragraph(section_title, h_style))
+        story.append(Paragraph("Fill the 'Counted Qty' during the count. Use 'Notes' for issues (damaged, missing, open bags, etc.).", small))
+        story.append(Spacer(1, 6))
+
+        header = ["Item", "Unit", "System Qty", "Counted Qty", "Difference", "Notes"]
+        data_tbl = [header] + (rows if rows else [["(none)", "", "", "", "", ""]])
+
+        # Column widths tuned for A4 portrait
+        col_widths = [78*mm, 18*mm, 22*mm, 22*mm, 20*mm, 30*mm]
+
+        tbl = Table(data_tbl, colWidths=col_widths, repeatRows=1)
+        tbl_style = TableStyle([
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 9),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+            ("ALIGN", (2, 1), (4, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.whitesmoke]),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+            ("TOPPADDING", (0, 0), (-1, 0), 6),
+        ])
+
+        # Make writable rows a bit taller
+        for r in range(1, len(data_tbl)):
+            tbl_style.add("MINROWHEIGHT", (0, r), (-1, r), 14)
+
+        tbl.setStyle(tbl_style)
+        story.append(tbl)
+        story.append(Spacer(1, 10))
+
+    _build_table(products_rows, "Finished products")
+    story.append(PageBreak())
+    _build_table(ingredients_rows, "Raw materials (ingredients)")
+
+    # Footer
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("Count tips: freeze movements during count; count closed containers first; note partial bags; reconcile differences and post stock adjustments.", small))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 def check_supplier_usage(supplier_name):
     """Verifica se um fornecedor tem compras associadas"""
     # Support both legacy purchases and the new purchase-by-order model
@@ -4656,7 +4702,7 @@ if _logo_path:
 
 page = st.sidebar.radio("Navigation", [
     "Dashboard", "Breweries", "Ingredients", "Products", "Orders", "Purchases", 
-    "Recipes", "Production", "Calendar"
+    "Recipes", "Production", "Inventory", "Calendar"
 ], key="page", on_change=_on_page_change)
 st.sidebar.markdown("---")
 if "_last_page" not in st.session_state:
@@ -12366,6 +12412,67 @@ elif page == "Production":
                                 use_container_width=True,
                                 key=f"dl_pdf_any_{batch_id}",
                             )
+
+
+elif page == "Inventory":
+    st.title("📋 Inventory (Monthly count)")
+    st.markdown(
+        """
+Use this page to generate a printable PDF inventory sheet with your **current system stock** and empty fields for the **counted** quantities.
+
+**Recommended monthly workflow**
+1. Choose a date (end-of-month) and freeze stock movements while counting.
+2. Print the sheet and count products + raw materials.
+3. Enter differences in the app (as stock adjustments) or update your backup Excel and restore (admin).
+        """
+    )
+
+    col_a, col_b, col_c = st.columns([1, 1, 1])
+    with col_a:
+        inv_date = st.date_input("Inventory date", value=date.today())
+    with col_b:
+        # Warehouse selector from composite_inventory
+        wh_list = []
+        try:
+            df_wh = data.get("composite_inventory", pd.DataFrame())
+            if df_wh is not None and not df_wh.empty and "warehouse" in df_wh.columns:
+                wh_list = sorted([w for w in df_wh["warehouse"].dropna().astype(str).unique() if w.strip()])
+        except Exception:
+            wh_list = []
+        warehouse = st.selectbox("Warehouse", options=["All"] + wh_list, index=0)
+    with col_c:
+        include_inactive_ing = st.checkbox("Include inactive ingredients", value=False)
+
+    include_zero = st.checkbox("Include zero stock rows", value=True)
+
+    st.markdown("---")
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("🧾 Generate inventory PDF", use_container_width=True):
+            try:
+                pdf_bytes = generate_inventory_sheet_pdf_bytes(
+                    warehouse=warehouse,
+                    as_of=inv_date,
+                    include_inactive_ingredients=include_inactive_ing,
+                    include_zero_rows=include_zero,
+                )
+                st.session_state["_inventory_pdf_bytes"] = pdf_bytes
+                st.success("PDF generated.")
+            except Exception as e:
+                st.error(f"Failed to generate PDF: {e}")
+
+    with col2:
+        if "_inventory_pdf_bytes" in st.session_state:
+            fname = f"inventory_{inv_date.strftime('%Y-%m')}.pdf"
+            st.download_button(
+                "⬇️ Download inventory PDF",
+                data=st.session_state["_inventory_pdf_bytes"],
+                file_name=fname,
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+    st.info("Tip: After counting, reconcile differences. If you want to apply changes quickly, you can update the Excel backup and use the admin restore function.")
 
 elif page == "Calendar":
     st.title("📅 Production Calendar")
