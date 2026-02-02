@@ -764,6 +764,12 @@ def init_database():
                 composite_name TEXT,
                 warehouse TEXT,
                 quantity_units DOUBLE PRECISION,
+                movement_date TIMESTAMPTZ,
+                reason TEXT,
+                unit_cost DOUBLE PRECISION,
+                total_cost DOUBLE PRECISION,
+                currency TEXT,
+                notes TEXT,
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
              )""",
 
@@ -1108,6 +1114,12 @@ def init_database():
                 composite_name TEXT,
                 warehouse TEXT,
                 quantity_units REAL,
+                movement_date TIMESTAMP,
+                reason TEXT,
+                unit_cost REAL,
+                total_cost REAL,
+                currency TEXT,
+                notes TEXT,
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
 
@@ -7870,7 +7882,16 @@ elif page == "Products":
                             'unit': sub_e[cunit_e].astype(str) if (cunit_e and cunit_e in sub_e.columns) else '',
                         })
 
+                    # Ingredient options (for convenience). We also include any already-saved component names
+                    # so the editor doesn't "lose" values that aren't currently in Ingredients.
                     ing_opts_e = ingredients_df[ing_name_col].astype(str).tolist() if ingredients_df is not None and not ingredients_df.empty and ing_name_col else []
+                    try:
+                        if comp_df_e is not None and not comp_df_e.empty and 'component_name' in comp_df_e.columns:
+                            existing_names = [str(x) for x in comp_df_e['component_name'].dropna().astype(str).tolist() if str(x).strip()]
+                            # Preserve order, avoid duplicates
+                            ing_opts_e = list(dict.fromkeys(existing_names + ing_opts_e))
+                    except Exception:
+                        pass
                     comp_type_options_e = ['Ingredient', 'Packaging', 'Label', 'Other']
 
                     st.caption("Edite o produto e os componentes (ex.: adicionar etiquetas, caixas, etc.). Ao salvar, o BOM é regravado.")
@@ -7919,7 +7940,13 @@ elif page == "Products":
                             use_container_width=True,
                             column_config={
                                 "component_type": st.column_config.SelectboxColumn("Type", options=comp_type_options_e),
-                                "component_name": st.column_config.SelectboxColumn("Item", options=[''] + ing_opts_e, required=False),
+                                # Prefer a dropdown to avoid typos; options include existing component names
+                                # plus the full Ingredients list.
+                                "component_name": st.column_config.SelectboxColumn(
+                                    "Item",
+                                    options=[''] + (ing_opts_e or []),
+                                    required=False,
+                                ),
                                 "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.1),
                                 "unit": st.column_config.TextColumn("Unit"),
                             },
@@ -8287,13 +8314,26 @@ elif page == "Products":
 
         def _make_fg_template() -> bytes:
             out = io.BytesIO()
-            cols = ['composite_id', 'composite_name', 'warehouse', 'quantity_units', 'unit_cost', 'currency', 'movement_date', 'reason', 'notes']
+            # product_unit_price/product_currency are optional and (if provided) update the composite product price
+            # so the "Stock (Warehouses)" view can show a price-based stock value right after an opening import.
+            cols = [
+                'composite_id', 'composite_name',
+                'product_unit_price', 'product_currency',
+                'warehouse', 'quantity_units',
+                'unit_cost', 'currency',
+                'movement_date', 'reason', 'notes'
+            ]
             example = pd.DataFrame([
                 {
                     'composite_id': (int(composites_df.iloc[0][comp_id_col]) if (composites_df is not None and not composites_df.empty and comp_id_col) else None),
                     'composite_name': (str(composites_df.iloc[0][comp_name_col]) if (composites_df is not None and not composites_df.empty and comp_name_col) else ''),
+                    # Optional: "sell price" you want to store manually during opening
+                    'product_unit_price': 0.0,
+                    'product_currency': 'NOK',
+                    # Stock movement
                     'warehouse': (deposit_names[0] if deposit_names else 'Main'),
                     'quantity_units': 10,
+                    # Optional: cost valuation for this inbound movement
                     'unit_cost': 120.0,
                     'currency': 'NOK',
                     'movement_date': date.today().isoformat(),
@@ -8363,6 +8403,39 @@ elif page == "Products":
                                 pid = int(float(pid)) if pid is not None else None
                             except Exception:
                                 pid = None
+
+                            # Optional: update the composite product's manual unit price during opening imports
+                            # (useful to immediately get price-based stock value in the Warehouse view).
+                            p_unit_price = rr.get('product_unit_price')
+                            if p_unit_price is None:
+                                # common legacy aliases
+                                p_unit_price = rr.get('manual_unit_price') or rr.get('unit_price') or rr.get('price')
+                            try:
+                                p_unit_price = float(p_unit_price) if p_unit_price is not None else 0.0
+                            except Exception:
+                                p_unit_price = 0.0
+
+                            p_ccy = str(rr.get('product_currency') or rr.get('price_currency') or rr.get('currency') or 'NOK').strip() or 'NOK'
+                            if pid is not None and p_unit_price and p_unit_price > 0:
+                                try:
+                                    update_data(
+                                        'composite_products',
+                                        {'manual_unit_price': float(p_unit_price), 'price_currency': p_ccy},
+                                        "id_composite = :id",
+                                        {'id': int(pid)},
+                                    )
+                                except Exception:
+                                    # fallback by name
+                                    try:
+                                        if rr.get('composite_name') is not None:
+                                            update_data(
+                                                'composite_products',
+                                                {'manual_unit_price': float(p_unit_price), 'price_currency': p_ccy},
+                                                "name = :n",
+                                                {'n': str(rr.get('composite_name') or '')},
+                                            )
+                                    except Exception:
+                                        pass
 
                             pname = str(rr.get('composite_name') or '')
                             if not pname and pid is not None and composites_df is not None and not composites_df.empty and comp_id_col and comp_name_col:
