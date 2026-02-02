@@ -1829,15 +1829,58 @@ def migrate_excel_to_sqlite(excel_file):
         st.error(f"Migration error: {e}")
         return False
 
+def _excel_safe_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of df that is safe to write to Excel.
+
+    - Excel does not support timezone-aware datetimes
+    - Some object columns (dict/list/etc.) need to be stringified
+    """
+    df = df.copy()
+
+    # 1) Timezone-aware datetimes -> timezone-naive (Excel limitation)
+    for col in df.columns:
+        s = df[col]
+        if pd.api.types.is_datetime64tz_dtype(s):
+            # Convert to naive (drops timezone); keeps absolute time
+            df[col] = s.dt.tz_convert(None)
+        elif s.dtype == "object":
+            # Handle cases where tz-aware datetimes are stored as objects
+            try:
+                dt = pd.to_datetime(s, errors="raise")
+                if pd.api.types.is_datetime64tz_dtype(dt):
+                    df[col] = dt.dt.tz_convert(None)
+            except Exception:
+                pass
+
+    # 2) Non-scalar objects -> string (avoids writer errors)
+    for col in df.columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].apply(
+                lambda x: str(x) if isinstance(x, (dict, list, set, tuple)) else x
+            )
+
+    return df
+
+
 def export_to_excel():
     """Exporta todos os dados para Excel"""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         data = get_all_data()
         for table_name, df in data.items():
-            if not df.empty:
-                df.to_excel(writer, sheet_name=table_name, index=False)
-    
+            if df is None or df.empty:
+                continue
+
+            # Excel sheet name limit is 31 chars
+            safe_sheet_name = str(table_name)[:31]
+
+            try:
+                safe_df = _excel_safe_df(df)
+                safe_df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
+            except Exception as e:
+                # Make it easy to see which table caused the export to fail
+                raise ValueError(f"Erro ao exportar a tabela '{table_name}': {e}") from e
+
     output.seek(0)
     return output
 
