@@ -1528,6 +1528,13 @@ def init_database():
             "composite_name": "TEXT",
             "warehouse": "TEXT",
             "quantity_units": "DOUBLE PRECISION",
+            # Finished goods ledger extras (opening balance / adjustments / valuation)
+            "movement_date": "TIMESTAMPTZ",
+            "reason": "TEXT",
+            "unit_cost": "DOUBLE PRECISION",
+            "total_cost": "DOUBLE PRECISION",
+            "currency": "TEXT",
+            "notes": "TEXT",
         },
     )
 
@@ -4991,19 +4998,11 @@ elif page == "Analytics":
             st.caption(f"Currency: {currency}")
 
     def _apply_date_range(df: pd.DataFrame, col: str) -> pd.DataFrame:
-        """Filter dataframe by the global (start,end) date inputs safely across tz-naive and tz-aware timestamps."""
         if df is None or df.empty or col not in df.columns:
             return df
         v = df.copy()
-        # Normalize both the column and the start/end bounds to UTC-aware timestamps to avoid tz comparison errors.
-        v[col] = pd.to_datetime(v[col], errors='coerce', utc=True)
-        sdt = pd.to_datetime(start, utc=True, errors='coerce')
-        edt = pd.to_datetime(end, utc=True, errors='coerce')
-        if pd.isna(sdt) or pd.isna(edt):
-            return v
-        # Treat the 'end' date as inclusive for the whole day.
-        edt_exclusive = edt + pd.Timedelta(days=1)
-        return v[(v[col] >= sdt) & (v[col] < edt_exclusive)]
+        v[col] = pd.to_datetime(v[col], errors='coerce')
+        return v[(v[col] >= pd.to_datetime(start)) & (v[col] <= pd.to_datetime(end))]
 
     tabs = st.tabs([
         '✨ Overview',
@@ -7661,9 +7660,9 @@ elif page == "Products":
     ing_name_col = _col(ingredients_df, 'name')
     ing_cat_col = _col(ingredients_df, 'category')
 
-    tab1 = st.tabs(["Composite Products"])[0]
+    tab_comp, tab_stock = st.tabs(["Composite Products", "Stock (Warehouses)"])
 
-    with tab1:
+    with tab_comp:
         st.subheader("Composite Products")
 
         if is_admin():
@@ -7742,7 +7741,8 @@ elif page == "Products":
                             'composite_id': int(comp_id) if comp_id is not None else None,
                             'component_type': 'Ingredient',
                             'component_name': ing,
-                            'quantity': float(qty_stock),
+                            # qty is already entered in the ingredient's stock unit
+                            'quantity': float(qty),
                             'unit': unit,
                         })
 
@@ -7769,6 +7769,290 @@ elif page == "Products":
                             bom = composite_items_df[composite_items_df[icid] == c.get(cid_col)]
                             if not bom.empty:
                                 st.dataframe(bom[[col for col in bom.columns if col not in ('created_date',)]], use_container_width=True)
+
+    with tab_stock:
+        st.subheader("Finished goods stock by warehouse")
+        st.caption(
+            "Use this to register *opening stock* (products that existed before the app), make manual adjustments, "
+            "and visualize how many kegs/units you have in each deposit/warehouse."
+        )
+
+        deposits_df = data.get('deposits', pd.DataFrame())
+
+        # --- Build an aggregated view (current stock) ---
+        inv = composite_inv_df.copy() if composite_inv_df is not None else pd.DataFrame()
+        if inv is None or inv.empty:
+            st.info("No finished goods movements yet. Add an opening stock below.")
+            inv_agg = pd.DataFrame()
+        else:
+            cid = _col(inv, 'composite_id')
+            cname = _col(inv, 'composite_name')
+            wh = _col(inv, 'warehouse')
+            qty = _col(inv, 'quantity_units')
+            ucost = _col(inv, 'unit_cost')
+
+            needed = [c for c in [cid, cname, wh, qty] if c]
+            v = inv[needed + ([ucost] if ucost else [])].copy() if needed else inv.copy()
+            if qty and qty in v.columns:
+                v[qty] = pd.to_numeric(v[qty], errors='coerce').fillna(0.0)
+            if ucost and ucost in v.columns:
+                v[ucost] = pd.to_numeric(v[ucost], errors='coerce')
+
+            # Current on-hand units
+            if cid and wh and qty:
+                grp_cols = [wh, cid]
+                if cname:
+                    grp_cols.append(cname)
+                inv_agg = v.groupby(grp_cols, dropna=False, as_index=False)[qty].sum().rename(columns={qty: 'on_hand_units'})
+            else:
+                inv_agg = pd.DataFrame()
+
+            # Weighted average unit cost from positive (inbound) movements with a unit_cost
+            if ucost and cid and wh and qty and (ucost in v.columns):
+                pos = v[(v[qty] > 0) & (v[ucost].notna())].copy()
+                if not pos.empty:
+                    pos['__ext'] = pos[qty] * pos[ucost]
+                    cost_grp = pos.groupby([wh, cid], as_index=False).agg(
+                        in_qty=(qty, 'sum'),
+                        in_ext=('__ext', 'sum'),
+                    )
+                    cost_grp['avg_unit_cost'] = cost_grp.apply(
+                        lambda r: (float(r['in_ext']) / float(r['in_qty'])) if float(r['in_qty']) else np.nan,
+                        axis=1,
+                    )
+                    inv_agg = inv_agg.merge(cost_grp[[wh, cid, 'avg_unit_cost']], on=[wh, cid], how='left')
+                    inv_agg['stock_value_est'] = inv_agg.apply(
+                        lambda r: (float(r.get('on_hand_units') or 0) * float(r.get('avg_unit_cost') or 0))
+                        if pd.notna(r.get('avg_unit_cost')) else np.nan,
+                        axis=1,
+                    )
+
+        # --- Filters ---
+        dep_name_col = _col(deposits_df, 'name')
+        deposit_names = deposits_df[dep_name_col].dropna().astype(str).tolist() if (deposits_df is not None and not deposits_df.empty and dep_name_col) else []
+        all_wh = sorted(list(set((inv_agg['warehouse'].astype(str).tolist() if 'warehouse' in inv_agg.columns else []) + deposit_names)))
+        f1, f2 = st.columns([2, 3])
+        with f1:
+            wh_filter = st.selectbox('Warehouse / Deposit', ['All'] + all_wh, index=0)
+        with f2:
+            name_filter = st.text_input('Search product', value='')
+
+        view = inv_agg.copy() if inv_agg is not None else pd.DataFrame()
+        if not view.empty:
+            if wh_filter != 'All' and 'warehouse' in view.columns:
+                view = view[view['warehouse'].astype(str) == str(wh_filter)]
+            if name_filter.strip() and ('composite_name' in view.columns):
+                view = view[view['composite_name'].astype(str).str.lower().str.contains(name_filter.strip().lower(), na=False)]
+
+        # --- Display ---
+        if view is None or view.empty:
+            st.info('No stock rows to display (after filters).')
+        else:
+            show_cols = [c for c in ['warehouse', 'composite_name', 'composite_id', 'on_hand_units', 'avg_unit_cost', 'stock_value_est'] if c in view.columns]
+            st.dataframe(view.sort_values(['warehouse','composite_name'] if 'composite_name' in view.columns else view.columns[0]), use_container_width=True)
+
+        st.markdown('---')
+        st.subheader('Add opening stock / manual adjustment')
+        if not can_write():
+            st.info('Admin edit mode required to add or adjust stock.')
+        else:
+            comp_id_col = _col(composites_df, 'id_composite', 'id')
+            comp_name_col = _col(composites_df, 'name')
+            comp_records = composites_df.to_dict('records') if composites_df is not None and not composites_df.empty else []
+
+            def _p_label(r):
+                return f"{str(r.get(comp_name_col) or '')} (#{r.get(comp_id_col,'')})"
+
+            with st.form('fg_opening_stock_form', clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    sel_wh = st.selectbox('Warehouse / Deposit*', deposit_names if deposit_names else (all_wh or ['Main']))
+                    sel_reason = st.selectbox('Reason', ['Opening Balance', 'Adjustment IN', 'Adjustment OUT', 'Transfer'], index=0)
+                with c2:
+                    sel_prod = st.selectbox('Composite product*', comp_records, format_func=_p_label)
+                    qty_units = st.number_input('Quantity (units)', min_value=0.0, value=0.0, step=1.0)
+                with c3:
+                    unit_cost = st.number_input('Unit cost (optional)', min_value=0.0, value=0.0, step=0.01, format='%.2f')
+                    currency = st.text_input('Currency', value='NOK')
+
+                move_date = st.date_input('Date', date.today())
+                notes = st.text_area('Notes', height=80)
+
+                # Transfer extra fields
+                to_wh = None
+                if sel_reason == 'Transfer':
+                    to_wh = st.selectbox('Transfer TO', [w for w in (deposit_names or all_wh) if str(w) != str(sel_wh)])
+
+                submit_stock = st.form_submit_button('Save movement', type='primary', use_container_width=True)
+
+            if submit_stock:
+                require_admin_action()
+                if sel_prod is None or qty_units <= 0:
+                    st.error('Select a product and set quantity > 0.')
+                else:
+                    pid = int(float(sel_prod.get(comp_id_col))) if comp_id_col else None
+                    pname = str(sel_prod.get(comp_name_col) or '')
+                    dt = pd.to_datetime(move_date, utc=True)
+                    u = float(unit_cost or 0)
+                    if sel_reason == 'Adjustment OUT':
+                        q = -float(qty_units)
+                    else:
+                        q = float(qty_units)
+
+                    def _insert_movement(warehouse_name: str, qty_val: float, reason_val: str, notes_val: str):
+                        row = {
+                            'composite_id': pid,
+                            'composite_name': pname,
+                            'warehouse': str(warehouse_name),
+                            'quantity_units': float(qty_val),
+                            'movement_date': dt,
+                            'reason': reason_val,
+                            'currency': (currency or 'NOK').strip() or 'NOK',
+                            'notes': notes_val,
+                        }
+                        if u and qty_val > 0:
+                            row['unit_cost'] = float(u)
+                            row['total_cost'] = float(u) * float(qty_val)
+                        insert_data('composite_inventory', row)
+
+                    if sel_reason == 'Transfer':
+                        if not to_wh:
+                            st.error('Select a destination warehouse for transfer.')
+                        else:
+                            _insert_movement(str(sel_wh), -float(qty_units), 'Transfer OUT', notes)
+                            _insert_movement(str(to_wh), float(qty_units), 'Transfer IN', notes)
+                            st.success('✅ Transfer recorded.')
+                            st.rerun()
+                    else:
+                        _insert_movement(str(sel_wh), float(q), sel_reason, notes)
+                        st.success('✅ Stock movement recorded.')
+                        st.rerun()
+
+        st.markdown('---')
+        st.subheader('Excel import / export for opening stock')
+        st.caption('Download a template, fill it in Excel, then upload to create opening stock movements.')
+
+        def _make_fg_template() -> bytes:
+            out = io.BytesIO()
+            cols = ['composite_id', 'composite_name', 'warehouse', 'quantity_units', 'unit_cost', 'currency', 'movement_date', 'reason', 'notes']
+            example = pd.DataFrame([
+                {
+                    'composite_id': (int(composites_df.iloc[0][comp_id_col]) if (composites_df is not None and not composites_df.empty and comp_id_col) else None),
+                    'composite_name': (str(composites_df.iloc[0][comp_name_col]) if (composites_df is not None and not composites_df.empty and comp_name_col) else ''),
+                    'warehouse': (deposit_names[0] if deposit_names else 'Main'),
+                    'quantity_units': 10,
+                    'unit_cost': 120.0,
+                    'currency': 'NOK',
+                    'movement_date': date.today().isoformat(),
+                    'reason': 'Opening Balance',
+                    'notes': 'Initial stock before app',
+                }
+            ])[cols]
+            products_list = pd.DataFrame(
+                [{'composite_id': int(r.get(comp_id_col)), 'composite_name': str(r.get(comp_name_col) or '')} for r in (composites_df.to_dict('records') if composites_df is not None and not composites_df.empty and comp_id_col and comp_name_col else [])]
+            )
+            deposits_list = pd.DataFrame([{'warehouse': str(n)} for n in (deposit_names or [])])
+            with pd.ExcelWriter(out, engine='openpyxl') as writer:
+                example.to_excel(writer, sheet_name='FinishedGoods_Import', index=False)
+                if not products_list.empty:
+                    products_list.to_excel(writer, sheet_name='Products_Lookup', index=False)
+                if not deposits_list.empty:
+                    deposits_list.to_excel(writer, sheet_name='Warehouses_Lookup', index=False)
+            out.seek(0)
+            return out.read()
+
+        st.download_button(
+            '⬇️ Download template (FinishedGoods_Import.xlsx)',
+            data=_make_fg_template(),
+            file_name='FinishedGoods_Import.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            use_container_width=True,
+        )
+
+        up = st.file_uploader('Upload filled template', type=['xlsx'], key='fg_import_xlsx')
+        if up is not None:
+            if not can_write():
+                st.error('Admin edit mode required to import.')
+            else:
+                try:
+                    xls = pd.ExcelFile(up)
+                    sheet = 'FinishedGoods_Import' if 'FinishedGoods_Import' in xls.sheet_names else xls.sheet_names[0]
+                    df_imp = pd.read_excel(xls, sheet_name=sheet)
+                    df_imp = df_imp.replace({np.nan: None})
+
+                    required = {'warehouse', 'quantity_units'}
+                    if not required.issubset(set([str(c) for c in df_imp.columns])):
+                        st.error(f"Missing required columns: {', '.join(sorted(required))}")
+                    else:
+                        # Resolve ids by name when needed
+                        name_to_id = {}
+                        if composites_df is not None and not composites_df.empty and comp_id_col and comp_name_col:
+                            for _, rr in composites_df.iterrows():
+                                name_to_id[str(rr.get(comp_name_col) or '')] = int(float(rr.get(comp_id_col)))
+
+                        inserted = 0
+                        for _, rr in df_imp.iterrows():
+                            whv = str(rr.get('warehouse') or '').strip()
+                            if not whv:
+                                continue
+                            qv = rr.get('quantity_units')
+                            try:
+                                qv = float(qv or 0)
+                            except Exception:
+                                qv = 0.0
+                            if abs(qv) < 1e-12:
+                                continue
+
+                            pid = rr.get('composite_id')
+                            if pid is None and rr.get('composite_name') is not None:
+                                pid = name_to_id.get(str(rr.get('composite_name') or ''))
+                            try:
+                                pid = int(float(pid)) if pid is not None else None
+                            except Exception:
+                                pid = None
+
+                            pname = str(rr.get('composite_name') or '')
+                            if not pname and pid is not None and composites_df is not None and not composites_df.empty and comp_id_col and comp_name_col:
+                                mm = composites_df[composites_df[comp_id_col].astype(float) == float(pid)]
+                                if not mm.empty:
+                                    pname = str(mm.iloc[0][comp_name_col])
+
+                            dtv = rr.get('movement_date') or rr.get('date') or rr.get('created_date')
+                            dt = pd.to_datetime(dtv, errors='coerce', utc=True)
+                            if pd.isna(dt):
+                                dt = pd.to_datetime(date.today(), utc=True)
+
+                            reason = str(rr.get('reason') or 'Opening Balance')
+                            notes = str(rr.get('notes') or '')
+
+                            u = rr.get('unit_cost')
+                            try:
+                                u = float(u) if u is not None else 0.0
+                            except Exception:
+                                u = 0.0
+                            curr = str(rr.get('currency') or 'NOK').strip() or 'NOK'
+
+                            row = {
+                                'composite_id': pid,
+                                'composite_name': pname,
+                                'warehouse': whv,
+                                'quantity_units': float(qv),
+                                'movement_date': dt,
+                                'reason': reason,
+                                'currency': curr,
+                                'notes': notes,
+                            }
+                            if u and qv > 0:
+                                row['unit_cost'] = float(u)
+                                row['total_cost'] = float(u) * float(qv)
+
+                            insert_data('composite_inventory', row)
+                            inserted += 1
+
+                        st.success(f"✅ Imported {inserted} finished goods movements.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Import error: {e}")
 
 elif page == "Orders":
     st.title("🧾 Orders")
@@ -8462,6 +8746,9 @@ elif page == "Orders":
                                     'composite_name': pname,
                                     'warehouse': warehouse,
                                     'quantity_units': -float(qty),
+                                    'movement_date': pd.to_datetime(date.today(), utc=True),
+                                    'reason': 'Order Fulfillment',
+                                    'notes': f"Order { _safe_str(sel.get(ono) or order_id) }",
                                 })
 
                             update_data('sales_orders', {
@@ -12818,11 +13105,18 @@ elif page == "Production":
                                                             })
 
                                                         # Add finished goods inventory
+                                                        actual_cost_val = float(sum_production_costs(get_all_data(), batch_id) + total_pack_cost)
+                                                        unit_cost_val = (actual_cost_val / float(units_out)) if float(units_out) else 0.0
                                                         insert_data('composite_inventory', {
                                                             'composite_id': comp_id,
                                                             'composite_name': comp_name,
                                                             'warehouse': warehouse,
                                                             'quantity_units': float(units_out),
+                                                            'movement_date': pd.to_datetime(d, utc=True),
+                                                            'reason': 'Kegging',
+                                                            'unit_cost': float(unit_cost_val),
+                                                            'total_cost': float(actual_cost_val),
+                                                            'notes': notes,
                                                         })
 
                                                         # Keg run record
@@ -12831,7 +13125,7 @@ elif page == "Production":
                                                             'product_name': str(selected_batch.get(b_recipe_name_col) or ''),
                                                             'beer_volume_l': float(liters_needed),
                                                             'warehouse': warehouse,
-                                                            'actual_cost': float(sum_production_costs(get_all_data(), batch_id) + total_pack_cost),
+                                                            'actual_cost': float(actual_cost_val),
                                                             'notes': notes,
                                                             'composite_id': comp_id,
                                                             'composite_name': comp_name,
