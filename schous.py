@@ -7749,7 +7749,208 @@ elif page == "Products":
                     st.success("✅ Composite product created.")
                     st.rerun()
 
+
+        # --- Edit existing composite products (so you can add missing labels/packaging, etc.) ---
+        if is_admin() and composites_df is not None and not composites_df.empty:
+            st.markdown("### ✏️ Edit composite product")
+
+            cid_col_e = _col(composites_df, 'id_composite', 'id')
+            cname_col_e = _col(composites_df, 'name')
+            out_unit_col_e = _col(composites_df, 'output_unit')
+            notes_col_e = _col(composites_df, 'notes')
+            status_col_e = _col(composites_df, 'status')
+            rname_col_e = _col(composites_df, 'recipe_name', 'beer_recipe_name')
+            rid_col_e = _col(composites_df, 'recipe_id', 'beer_recipe_id')
+            beer_l_col_e = _col(composites_df, 'beer_liters_per_unit', 'beer_liters_per_unit_l', 'beer_l_per_unit')
+
+            comp_records_e = composites_df.to_dict('records') if composites_df is not None and not composites_df.empty else []
+
+            def _p_label_e(r):
+                return f"{str(r.get(cname_col_e) or '')} (#{r.get(cid_col_e,'')})"
+
+            sel_e = st.selectbox("Select composite product", comp_records_e, format_func=_p_label_e, key="edit_comp_select")
+
+            if sel_e and cid_col_e:
+                try:
+                    comp_id_e = int(float(sel_e.get(cid_col_e)))
+                except Exception:
+                    comp_id_e = None
+
+                if comp_id_e is not None:
+                    # Load BOM rows
+                    icid_e = _col(composite_items_df, 'composite_id')
+                    ctype_e = _col(composite_items_df, 'component_type')
+                    cnamei_e = _col(composite_items_df, 'component_name')
+                    cqty_e = _col(composite_items_df, 'quantity')
+                    cunit_e = _col(composite_items_df, 'unit')
+
+                    bom_e = (
+                        composite_items_df[composite_items_df[icid_e] == comp_id_e].copy()
+                        if composite_items_df is not None and not composite_items_df.empty and icid_e
+                        else pd.DataFrame()
+                    )
+
+                    current_name = str(sel_e.get(cname_col_e) or '')
+                    current_unit = str(sel_e.get(out_unit_col_e) or 'unit')
+                    current_notes = str(sel_e.get(notes_col_e) or '')
+                    current_status = str(sel_e.get(status_col_e) or 'Active')
+                    current_recipe_name = str(sel_e.get(rname_col_e) or '')
+
+                    # Beer liters per unit: prefer BOM beer row; fall back to composite column if present
+                    beer_l_val = 0.0
+                    if bom_e is not None and not bom_e.empty and ctype_e and cqty_e:
+                        beer_row_e = bom_e[bom_e[ctype_e].astype(str).str.lower() == 'beer']
+                        if not beer_row_e.empty:
+                            try:
+                                beer_l_val = float(beer_row_e.iloc[0].get(cqty_e) or 0)
+                            except Exception:
+                                beer_l_val = 0.0
+                            if cnamei_e:
+                                current_recipe_name = current_recipe_name or str(beer_row_e.iloc[0].get(cnamei_e) or '')
+                    if (beer_l_val or 0) <= 0 and beer_l_col_e:
+                        try:
+                            beer_l_val = float(sel_e.get(beer_l_col_e) or 0)
+                        except Exception:
+                            beer_l_val = 0.0
+
+                    # Existing non-beer components
+                    comp_df_e = pd.DataFrame(columns=['component_type', 'component_name', 'quantity', 'unit'])
+                    if bom_e is not None and not bom_e.empty and ctype_e and cnamei_e and cqty_e:
+                        sub_e = bom_e.copy()
+                        sub_e = sub_e[sub_e[ctype_e].astype(str).str.lower() != 'beer']
+                        comp_df_e = pd.DataFrame({
+                            'component_type': sub_e[ctype_e].astype(str) if ctype_e in sub_e.columns else '',
+                            'component_name': sub_e[cnamei_e].astype(str) if cnamei_e in sub_e.columns else '',
+                            'quantity': pd.to_numeric(sub_e[cqty_e], errors='coerce').fillna(0.0) if cqty_e in sub_e.columns else 0.0,
+                            'unit': sub_e[cunit_e].astype(str) if (cunit_e and cunit_e in sub_e.columns) else '',
+                        })
+
+                    ing_opts_e = ingredients_df[ing_name_col].astype(str).tolist() if ingredients_df is not None and not ingredients_df.empty and ing_name_col else []
+                    comp_type_options_e = ['Ingredient', 'Packaging', 'Label', 'Other']
+
+                    st.caption("Edite o produto e os componentes (ex.: adicionar etiquetas, caixas, etc.). Ao salvar, o BOM é regravado.")
+
+                    with st.form(f"edit_composite_form_{comp_id_e}", clear_on_submit=False):
+                        e1, e2, e3 = st.columns(3)
+                        with e1:
+                            new_name_e = st.text_input("Product name", value=current_name)
+                            new_output_unit_e = st.text_input("Output unit", value=current_unit)
+                            new_status_e = st.selectbox(
+                                "Status",
+                                ['Active', 'Inactive'],
+                                index=0 if str(current_status).strip().lower() != 'inactive' else 1
+                            )
+                        with e2:
+                            recipe_options_e = recipes_df[recipe_name_col].astype(str).tolist() if recipes_df is not None and not recipes_df.empty and recipe_name_col else []
+                            if recipe_options_e:
+                                idx_e = recipe_options_e.index(current_recipe_name) if current_recipe_name in recipe_options_e else 0
+                                new_recipe_name_e = st.selectbox("Beer / Recipe", recipe_options_e, index=idx_e)
+                            else:
+                                new_recipe_name_e = st.text_input("Beer / Recipe", value=current_recipe_name)
+                            new_beer_l_e = st.number_input("Beer (L) per unit", min_value=0.0, value=float(beer_l_val or 0.0), step=1.0)
+                        with e3:
+                            new_notes_e = st.text_area("Notes", value=current_notes, height=90)
+
+                        st.markdown("**Components (per 1 unit)**")
+                        if comp_df_e is None or comp_df_e.empty:
+                            comp_df_e = pd.DataFrame([{'component_type': 'Packaging', 'component_name': '', 'quantity': 0.0, 'unit': ''}])
+
+                        edited_e = st.data_editor(
+                            comp_df_e,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            column_config={
+                                "component_type": st.column_config.SelectboxColumn("Type", options=comp_type_options_e),
+                                "component_name": st.column_config.SelectboxColumn("Item", options=[''] + ing_opts_e, required=False),
+                                "quantity": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.1),
+                                "unit": st.column_config.TextColumn("Unit"),
+                            },
+                            key=f"edit_comp_items_{comp_id_e}",
+                        )
+
+                        save_btn_e = st.form_submit_button("Save changes", type="primary", use_container_width=True)
+
+                    if save_btn_e:
+                        require_admin_action()
+                        if not str(new_name_e or '').strip():
+                            st.error("Product name is required.")
+                        elif not str(new_recipe_name_e or '').strip():
+                            st.error("Please select a recipe.")
+                        elif float(new_beer_l_e or 0) <= 0:
+                            st.error("Beer (L) per unit must be greater than 0.")
+                        else:
+                            # Resolve recipe_id
+                            rid_e = None
+                            if recipes_df is not None and not recipes_df.empty and recipe_name_col and recipe_id_col:
+                                m_e = recipes_df[recipes_df[recipe_name_col].astype(str) == str(new_recipe_name_e)]
+                                if not m_e.empty:
+                                    rid_e = str(m_e.iloc[0][recipe_id_col])
+
+                            payload_e = {}
+                            if cname_col_e:
+                                payload_e[cname_col_e] = str(new_name_e).strip()
+                            if out_unit_col_e:
+                                payload_e[out_unit_col_e] = (str(new_output_unit_e or 'unit')).strip() or 'unit'
+                            if notes_col_e:
+                                payload_e[notes_col_e] = new_notes_e
+                            if status_col_e:
+                                payload_e[status_col_e] = new_status_e
+                            if rname_col_e:
+                                payload_e[rname_col_e] = str(new_recipe_name_e)
+                            if rid_col_e:
+                                payload_e[rid_col_e] = rid_e
+                            if beer_l_col_e:
+                                payload_e[beer_l_col_e] = float(new_beer_l_e)
+
+                            try:
+                                update_data('composite_products', payload_e, f"{cid_col_e} = :id", {'id': int(comp_id_e)})
+                            except Exception:
+                                pass
+
+                            # Rewrite BOM: delete old rows, insert beer + components
+                            try:
+                                delete_data('composite_product_items', "composite_id = :cid", {'cid': int(comp_id_e)})
+                            except Exception:
+                                try:
+                                    delete_data('composite_product_items', "composite_id = :id", {'id': int(comp_id_e)})
+                                except Exception:
+                                    pass
+
+                            insert_data('composite_product_items', {
+                                'composite_id': int(comp_id_e),
+                                'component_type': 'Beer',
+                                'component_name': str(new_recipe_name_e),
+                                'quantity': float(new_beer_l_e),
+                                'unit': 'L',
+                            })
+
+                            if edited_e is not None and not edited_e.empty:
+                                for _, rr in edited_e.iterrows():
+                                    ct = str(rr.get('component_type') or 'Ingredient').strip() or 'Ingredient'
+                                    nm = str(rr.get('component_name') or '').strip()
+                                    try:
+                                        q = float(rr.get('quantity') or 0)
+                                    except Exception:
+                                        q = 0.0
+                                    if not nm or q <= 0:
+                                        continue
+                                    u = str(rr.get('unit') or '').strip()
+                                    if not u:
+                                        u0, _ = get_ingredient_unit_and_cost(get_all_data(), nm)
+                                        u = str(u0 or '')
+                                    insert_data('composite_product_items', {
+                                        'composite_id': int(comp_id_e),
+                                        'component_type': ct,
+                                        'component_name': nm,
+                                        'quantity': float(q),
+                                        'unit': u,
+                                    })
+
+                            st.success("✅ Composite product updated.")
+                            st.rerun()
+
         st.markdown('---')
+
         if composites_df is None or composites_df.empty:
             st.info("No composite products yet.")
         else:
@@ -13044,7 +13245,7 @@ elif page == "Production":
                                                     st.error('Not enough beer volume remaining in the batch for this kegging run.')
                                                 else:
                                                     # Validate packaging stock
-                                                    pkg_rows = bom[bom[ctype].astype(str).str.lower() == 'ingredient'] if ctype else pd.DataFrame()
+                                                    pkg_rows = bom[bom[ctype].astype(str).str.lower() != 'beer'] if ctype else pd.DataFrame()
                                                     missing = []
                                                     for _, r in pkg_rows.iterrows():
                                                         ingn = str(r.get(cname) or '')
