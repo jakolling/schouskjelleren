@@ -1186,6 +1186,14 @@ def init_database():
                 notes TEXT,
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
+            """CREATE TABLE IF NOT EXISTS admin_backups (
+                id_backup INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                uploaded_by TEXT,
+                note TEXT,
+                content BLOB NOT NULL
+            )""",
         ]
 
     with engine.begin() as conn:
@@ -2028,28 +2036,47 @@ def _reset_serial_sequences(conn, table_name: str, df: pd.DataFrame) -> None:
 
 
 def save_admin_backup_to_db(xlsx_bytes: bytes, filename: str, note: str | None = None) -> int:
-    """Persist an uploaded backup into the database (BYTEA) so it survives restarts."""
+    """Persist an uploaded backup into the database so it survives restarts."""
     require_admin_action()
     engine = get_engine()
+    dialect = engine.dialect.name.lower()
     uploaded_by = st.session_state.get("auth_user") or st.session_state.get("auth_name") or "admin"
     with engine.begin() as conn:
-        result = conn.execute(
-            sql_text(
-                """INSERT INTO admin_backups (filename, uploaded_by, note, content)
-                   VALUES (:filename, :uploaded_by, :note, :content)
-                   RETURNING id_backup"""
-            ),
-            {
-                "filename": filename,
-                "uploaded_by": uploaded_by,
-                "note": note,
-                "content": xlsx_bytes,
-            },
-        )
-        backup_id = int(result.scalar())
+        # Ensure schema exists (covers first-run on SQLite/local)
+        try:
+            init_database()
+        except Exception:
+            pass
+
+        params = {
+            "filename": filename,
+            "uploaded_by": uploaded_by,
+            "note": note,
+            "content": xlsx_bytes,
+        }
+
+        if dialect in {"postgresql", "postgres"}:
+            result = conn.execute(
+                sql_text(
+                    """INSERT INTO admin_backups (filename, uploaded_by, note, content)
+                       VALUES (:filename, :uploaded_by, :note, :content)
+                       RETURNING id_backup"""
+                ),
+                params,
+            )
+            backup_id = int(result.scalar())
+        else:
+            # SQLite: RETURNING may be unavailable; use last_insert_rowid().
+            conn.execute(
+                sql_text(
+                    """INSERT INTO admin_backups (filename, uploaded_by, note, content)
+                       VALUES (:filename, :uploaded_by, :note, :content)"""
+                ),
+                params,
+            )
+            backup_id = int(conn.execute(sql_text("SELECT last_insert_rowid()")).scalar())
+
     return backup_id
-
-
 def list_admin_backups() -> pd.DataFrame:
     engine = get_engine()
     try:
