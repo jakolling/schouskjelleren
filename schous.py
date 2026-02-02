@@ -4019,7 +4019,7 @@ def generate_inventory_sheet_pdf_bytes(
     Sections:
     1) Finished products (all products, with system qty from composite_inventory sums)
     2) Raw materials (ingredients)
-    3) Batches in production (optional): beer name, batch code, stage/status, and an indicative price (latest sale price if available)
+    3) Batches in production (optional): beer name, batch/lot, stage/status, and the production cost so far (WIP cost)
 
     The sheet includes blank columns for counted quantities.
     """
@@ -4037,38 +4037,11 @@ def generate_inventory_sheet_pdf_bytes(
     products = snapshot.get("composite_products", pd.DataFrame())
     ingredients = snapshot.get("ingredients", pd.DataFrame())
     batches = snapshot.get("production_batches", pd.DataFrame())
-    soi = snapshot.get("sales_order_items", pd.DataFrame())
+    consumptions = snapshot.get("production_consumptions", pd.DataFrame())
 
     # Normalize inputs
     wh = (warehouse or "").strip()
     wh_is_all = (not wh) or (wh.lower() == "all")
-
-    # -----------------------------
-    # Helper: latest unit price per product_id (from sales_order_items)
-    # -----------------------------
-    latest_price_by_product_id: dict[int, float] = {}
-    try:
-        if soi is not None and not soi.empty:
-            pid_col = _col(soi, "product_id") or "product_id"
-            price_col = _col(soi, "unit_price") or "unit_price"
-            dt_col = _col(soi, "created_date") or _col(soi, "date") or None
-
-            dfp = soi.copy()
-            if dt_col and (dt_col in dfp.columns):
-                dfp[dt_col] = pd.to_datetime(dfp[dt_col], errors="coerce")
-                dfp = dfp.sort_values(dt_col)
-            else:
-                dfp = dfp.reset_index(drop=True)
-
-            # keep only rows with product_id and a real price
-            if pid_col in dfp.columns and price_col in dfp.columns:
-                dfp = dfp[pd.to_numeric(dfp[pid_col], errors="coerce").notna()]
-                dfp = dfp[pd.to_numeric(dfp[price_col], errors="coerce").notna()]
-                if not dfp.empty:
-                    last = dfp.groupby(dfp[pid_col].astype(int), as_index=True)[price_col].last()
-                    latest_price_by_product_id = {int(k): float(v) for k, v in last.to_dict().items()}
-    except Exception:
-        latest_price_by_product_id = {}
 
     # -----------------------------
     # Finished products: list ALL composite_products, and compute system qty from composite_inventory sums
@@ -4189,61 +4162,68 @@ def generate_inventory_sheet_pdf_bytes(
             ingredients_rows.append([item, unit, sysqty, "", "", ""])
 
     # -----------------------------
-    # Batches in production (optional)
+    # Batches in production (optional) - show WIP (cost so far)
     # -----------------------------
     batches_rows: list[list] = []
     if include_in_production_batches and (batches is not None) and (not batches.empty):
         dfb = batches.copy()
+        id_col = _col(dfb, "batch_id") or _col(dfb, "id_batch") or "batch_id"
         status_col = _col(dfb, "status") or "status"
         stage_col = _col(dfb, "stage") or "stage"
         batch_col = _col(dfb, "batch_code") or _col(dfb, "batch") or "batch_code"
         recipe_name_col = _col(dfb, "recipe_name") or _col(dfb, "beer_name") or "recipe_name"
-        recipe_id_col = _col(dfb, "recipe_id")
         vol_col = _col(dfb, "volume_remaining_l") or _col(dfb, "brewed_volume_l") or _col(dfb, "planned_volume_l")
 
-        # active only
+        # active only (exclude completed/cancelled)
         if status_col in dfb.columns:
             dfb = dfb[~dfb[status_col].astype(str).str.lower().str.strip().isin(["completed", "cancelled", "canceled"])]
 
-        # build mapping recipe_id -> composite_id (best effort)
-        recipe_to_product: dict[str, int] = {}
-        if products is not None and not products.empty:
-            dfp = products.copy()
-            pid_col = _col(dfp, "id_composite") or _col(dfp, "composite_id") or "id_composite"
-            # recipe id can be stored as recipe_id or beer_recipe_id (string)
-            pr_recipe_col = _col(dfp, "recipe_id") or _col(dfp, "beer_recipe_id")
-            if pr_recipe_col and pid_col in dfp.columns and pr_recipe_col in dfp.columns:
-                for _, r in dfp[[pid_col, pr_recipe_col]].dropna().iterrows():
-                    recipe_to_product[str(r[pr_recipe_col])] = int(r[pid_col])
+        # Build WIP cost by batch from production_consumptions.total_cost
+        wip_cost_by_batch: dict[int, float] = {}
+        try:
+            if consumptions is not None and (not consumptions.empty):
+                dfc = consumptions.copy()
+                bid_col = _col(dfc, "batch_id") or "batch_id"
+                tc_col = _col(dfc, "total_cost") or "total_cost"
+                if bid_col in dfc.columns and tc_col in dfc.columns:
+                    dfc[bid_col] = pd.to_numeric(dfc[bid_col], errors="coerce")
+                    dfc[tc_col] = pd.to_numeric(dfc[tc_col], errors="coerce")
+                    dfc = dfc[dfc[bid_col].notna()]
+                    dfc = dfc[dfc[tc_col].notna()]
+                    if not dfc.empty:
+                        agg = dfc.groupby(dfc[bid_col].astype(int), as_index=True)[tc_col].sum()
+                        wip_cost_by_batch = {int(k): float(v) for k, v in agg.to_dict().items()}
+        except Exception:
+            wip_cost_by_batch = {}
 
-        # Sort for readability
-        if batch_col in dfb.columns:
-            try:
-                dfb = dfb.sort_values(by=[batch_col])
-            except Exception:
-                pass
+        # Sort and build rows
+        sort_cols = [c for c in [recipe_name_col, batch_col] if c in dfb.columns]
+        if sort_cols:
+            dfb = dfb.sort_values(by=sort_cols)
 
         for _, r in dfb.iterrows():
             beer = str(r.get(recipe_name_col, "")).strip()
-            lote = str(r.get(batch_col, "")).strip()
-            status = str(r.get(status_col, "")).strip()
-            stage = str(r.get(stage_col, "")).strip()
-            vol = r.get(vol_col, "") if vol_col else ""
+            bcode = str(r.get(batch_col, "")).strip()
+            stage = str(r.get(stage_col, "")).strip() if stage_col in dfb.columns else ""
+            status = str(r.get(status_col, "")).strip() if status_col in dfb.columns else ""
+            stage_status = (stage or status) or ""
+
+            # Volume (L)
+            vol = r.get(vol_col, "") if (vol_col and vol_col in dfb.columns) else ""
             try:
-                vol = float(vol) if vol is not None and vol != "" else ""
+                vol = float(vol) if vol not in (None, "") else ""
             except Exception:
                 pass
 
-            # price lookup
-            price = ""
-            prod_id = None
-            if recipe_id_col and (recipe_id_col in dfb.columns):
-                rid = r.get(recipe_id_col, None)
-                if rid is not None and str(rid) in recipe_to_product:
-                    prod_id = recipe_to_product[str(rid)]
-            if prod_id is not None and int(prod_id) in latest_price_by_product_id:
-                price = latest_price_by_product_id[int(prod_id)]
-            batches_rows.append([beer, lote, stage or status, price, vol, ""])
+            # WIP cost (sum of recorded consumptions)
+            bid = r.get(id_col, None) if id_col in dfb.columns else None
+            try:
+                bid_i = int(bid) if bid is not None and str(bid).strip() != "" else None
+            except Exception:
+                bid_i = None
+            wip = wip_cost_by_batch.get(bid_i, 0.0) if bid_i is not None else 0.0
+
+            batches_rows.append([beer, bcode, stage_status, wip, vol, ""])
 
     # -----------------------------
     # Build PDF
@@ -4308,9 +4288,9 @@ def generate_inventory_sheet_pdf_bytes(
     if include_in_production_batches:
         story.append(PageBreak())
         story.append(Paragraph("Batches in production (reference)", h_style))
-        story.append(Paragraph("This is a reference list for work-in-progress. 'Price' is the latest sale unit price found for the matching product (if any).", small))
+        story.append(Paragraph("Esta é uma lista de referência de WIP (produção em andamento). 'Custo (WIP)' é a soma de production_consumptions.total_cost registrada para o lote.", small))
         story.append(Spacer(1, 6))
-        header = ["Beer", "Batch/Lot", "Stage/Status", "Price", "Volume (L)", "Notes"]
+        header = ["Beer", "Batch/Lot", "Stage/Status", "Custo (WIP)", "Volume (L)", "Notes"]
         data_tbl = [header] + (batches_rows if batches_rows else [["(none)", "", "", "", "", ""]])
         col_widths = [60*mm, 22*mm, 30*mm, 18*mm, 22*mm, 30*mm]
         tbl = Table(data_tbl, colWidths=col_widths, repeatRows=1)
