@@ -4012,11 +4012,16 @@ def generate_inventory_sheet_pdf_bytes(
     as_of: date | None = None,
     include_inactive_ingredients: bool = False,
     include_zero_rows: bool = True,
+    include_in_production_batches: bool = True,
 ) -> bytes:
     """Generate a printable monthly inventory sheet PDF.
 
-    Lists finished products (composite_inventory) and raw materials (ingredients)
-    with a blank column for counted quantities.
+    Sections:
+    1) Finished products (all products, with system qty from composite_inventory sums)
+    2) Raw materials (ingredients)
+    3) Batches in production (optional): beer name, batch code, stage/status, and an indicative price (latest sale price if available)
+
+    The sheet includes blank columns for counted quantities.
     """
     from reportlab.lib.pagesizes import A4
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -4026,75 +4031,137 @@ def generate_inventory_sheet_pdf_bytes(
 
     as_of = as_of or date.today()
 
-    # Pull a fresh snapshot (fast because get_all_data is cached via db_version)
+    # Pull a fresh snapshot
     snapshot = get_all_data()
     prod_inv = snapshot.get("composite_inventory", pd.DataFrame())
+    products = snapshot.get("composite_products", pd.DataFrame())
     ingredients = snapshot.get("ingredients", pd.DataFrame())
+    batches = snapshot.get("production_batches", pd.DataFrame())
+    soi = snapshot.get("sales_order_items", pd.DataFrame())
 
     # Normalize inputs
     wh = (warehouse or "").strip()
     wh_is_all = (not wh) or (wh.lower() == "all")
 
     # -----------------------------
-    # Finished products (composite_inventory)
+    # Helper: latest unit price per product_id (from sales_order_items)
     # -----------------------------
-    products_rows = []
-    if prod_inv is not None and not prod_inv.empty:
-        dfp = prod_inv.copy()
+    latest_price_by_product_id: dict[int, float] = {}
+    try:
+        if soi is not None and not soi.empty:
+            pid_col = _col(soi, "product_id") or "product_id"
+            price_col = _col(soi, "unit_price") or "unit_price"
+            dt_col = _col(soi, "created_date") or _col(soi, "date") or None
 
-        # Expected columns: composite_name, warehouse, quantity_units
-        name_col = _col(dfp, "composite_name") or _col(dfp, "name") or _col(dfp, "product") or "composite_name"
-        wh_col = _col(dfp, "warehouse") or "warehouse"
-        qty_col = _col(dfp, "quantity_units") or _col(dfp, "quantity") or "quantity_units"
+            dfp = soi.copy()
+            if dt_col and (dt_col in dfp.columns):
+                dfp[dt_col] = pd.to_datetime(dfp[dt_col], errors="coerce")
+                dfp = dfp.sort_values(dt_col)
+            else:
+                dfp = dfp.reset_index(drop=True)
+
+            # keep only rows with product_id and a real price
+            if pid_col in dfp.columns and price_col in dfp.columns:
+                dfp = dfp[pd.to_numeric(dfp[pid_col], errors="coerce").notna()]
+                dfp = dfp[pd.to_numeric(dfp[price_col], errors="coerce").notna()]
+                if not dfp.empty:
+                    last = dfp.groupby(dfp[pid_col].astype(int), as_index=True)[price_col].last()
+                    latest_price_by_product_id = {int(k): float(v) for k, v in last.to_dict().items()}
+    except Exception:
+        latest_price_by_product_id = {}
+
+    # -----------------------------
+    # Finished products: list ALL composite_products, and compute system qty from composite_inventory sums
+    # -----------------------------
+    products_rows: list[list] = []
+
+    # Build inventory sums
+    inv_sum = pd.DataFrame()
+    if prod_inv is not None and not prod_inv.empty:
+        dfi = prod_inv.copy()
+        inv_pid = _col(dfi, "composite_id") or "composite_id"
+        inv_name = _col(dfi, "composite_name") or "composite_name"
+        inv_wh = _col(dfi, "warehouse") or "warehouse"
+        inv_qty = _col(dfi, "quantity_units") or _col(dfi, "quantity") or "quantity_units"
 
         # Filter warehouse if chosen
-        if (wh_col in dfp.columns) and (not wh_is_all):
-            dfp = dfp[dfp[wh_col].astype(str).str.strip() == wh]
+        if (inv_wh in dfi.columns) and (not wh_is_all):
+            dfi = dfi[dfi[inv_wh].astype(str).str.strip() == wh]
 
-        # Build a grouped view if showing "All"
-        if wh_is_all and (name_col in dfp.columns) and (qty_col in dfp.columns):
-            # Aggregate across warehouses
-            dfp_grp = dfp.groupby(dfp[name_col].astype(str), dropna=False, as_index=False)[qty_col].sum()
-            dfp_grp = dfp_grp.rename(columns={name_col: "Item", qty_col: "System Qty"})
-            dfp_grp["Unit"] = "units"
-            dfp_grp = dfp_grp[["Item", "Unit", "System Qty"]]
+        # Prefer joining by composite_id if present
+        if inv_pid in dfi.columns:
+            inv_sum = dfi.groupby(dfi[inv_pid], dropna=False, as_index=False)[inv_qty].sum()
+            inv_sum = inv_sum.rename(columns={inv_pid: "composite_id", inv_qty: "System Qty"})
         else:
-            # Keep per-warehouse rows if a specific warehouse is selected
-            cols = []
-            if name_col in dfp.columns:
-                cols.append(name_col)
-            if qty_col in dfp.columns:
-                cols.append(qty_col)
-            if wh_col in dfp.columns and (not wh_is_all):
-                cols.append(wh_col)
-            dfp2 = dfp[cols].copy() if cols else dfp.copy()
-            if name_col in dfp2.columns:
-                dfp2 = dfp2.rename(columns={name_col: "Item"})
-            if qty_col in dfp2.columns:
-                dfp2 = dfp2.rename(columns={qty_col: "System Qty"})
-            dfp2["Unit"] = "units"
-            # Display Item/Unit/System Qty; warehouse is already fixed
-            dfp_grp = dfp2[["Item", "Unit", "System Qty"]] if set(["Item","Unit","System Qty"]).issubset(dfp2.columns) else dfp2
+            inv_sum = dfi.groupby(dfi[inv_name].astype(str), dropna=False, as_index=False)[inv_qty].sum()
+            inv_sum = inv_sum.rename(columns={inv_name: "Item", inv_qty: "System Qty"})
+
+    # Build master product list
+    if products is not None and not products.empty:
+        dfp = products.copy()
+        pid_col = _col(dfp, "id_composite") or _col(dfp, "composite_id") or "id_composite"
+        name_col = _col(dfp, "name") or "name"
+        unit_col = _col(dfp, "output_unit") or _col(dfp, "unit") or None
+
+        base = dfp[[c for c in [pid_col, name_col, unit_col] if c and c in dfp.columns]].copy()
+        if pid_col in base.columns:
+            base = base.rename(columns={pid_col: "composite_id"})
+        if name_col in base.columns:
+            base = base.rename(columns={name_col: "Item"})
+        if unit_col and unit_col in base.columns:
+            base = base.rename(columns={unit_col: "Unit"})
+        else:
+            base["Unit"] = "units"
+
+        # Merge in inventory sums (or set 0)
+        if not inv_sum.empty:
+            if "composite_id" in inv_sum.columns and "composite_id" in base.columns:
+                base = base.merge(inv_sum, on="composite_id", how="left")
+            else:
+                # fallback merge by Item
+                if "Item" in inv_sum.columns:
+                    base = base.merge(inv_sum, on="Item", how="left")
+        if "System Qty" not in base.columns:
+            base["System Qty"] = 0.0
+        base["System Qty"] = pd.to_numeric(base["System Qty"], errors="coerce").fillna(0.0)
 
         # Optional filtering of zero rows
-        if (not include_zero_rows) and ("System Qty" in dfp_grp.columns):
-            dfp_grp = dfp_grp[pd.to_numeric(dfp_grp["System Qty"], errors="coerce").fillna(0) != 0]
+        if (not include_zero_rows):
+            base = base[base["System Qty"] != 0]
 
-        dfp_grp = dfp_grp.sort_values(by=["Item"]) if ("Item" in dfp_grp.columns) else dfp_grp
-        for _, r in dfp_grp.iterrows():
+        base = base.sort_values(by=["Item"])
+
+        for _, r in base.iterrows():
             item = str(r.get("Item", "")).strip()
             unit = str(r.get("Unit", "")).strip() or "units"
-            sysqty = r.get("System Qty", "")
+            sysqty = r.get("System Qty", 0.0)
             try:
-                sysqty = float(sysqty) if sysqty is not None and sysqty != "" else ""
+                sysqty = float(sysqty)
             except Exception:
                 pass
             products_rows.append([item, unit, sysqty, "", "", ""])
+    else:
+        # fallback: previous behavior based on composite_inventory only
+        if inv_sum is not None and not inv_sum.empty:
+            if "Item" not in inv_sum.columns and "composite_id" in inv_sum.columns:
+                # can't render without names; try to use composite_name directly from prod_inv
+                pass
+            else:
+                inv_sum2 = inv_sum.copy()
+                if "Item" not in inv_sum2.columns and "composite_id" in inv_sum2.columns:
+                    inv_sum2["Item"] = inv_sum2["composite_id"].astype(str)
+                inv_sum2["Unit"] = "units"
+                inv_sum2 = inv_sum2[["Item","Unit","System Qty"]]
+                if (not include_zero_rows):
+                    inv_sum2 = inv_sum2[pd.to_numeric(inv_sum2["System Qty"], errors="coerce").fillna(0)!=0]
+                inv_sum2 = inv_sum2.sort_values(by=["Item"])
+                for _, r in inv_sum2.iterrows():
+                    products_rows.append([str(r.get("Item","")).strip(), str(r.get("Unit","units")).strip(), float(r.get("System Qty",0) or 0), "", "", ""])
 
     # -----------------------------
     # Ingredients (raw materials)
     # -----------------------------
-    ingredients_rows = []
+    ingredients_rows: list[list] = []
     if ingredients is not None and not ingredients.empty:
         dfi = ingredients.copy()
         name_col = _col(dfi, "name") or "name"
@@ -4105,9 +4172,6 @@ def generate_inventory_sheet_pdf_bytes(
         if (not include_inactive_ingredients) and status_col and (status_col in dfi.columns):
             dfi = dfi[dfi[status_col].astype(str).str.lower().str.strip().isin(["active", "ativo", "1", "true", "yes"])]
 
-        # If there is a warehouse column for ingredients in your schema, you can extend here later
-
-        # Optional filtering of zero rows
         if (not include_zero_rows) and (stock_col in dfi.columns):
             dfi = dfi[pd.to_numeric(dfi[stock_col], errors="coerce").fillna(0) != 0]
 
@@ -4123,6 +4187,63 @@ def generate_inventory_sheet_pdf_bytes(
             except Exception:
                 pass
             ingredients_rows.append([item, unit, sysqty, "", "", ""])
+
+    # -----------------------------
+    # Batches in production (optional)
+    # -----------------------------
+    batches_rows: list[list] = []
+    if include_in_production_batches and (batches is not None) and (not batches.empty):
+        dfb = batches.copy()
+        status_col = _col(dfb, "status") or "status"
+        stage_col = _col(dfb, "stage") or "stage"
+        batch_col = _col(dfb, "batch_code") or _col(dfb, "batch") or "batch_code"
+        recipe_name_col = _col(dfb, "recipe_name") or _col(dfb, "beer_name") or "recipe_name"
+        recipe_id_col = _col(dfb, "recipe_id")
+        vol_col = _col(dfb, "volume_remaining_l") or _col(dfb, "brewed_volume_l") or _col(dfb, "planned_volume_l")
+
+        # active only
+        if status_col in dfb.columns:
+            dfb = dfb[~dfb[status_col].astype(str).str.lower().str.strip().isin(["completed", "cancelled", "canceled"])]
+
+        # build mapping recipe_id -> composite_id (best effort)
+        recipe_to_product: dict[str, int] = {}
+        if products is not None and not products.empty:
+            dfp = products.copy()
+            pid_col = _col(dfp, "id_composite") or _col(dfp, "composite_id") or "id_composite"
+            # recipe id can be stored as recipe_id or beer_recipe_id (string)
+            pr_recipe_col = _col(dfp, "recipe_id") or _col(dfp, "beer_recipe_id")
+            if pr_recipe_col and pid_col in dfp.columns and pr_recipe_col in dfp.columns:
+                for _, r in dfp[[pid_col, pr_recipe_col]].dropna().iterrows():
+                    recipe_to_product[str(r[pr_recipe_col])] = int(r[pid_col])
+
+        # Sort for readability
+        if batch_col in dfb.columns:
+            try:
+                dfb = dfb.sort_values(by=[batch_col])
+            except Exception:
+                pass
+
+        for _, r in dfb.iterrows():
+            beer = str(r.get(recipe_name_col, "")).strip()
+            lote = str(r.get(batch_col, "")).strip()
+            status = str(r.get(status_col, "")).strip()
+            stage = str(r.get(stage_col, "")).strip()
+            vol = r.get(vol_col, "") if vol_col else ""
+            try:
+                vol = float(vol) if vol is not None and vol != "" else ""
+            except Exception:
+                pass
+
+            # price lookup
+            price = ""
+            prod_id = None
+            if recipe_id_col and (recipe_id_col in dfb.columns):
+                rid = r.get(recipe_id_col, None)
+                if rid is not None and str(rid) in recipe_to_product:
+                    prod_id = recipe_to_product[str(rid)]
+            if prod_id is not None and int(prod_id) in latest_price_by_product_id:
+                price = latest_price_by_product_id[int(prod_id)]
+            batches_rows.append([beer, lote, stage or status, price, vol, ""])
 
     # -----------------------------
     # Build PDF
@@ -4148,24 +4269,19 @@ def generate_inventory_sheet_pdf_bytes(
     story.append(Paragraph(f"As of: {as_of.isoformat()}  |  Warehouse: {wh_label}", small))
     story.append(Spacer(1, 8))
 
-    def _build_table(rows, section_title: str):
+    def _build_table(rows, section_title: str, header):
         story.append(Paragraph(section_title, h_style))
         story.append(Paragraph("Fill the 'Counted Qty' during the count. Use 'Notes' for issues (damaged, missing, open bags, etc.).", small))
         story.append(Spacer(1, 6))
 
-        header = ["Item", "Unit", "System Qty", "Counted Qty", "Difference", "Notes"]
-        data_tbl = [header] + (rows if rows else [["(none)", "", "", "", "", ""]])
+        data_tbl = [header] + (rows if rows else [["(none)"] + [""] * (len(header) - 1)])
 
-        # Column widths tuned for A4 portrait
-        col_widths = [78*mm, 18*mm, 22*mm, 22*mm, 20*mm, 30*mm]
-
-        tbl = Table(data_tbl, colWidths=col_widths, repeatRows=1)
+        tbl = Table(data_tbl, repeatRows=1)
         tbl_style = TableStyle([
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (-1, 0), 9),
             ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-            ("ALIGN", (2, 1), (4, -1), "RIGHT"),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.whitesmoke]),
@@ -4173,25 +4289,52 @@ def generate_inventory_sheet_pdf_bytes(
             ("TOPPADDING", (0, 0), (-1, 0), 6),
         ])
 
-        # Make writable rows a bit taller
-        for r in range(1, len(data_tbl)):
-            tbl_style.add("MINROWHEIGHT", (0, r), (-1, r), 14)
+        # Right-align numeric-ish columns for the common 6-col layout
+        if len(header) >= 3:
+            tbl_style.add("ALIGN", (2, 1), (min(4, len(header)-1), -1), "RIGHT")
+
+        # Make writable rows taller
+        for rr in range(1, len(data_tbl)):
+            tbl_style.add("MINROWHEIGHT", (0, rr), (-1, rr), 14)
 
         tbl.setStyle(tbl_style)
         story.append(tbl)
         story.append(Spacer(1, 10))
 
-    _build_table(products_rows, "Finished products")
+    _build_table(products_rows, "Finished products", ["Item", "Unit", "System Qty", "Counted Qty", "Difference", "Notes"])
     story.append(PageBreak())
-    _build_table(ingredients_rows, "Raw materials (ingredients)")
+    _build_table(ingredients_rows, "Raw materials (ingredients)", ["Item", "Unit", "System Qty", "Counted Qty", "Difference", "Notes"])
 
-    # Footer
-    story.append(Spacer(1, 8))
+    if include_in_production_batches:
+        story.append(PageBreak())
+        story.append(Paragraph("Batches in production (reference)", h_style))
+        story.append(Paragraph("This is a reference list for work-in-progress. 'Price' is the latest sale unit price found for the matching product (if any).", small))
+        story.append(Spacer(1, 6))
+        header = ["Beer", "Batch/Lot", "Stage/Status", "Price", "Volume (L)", "Notes"]
+        data_tbl = [header] + (batches_rows if batches_rows else [["(none)", "", "", "", "", ""]])
+        col_widths = [60*mm, 22*mm, 30*mm, 18*mm, 22*mm, 30*mm]
+        tbl = Table(data_tbl, colWidths=col_widths, repeatRows=1)
+        tbl_style = TableStyle([
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 9),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.whitesmoke]),
+            ("ALIGN", (3, 1), (4, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ])
+        for rr in range(1, len(data_tbl)):
+            tbl_style.add("MINROWHEIGHT", (0, rr), (-1, rr), 14)
+        tbl.setStyle(tbl_style)
+        story.append(tbl)
+        story.append(Spacer(1, 10))
+
     story.append(Paragraph("Count tips: freeze movements during count; count closed containers first; note partial bags; reconcile differences and post stock adjustments.", small))
 
     doc.build(story)
     buf.seek(0)
     return buf.getvalue()
+
 
 
 def check_supplier_usage(supplier_name):
@@ -12445,6 +12588,8 @@ Use this page to generate a printable PDF inventory sheet with your **current sy
 
     include_zero = st.checkbox("Include zero stock rows", value=True)
 
+    include_batches = st.checkbox("Include in-production batches", value=True)
+
     st.markdown("---")
     col1, col2 = st.columns([1, 1])
     with col1:
@@ -12455,6 +12600,7 @@ Use this page to generate a printable PDF inventory sheet with your **current sy
                     as_of=inv_date,
                     include_inactive_ingredients=include_inactive_ing,
                     include_zero_rows=include_zero,
+                    include_in_production_batches=include_batches,
                 )
                 st.session_state["_inventory_pdf_bytes"] = pdf_bytes
                 st.success("PDF generated.")
