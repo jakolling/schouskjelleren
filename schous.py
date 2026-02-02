@@ -4991,11 +4991,19 @@ elif page == "Analytics":
             st.caption(f"Currency: {currency}")
 
     def _apply_date_range(df: pd.DataFrame, col: str) -> pd.DataFrame:
+        """Filter dataframe by the global (start,end) date inputs safely across tz-naive and tz-aware timestamps."""
         if df is None or df.empty or col not in df.columns:
             return df
         v = df.copy()
-        v[col] = pd.to_datetime(v[col], errors='coerce')
-        return v[(v[col] >= pd.to_datetime(start)) & (v[col] <= pd.to_datetime(end))]
+        # Normalize both the column and the start/end bounds to UTC-aware timestamps to avoid tz comparison errors.
+        v[col] = pd.to_datetime(v[col], errors='coerce', utc=True)
+        sdt = pd.to_datetime(start, utc=True, errors='coerce')
+        edt = pd.to_datetime(end, utc=True, errors='coerce')
+        if pd.isna(sdt) or pd.isna(edt):
+            return v
+        # Treat the 'end' date as inclusive for the whole day.
+        edt_exclusive = edt + pd.Timedelta(days=1)
+        return v[(v[col] >= sdt) & (v[col] < edt_exclusive)]
 
     tabs = st.tabs([
         '✨ Overview',
