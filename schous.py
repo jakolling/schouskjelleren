@@ -168,6 +168,82 @@ def auth_sidebar():
                 st.session_state["visualization_mode"] = True
                 st.rerun()
 
+            # -----------------------------
+            # Admin tools: upload / restore Excel backup
+            # -----------------------------
+            if role == "admin":
+                st.divider()
+                st.markdown("### Admin tools")
+
+                with st.expander("📦 Upload / restore backup (.xlsx)", expanded=False):
+                    st.caption("Upload an Excel backup (same format as Export). You can save it to the server and/or restore the database from it.")
+
+                    uploaded = st.file_uploader(
+                        "Backup file (.xlsx)",
+                        type=["xlsx"],
+                        key="admin_backup_uploader",
+                        help="Tip: edit prices in the Excel file, then upload and restore.",
+                    )
+
+                    note = st.text_input("Note (optional)", value="", key="admin_backup_note")
+
+                    confirm = st.checkbox(
+                        "I understand this will overwrite the database tables from the backup.",
+                        value=False,
+                        key="admin_backup_confirm",
+                    )
+
+                    col_a, col_b = st.columns(2)
+                    if uploaded is not None:
+                        try:
+                            xls = pd.ExcelFile(uploaded)
+                            st.write("Sheets detected:", ", ".join(xls.sheet_names))
+                        except Exception:
+                            st.warning("Could not read the Excel file preview. You can still try saving/restoring.")
+
+                        with col_a:
+                            if st.button("💾 Save backup to server", use_container_width=True):
+                                require_admin_action()
+                                backup_id = save_admin_backup_to_db(uploaded.getvalue(), uploaded.name, note.strip() or None)
+                                st.success(f"Backup saved (id={backup_id}).")
+
+                        with col_b:
+                            if st.button("♻️ Restore database now", use_container_width=True, disabled=not confirm):
+                                require_admin_action()
+                                backup_id = save_admin_backup_to_db(uploaded.getvalue(), uploaded.name, note.strip() or None)
+                                result = restore_from_excel_backup_bytes(uploaded.getvalue())
+                                st.success(f"Restore completed. Saved backup id={backup_id}.")
+                                st.json(result)
+                                st.rerun()
+
+                    st.markdown("#### Saved backups")
+                    backups_df = list_admin_backups()
+                    if backups_df.empty:
+                        st.caption("No backups saved yet.")
+                    else:
+                        options = [
+                            (
+                                int(row["id_backup"]),
+                                f'#{int(row["id_backup"])} — {row["filename"]} — {row.get("uploaded_at", "")}'
+                            )
+                            for _, row in backups_df.iterrows()
+                        ]
+                        sel_label = st.selectbox(
+                            "Choose a saved backup",
+                            options=[lbl for _, lbl in options],
+                            key="admin_backup_select",
+                        )
+                        sel_id = int([bid for bid, lbl in options if lbl == sel_label][0])
+
+                        if st.button("♻️ Restore selected backup", disabled=not confirm, use_container_width=True):
+                            require_admin_action()
+                            b = load_admin_backup_bytes(sel_id)
+                            result = restore_from_excel_backup_bytes(b)
+                            st.success("Restore completed.")
+                            st.json(result)
+                            st.rerun()
+
+
         else:
             # Guest
             st.caption("Signed in as: Guest")
@@ -782,6 +858,14 @@ def init_database():
                 status TEXT DEFAULT 'Active',
                 notes TEXT,
                 created_date TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS admin_backups (
+                id_backup BIGSERIAL PRIMARY KEY,
+                filename TEXT NOT NULL,
+                uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                uploaded_by TEXT,
+                note TEXT,
+                content BYTEA NOT NULL
             )""",
         ]
     else:
@@ -1883,6 +1967,167 @@ def export_to_excel():
 
     output.seek(0)
     return output
+
+
+# -----------------------------
+# BACKUP UPLOAD / RESTORE (ADMIN)
+# -----------------------------
+def _read_excel_backup_bytes(xlsx_bytes: bytes) -> dict[str, pd.DataFrame]:
+    """Read an Excel backup (export format) into a dict {table_name: df}."""
+    xls = pd.ExcelFile(io.BytesIO(xlsx_bytes))
+    data: dict[str, pd.DataFrame] = {}
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=sheet)
+        if df is None:
+            continue
+        # Normalize NaN to None for DB inserts
+        df = df.replace({np.nan: None})
+        data[str(sheet)] = df
+    return data
+
+
+def _truncate_or_delete_table(conn, table_name: str) -> None:
+    """Clear a table in a Postgres-safe way."""
+    # NOTE: We keep this very small to avoid accidental SQL injection.
+    safe = re.sub(r"[^a-zA-Z0-9_]+", "", table_name)
+    if safe != table_name:
+        raise ValueError(f"Invalid table name: {table_name}")
+    dialect = conn.engine.dialect.name.lower()
+    if dialect in {"postgresql", "postgres"}:
+        conn.execute(sql_text(f'TRUNCATE TABLE "{table_name}" RESTART IDENTITY CASCADE'))
+    else:
+        conn.execute(sql_text(f'DELETE FROM {table_name}'))
+
+
+def _reset_serial_sequences(conn, table_name: str, df: pd.DataFrame) -> None:
+    """After inserting explicit IDs, ensure Postgres sequences are aligned."""
+    dialect = conn.engine.dialect.name.lower()
+    if dialect not in {"postgresql", "postgres"}:
+        return
+
+    # Try to reset any serial sequence associated with id_* columns present in df
+    for col in df.columns:
+        if not str(col).startswith("id_"):
+            continue
+        # pg_get_serial_sequence returns the sequence name if this column is backed by a sequence
+        seq = conn.execute(
+            sql_text("SELECT pg_get_serial_sequence(:t, :c)"),
+            {"t": table_name, "c": str(col)},
+        ).scalar()
+        if not seq:
+            continue
+        conn.execute(
+            sql_text(
+                "SELECT setval(:seq, COALESCE((SELECT MAX({col}) FROM \"{t}\"), 1), true)".format(
+                    col=str(col),
+                    t=table_name,
+                )
+            ),
+            {"seq": seq},
+        )
+
+
+def save_admin_backup_to_db(xlsx_bytes: bytes, filename: str, note: str | None = None) -> int:
+    """Persist an uploaded backup into the database (BYTEA) so it survives restarts."""
+    require_admin_action()
+    engine = get_engine()
+    uploaded_by = st.session_state.get("auth_user") or st.session_state.get("auth_name") or "admin"
+    with engine.begin() as conn:
+        result = conn.execute(
+            sql_text(
+                """INSERT INTO admin_backups (filename, uploaded_by, note, content)
+                   VALUES (:filename, :uploaded_by, :note, :content)
+                   RETURNING id_backup"""
+            ),
+            {
+                "filename": filename,
+                "uploaded_by": uploaded_by,
+                "note": note,
+                "content": xlsx_bytes,
+            },
+        )
+        backup_id = int(result.scalar())
+    return backup_id
+
+
+def list_admin_backups() -> pd.DataFrame:
+    engine = get_engine()
+    try:
+        return query_to_df(
+            "SELECT id_backup, filename, uploaded_at, uploaded_by, note FROM admin_backups ORDER BY uploaded_at DESC",
+            {},
+        )
+    except Exception:
+        # If table doesn't exist yet (first run), return empty
+        return pd.DataFrame(columns=["id_backup", "filename", "uploaded_at", "uploaded_by", "note"])
+
+
+def load_admin_backup_bytes(backup_id: int) -> bytes:
+    require_admin_action()
+    engine = get_engine()
+    with engine.begin() as conn:
+        b = conn.execute(
+            sql_text("SELECT content FROM admin_backups WHERE id_backup = :id"),
+            {"id": int(backup_id)},
+        ).scalar()
+    if b is None:
+        raise ValueError("Backup not found.")
+    return bytes(b)
+
+
+def restore_from_excel_backup_bytes(xlsx_bytes: bytes) -> dict[str, int]:
+    """Restore database tables from an Excel backup. Returns {table: rows_inserted}."""
+    require_admin_action()
+    data = _read_excel_backup_bytes(xlsx_bytes)
+
+    # Restore order helps if foreign keys exist (even if most tables don't enforce them)
+    preferred_order = [
+        "breweries",
+        "suppliers",
+        "ingredients",
+        "stock_movements",
+        "purchase_orders",
+        "purchase_order_items",
+        "recipes",
+        "recipe_items",
+        "composite_products",
+        "composite_product_items",
+        "equipment",
+        "production_batches",
+        "production_events",
+        "production_consumptions",
+        "calendar_events",
+    ]
+    tables = [t for t in preferred_order if t in data] + [t for t in data.keys() if t not in preferred_order]
+
+    engine = get_engine()
+    inserted: dict[str, int] = {}
+
+    with engine.begin() as conn:
+        # Clear in reverse order to reduce FK issues
+        for table in reversed(tables):
+            _truncate_or_delete_table(conn, table)
+
+        # Insert in order
+        for table in tables:
+            df = data[table]
+            if df is None or df.empty:
+                inserted[table] = 0
+                continue
+
+            # Replace pandas NA with None for SQLAlchemy
+            df2 = df.where(pd.notnull(df), None)
+
+            # Write
+            df2.to_sql(table, con=conn, if_exists="append", index=False, method="multi")
+
+            # Align sequences if needed
+            _reset_serial_sequences(conn, table, df2)
+
+            inserted[table] = int(len(df2))
+
+    bump_db_version()
+    return inserted
 
 # -----------------------------
 # FUNÇÕES ESPECÍFICAS DO NEGÓCIO
