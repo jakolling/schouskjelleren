@@ -25,7 +25,7 @@ import json
 # - Configure usuários/senhas (hash bcrypt) e cookie em .streamlit/secrets.toml
 # - Configure DATABASE_URL (Postgres recomendado). Ex:
 #   DATABASE_URL="postgresql+psycopg2://USER:PASSWORD@HOST:5432/DBNAME"
-from sqlalchemy import create_engine, text as sql_text
+from sqlalchemy import create_engine, text as sql_text, inspect
 from sqlalchemy.engine import Engine
 
 st.set_page_config(
@@ -2102,6 +2102,139 @@ def load_admin_backup_bytes(backup_id: int) -> bytes:
     return bytes(b)
 
 
+
+def _coerce_df_to_table(conn, table_name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce dataframe values to match DB column types to avoid DataError on restore."""
+    try:
+        cols = inspect(conn).get_columns(table_name)
+    except Exception:
+        # If reflection fails, fall back to generic cleaning
+        df2 = df.copy()
+        df2 = df2.where(pd.notnull(df2), None)
+        return df2
+
+    colinfo = {c["name"]: c for c in cols}
+
+    # Keep only columns that exist in the table (Excel may include extra helper columns)
+    df2 = df.copy()
+    keep_cols = [c for c in df2.columns if c in colinfo]
+    df2 = df2[keep_cols]
+
+    # Basic NA normalization
+    df2 = df2.where(pd.notnull(df2), None)
+
+    from sqlalchemy.sql.sqltypes import (
+        Integer, BigInteger, SmallInteger,
+        Numeric, Float,
+        Boolean,
+        DateTime, Date,
+        String, Text,
+        LargeBinary,
+    )
+
+    for col in df2.columns:
+        info = colinfo.get(col)
+        if not info:
+            continue
+        typ = info.get("type")
+        s = df2[col]
+
+        # remove timezone info if present
+        if pd.api.types.is_datetime64tz_dtype(s):
+            s = s.dt.tz_convert(None)
+
+        # Integers (Excel often turns them into floats)
+        if isinstance(typ, (Integer, BigInteger, SmallInteger)):
+            nums = pd.to_numeric(s, errors="coerce")
+            nums = nums.astype("Int64")
+            df2[col] = nums.where(~nums.isna(), None).astype(object)
+
+        # Floats / numeric
+        elif isinstance(typ, (Numeric, Float)):
+            nums = pd.to_numeric(s, errors="coerce")
+            nums = nums.replace([np.inf, -np.inf], np.nan)
+            df2[col] = nums.where(~pd.isna(nums), None).astype(object)
+
+        # Booleans
+        elif isinstance(typ, Boolean):
+            def _to_bool(x):
+                if x is None:
+                    return None
+                if isinstance(x, bool):
+                    return x
+                if isinstance(x, (int, np.integer)):
+                    return bool(int(x))
+                if isinstance(x, str):
+                    t = x.strip().lower()
+                    if t in {"true", "t", "yes", "y", "1"}:
+                        return True
+                    if t in {"false", "f", "no", "n", "0"}:
+                        return False
+                return None
+
+            df2[col] = s.apply(_to_bool).astype(object)
+
+        # Datetimes
+        elif isinstance(typ, DateTime):
+            dt = pd.to_datetime(s, errors="coerce", utc=False)
+            if pd.api.types.is_datetime64tz_dtype(dt):
+                dt = dt.dt.tz_convert(None)
+            df2[col] = dt.where(~pd.isna(dt), None).astype(object)
+
+        # Dates
+        elif isinstance(typ, Date):
+            dt = pd.to_datetime(s, errors="coerce")
+            dates = dt.dt.date
+            df2[col] = pd.Series(dates, index=df2.index).where(~pd.isna(dt), None).astype(object)
+
+        # Text / strings (also handles JSON-ish objects)
+        elif isinstance(typ, (String, Text)):
+            max_len = getattr(typ, "length", None)
+
+            def _to_str(x):
+                if x is None:
+                    return None
+                if isinstance(x, (dict, list, set, tuple)):
+                    x = json.dumps(x, ensure_ascii=False)
+                else:
+                    x = str(x)
+                if max_len and isinstance(max_len, int) and len(x) > max_len:
+                    x = x[:max_len]
+                return x
+
+            df2[col] = s.apply(_to_str).astype(object)
+
+        # Binary
+        elif isinstance(typ, LargeBinary):
+            def _to_bytes(x):
+                if x is None:
+                    return None
+                if isinstance(x, (bytes, bytearray)):
+                    return bytes(x)
+                if isinstance(x, str):
+                    return x.encode("utf-8")
+                return None
+
+            df2[col] = s.apply(_to_bytes).astype(object)
+
+        else:
+            # Generic: normalize containers and numpy scalars
+            def _norm(x):
+                if x is None:
+                    return None
+                if isinstance(x, float) and np.isnan(x):
+                    return None
+                if isinstance(x, (dict, list, set, tuple)):
+                    return json.dumps(x, ensure_ascii=False)
+                return _to_python_scalar(x)
+
+            df2[col] = s.apply(_norm).astype(object)
+
+    # Final NA cleanup
+    df2 = df2.where(pd.notnull(df2), None)
+    return df2
+
+
 def restore_from_excel_backup_bytes(xlsx_bytes: bytes) -> dict[str, int]:
     """Restore database tables from an Excel backup. Returns {table: rows_inserted}."""
     require_admin_action()
@@ -2124,6 +2257,7 @@ def restore_from_excel_backup_bytes(xlsx_bytes: bytes) -> dict[str, int]:
         "production_events",
         "production_consumptions",
         "calendar_events",
+        "admin_backups",
     ]
     tables = [t for t in preferred_order if t in data] + [t for t in data.keys() if t not in preferred_order]
 
@@ -2142,15 +2276,23 @@ def restore_from_excel_backup_bytes(xlsx_bytes: bytes) -> dict[str, int]:
                 inserted[table] = 0
                 continue
 
-            # Replace pandas NA with None for SQLAlchemy
-            df2 = df.where(pd.notnull(df), None)
+            df2 = _coerce_df_to_table(conn, table, df)
 
-            # Write
-            df2.to_sql(table, con=conn, if_exists="append", index=False, method="multi")
+            try:
+                df2.to_sql(
+                    table,
+                    con=conn,
+                    if_exists="append",
+                    index=False,
+                    method="multi",
+                    chunksize=500,
+                )
+            except Exception as e:
+                # Raise a clearer error that isn't redacted by Streamlit/SQLAlchemy
+                raise ValueError(f"Erro ao restaurar a tabela '{table}': {type(e).__name__}: {e}") from e
 
             # Align sequences if needed
             _reset_serial_sequences(conn, table, df2)
-
             inserted[table] = int(len(df2))
 
     bump_db_version()
