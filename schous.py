@@ -8,6 +8,7 @@ import io
 from pathlib import Path
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import plotly.express as px
 import calendar
 import html
 import re
@@ -4486,7 +4487,7 @@ if _logo_path:
     st.sidebar.image(_logo_path, width=140)
 
 page = st.sidebar.radio("Navigation", [
-    "Dashboard", "Breweries", "Ingredients", "Products", "Orders", "Purchases", 
+    "Dashboard", "Analytics", "Breweries", "Ingredients", "Products", "Orders", "Purchases", 
     "Recipes", "Production", "Calendar"
 ], key="page", on_change=_on_page_change)
 st.sidebar.markdown("---")
@@ -4836,6 +4837,843 @@ if page == "Dashboard":
         st.info("No production orders")
     
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+
+# -----------------------------
+# Analytics Hub (cross-module reports)
+# -----------------------------
+elif page == "Analytics":
+    st.title("📈 Analytics Hub")
+
+    data = get_all_data()
+
+    # Pull tables (best-effort)
+    ingredients_df = data.get('ingredients', pd.DataFrame())
+    movements_df = data.get('stock_movements', pd.DataFrame())
+
+    po_df = data.get('purchase_orders', pd.DataFrame())
+    poi_df = data.get('purchase_order_items', pd.DataFrame())
+    legacy_purchases_df = data.get('purchases', pd.DataFrame())
+
+    batches_df = data.get('production_batches', pd.DataFrame())
+    events_df = data.get('production_events', pd.DataFrame())
+    cons_df = data.get('production_consumptions', pd.DataFrame())
+    keg_df = data.get('production_keg_runs', pd.DataFrame())
+
+    orders_df = data.get('sales_orders', pd.DataFrame())
+    order_items_df = data.get('sales_order_items', pd.DataFrame())
+    products_df = data.get('composite_products', pd.DataFrame())
+    inv_df = data.get('composite_inventory', pd.DataFrame())
+
+    def _safe_float(x, default=0.0):
+        try:
+            if x is None or (isinstance(x, float) and pd.isna(x)):
+                return float(default)
+            return float(x)
+        except Exception:
+            return float(default)
+
+    def _safe_dt(s):
+        try:
+            return pd.to_datetime(s, errors='coerce')
+        except Exception:
+            return pd.to_datetime(pd.Series([None]))
+
+    def _month_str(dts: pd.Series) -> pd.Series:
+        d = pd.to_datetime(dts, errors='coerce')
+        return d.dt.to_period('M').astype(str)
+
+    # -----------------------------
+    # Normalize purchases (preferred model: purchase_orders + purchase_order_items)
+    # -----------------------------
+    purchases_df = pd.DataFrame()
+    if po_df is not None and not po_df.empty and poi_df is not None and not poi_df.empty:
+        try:
+            merged = poi_df.merge(
+                po_df,
+                left_on='purchase_order_id',
+                right_on='id_purchase_order',
+                how='left',
+                suffixes=('_item','')
+            )
+            purchases_df = pd.DataFrame({
+                'date': merged.get('date'),
+                'transaction_type': merged.get('transaction_type'),
+                'supplier': merged.get('supplier'),
+                'order_number': merged.get('order_number'),
+                'ingredient': merged.get('ingredient'),
+                'quantity': merged.get('quantity'),
+                'unit': merged.get('unit'),
+                'unit_cost': merged.get('effective_unit_cost'),
+                'total_cost': merged.get('total_cost'),
+                'notes': merged.get('notes'),
+            })
+        except Exception:
+            purchases_df = pd.DataFrame()
+    if purchases_df is None or purchases_df.empty:
+        # Legacy fallback
+        if legacy_purchases_df is not None and not legacy_purchases_df.empty:
+            # best-effort mapping
+            dcol = _col(legacy_purchases_df, 'purchase_date', 'date', 'created_date')
+            ingcol = _col(legacy_purchases_df, 'ingredient_name', 'ingredient')
+            supcol = _col(legacy_purchases_df, 'supplier_name', 'supplier')
+            qtycol = _col(legacy_purchases_df, 'quantity')
+            ucol = _col(legacy_purchases_df, 'unit')
+            tcol = _col(legacy_purchases_df, 'total_cost')
+            purchases_df = pd.DataFrame({
+                'date': legacy_purchases_df.get(dcol),
+                'transaction_type': 'Purchase',
+                'supplier': legacy_purchases_df.get(supcol),
+                'order_number': None,
+                'ingredient': legacy_purchases_df.get(ingcol),
+                'quantity': legacy_purchases_df.get(qtycol),
+                'unit': legacy_purchases_df.get(ucol),
+                'unit_cost': None,
+                'total_cost': legacy_purchases_df.get(tcol),
+                'notes': legacy_purchases_df.get('notes') if 'notes' in legacy_purchases_df.columns else None,
+            })
+
+    # -----------------------------
+    # Global filters
+    # -----------------------------
+    with st.expander("Filters", expanded=False):
+        c1, c2, c3, c4 = st.columns([1,1,1,1])
+
+        # Date bounds from whatever has dates
+        all_dates = []
+        for df, colnames in [
+            (purchases_df, ['date']),
+            (movements_df, ['movement_date','date','created_date']),
+            (orders_df, ['order_date','delivery_date','confirmed_date','fulfilled_date','created_date']),
+            (batches_df, ['planned_date','finished_date','created_date']),
+            (events_df, ['event_date','created_date']),
+        ]:
+            if df is None or df.empty:
+                continue
+            for c in colnames:
+                if c in df.columns:
+                    s = pd.to_datetime(df[c], errors='coerce')
+                    if s.notna().any():
+                        all_dates.append(s)
+                        break
+
+        if all_dates:
+            mind = pd.concat(all_dates).min().date()
+            maxd = pd.concat(all_dates).max().date()
+        else:
+            mind = date.today() - timedelta(days=90)
+            maxd = date.today()
+
+        with c1:
+            start = st.date_input('From', value=mind, min_value=mind, max_value=maxd, key='an_from')
+        with c2:
+            end = st.date_input('To', value=maxd, min_value=mind, max_value=maxd, key='an_to')
+        if start > end:
+            start, end = end, start
+
+        with c3:
+            gran = st.selectbox('Granularity', ['Day','Week','Month'], index=2, key='an_gran')
+
+        with c4:
+            currency = 'NOK'
+            try:
+                if orders_df is not None and not orders_df.empty and 'currency' in orders_df.columns:
+                    cur = orders_df['currency'].dropna().astype(str)
+                    currency = cur.iloc[0] if len(cur) else 'NOK'
+            except Exception:
+                currency = 'NOK'
+            st.caption(f"Currency: {currency}")
+
+    def _apply_date_range(df: pd.DataFrame, col: str) -> pd.DataFrame:
+        if df is None or df.empty or col not in df.columns:
+            return df
+        v = df.copy()
+        v[col] = pd.to_datetime(v[col], errors='coerce')
+        return v[(v[col] >= pd.to_datetime(start)) & (v[col] <= pd.to_datetime(end))]
+
+    tabs = st.tabs([
+        '✨ Overview',
+        '🏭 Production',
+        '📦 Inventory',
+        '🛒 Purchases',
+        '🚚 Orders & Deliveries',
+        '🧱 Report Builder'
+    ])
+
+    # -----------------------------
+    # 1) OVERVIEW
+    # -----------------------------
+    with tabs[0]:
+        st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+
+        # KPIs
+        c1, c2, c3, c4, c5 = st.columns(5)
+
+        # Ingredient stock value
+        stock_value = 0.0
+        low_stock_count = 0
+        if ingredients_df is not None and not ingredients_df.empty:
+            try:
+                if 'effective_unit_cost' not in ingredients_df.columns:
+                    ingredients_df = ingredients_df.copy()
+                    try:
+                        ingredients_df['effective_unit_cost'] = ingredients_df.apply(_ingredient_effective_unit_cost, axis=1)
+                    except Exception:
+                        ingredients_df['effective_unit_cost'] = pd.to_numeric(ingredients_df.get('unit_cost', 0), errors='coerce').fillna(0)
+
+                stc = pd.to_numeric(ingredients_df.get('stock', 0), errors='coerce').fillna(0)
+                cost = pd.to_numeric(ingredients_df.get('effective_unit_cost', 0), errors='coerce').fillna(0)
+                stock_value = float((stc * cost).sum() or 0)
+
+                if 'low_stock_threshold' in ingredients_df.columns:
+                    low_stock_count = int((stc < pd.to_numeric(ingredients_df['low_stock_threshold'], errors='coerce').fillna(0)).sum())
+            except Exception:
+                pass
+
+        # Finished goods on hand
+        finished_units = 0.0
+        if inv_df is not None and not inv_df.empty:
+            qcol = _col(inv_df, 'quantity_units')
+            if qcol:
+                try:
+                    finished_units = float(pd.to_numeric(inv_df[qcol], errors='coerce').fillna(0).sum() or 0)
+                except Exception:
+                    finished_units = 0.0
+
+        # Purchases in range
+        spend = 0.0
+        if purchases_df is not None and not purchases_df.empty and 'date' in purchases_df.columns:
+            pview = _apply_date_range(purchases_df, 'date')
+            try:
+                spend = float(pd.to_numeric(pview.get('total_cost', 0), errors='coerce').fillna(0).sum() or 0)
+            except Exception:
+                spend = 0.0
+
+        # Revenue in range
+        revenue = 0.0
+        if orders_df is not None and not orders_df.empty and 'order_date' in orders_df.columns:
+            oview = _apply_date_range(orders_df, 'order_date')
+            try:
+                # keep real orders
+                if 'status' in oview.columns:
+                    oview = oview[~oview['status'].astype(str).str.lower().isin(['draft','cancelled','canceled'])]
+                revenue = float(pd.to_numeric(oview.get('total', 0), errors='coerce').fillna(0).sum() or 0)
+            except Exception:
+                revenue = 0.0
+
+        # WIP volume
+        wip_l = 0.0
+        if batches_df is not None and not batches_df.empty:
+            try:
+                status_col = _col(batches_df, 'status')
+                vol_col = _col(batches_df, 'volume_remaining_l', 'planned_volume_l', 'brewed_volume_l')
+                if status_col and vol_col:
+                    tmp = batches_df.copy()
+                    tmp[status_col] = tmp[status_col].astype(str)
+                    tmp[vol_col] = pd.to_numeric(tmp[vol_col], errors='coerce').fillna(0)
+                    wip = tmp[tmp[status_col].str.lower().isin(['planned','in progress','brewing','fermenting','conditioning','packaging'])]
+                    wip_l = float(wip[vol_col].sum() or 0)
+            except Exception:
+                wip_l = 0.0
+
+        with c1:
+            st.metric('Ingredient stock value', f"{stock_value:,.0f} {currency}")
+        with c2:
+            st.metric('Low-stock items', f"{low_stock_count}")
+        with c3:
+            st.metric('Finished goods (units)', f"{finished_units:,.0f}")
+        with c4:
+            st.metric('Purchases (range)', f"{spend:,.0f} {currency}")
+        with c5:
+            st.metric('Sales (range)', f"{revenue:,.0f} {currency}")
+
+        st.markdown('---')
+
+        # Trendboard (Purchases vs Sales vs Production)
+        left, right = st.columns(2)
+
+        with left:
+            st.subheader('💸 Purchases vs 💰 Sales (monthly)')
+            # Build monthly series
+            pm = pd.DataFrame(columns=['Month','Purchases'])
+            sm = pd.DataFrame(columns=['Month','Sales'])
+
+            if purchases_df is not None and not purchases_df.empty and 'date' in purchases_df.columns:
+                pview = _apply_date_range(purchases_df, 'date')
+                if not pview.empty:
+                    pview = pview.copy()
+                    pview['Month'] = _month_str(pview['date'])
+                    pm = pview.groupby('Month', dropna=False).agg(Purchases=('total_cost','sum')).reset_index()
+
+            if orders_df is not None and not orders_df.empty and 'order_date' in orders_df.columns:
+                oview = _apply_date_range(orders_df, 'order_date')
+                if 'status' in oview.columns:
+                    oview = oview[~oview['status'].astype(str).str.lower().isin(['draft','cancelled','canceled'])]
+                if not oview.empty:
+                    oview = oview.copy()
+                    oview['Month'] = _month_str(oview['order_date'])
+                    sm = oview.groupby('Month', dropna=False).agg(Sales=('total','sum')).reset_index()
+
+            merged = pd.merge(pm, sm, on='Month', how='outer').fillna(0)
+            if not merged.empty:
+                merged = merged.sort_values('Month')
+                fig = go.Figure()
+                fig.add_trace(go.Bar(x=merged['Month'], y=merged['Purchases'], name='Purchases'))
+                fig.add_trace(go.Scatter(x=merged['Month'], y=merged['Sales'], name='Sales', yaxis='y2'))
+                fig.update_layout(
+                    height=420,
+                    xaxis_title='Month',
+                    yaxis_title=f'Purchases ({currency})',
+                    yaxis2=dict(title=f'Sales ({currency})', overlaying='y', side='right'),
+                    legend=dict(orientation='h')
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.caption('Not enough data in the selected range.')
+
+        with right:
+            st.subheader('📦 Stock movement heatmap')
+            if movements_df is None or movements_df.empty:
+                st.caption('No stock movements logged yet.')
+            else:
+                dcol = _col(movements_df, 'movement_date', 'date', 'created_date')
+                qtycol = _col(movements_df, 'delta_qty', 'quantity', 'qty')
+                dircol = _col(movements_df, 'direction', 'in_out', 'type')
+
+                mv = movements_df.copy()
+                if dcol:
+                    mv = _apply_date_range(mv, dcol)
+                    mv['Date'] = pd.to_datetime(mv[dcol], errors='coerce').dt.date
+                else:
+                    mv['Date'] = pd.NaT
+
+                if qtycol:
+                    mv['Qty'] = pd.to_numeric(mv[qtycol], errors='coerce').fillna(0)
+                else:
+                    mv['Qty'] = 0
+
+                if dircol:
+                    mv['Dir'] = mv[dircol].astype(str)
+                else:
+                    mv['Dir'] = 'N/A'
+
+                # Daily IN/OUT
+                day = mv.groupby(['Date','Dir']).agg(Qty=('Qty','sum')).reset_index()
+                if not day.empty:
+                    pivot = day.pivot(index='Date', columns='Dir', values='Qty').fillna(0)
+                    # show as heatmap per day (sum abs)
+                    pivot['Total'] = pivot.abs().sum(axis=1)
+                    fig = go.Figure(data=go.Heatmap(
+                        x=[str(d) for d in pivot.index],
+                        y=['Total'],
+                        z=[pivot['Total'].tolist()],
+                        colorbar=dict(title='Abs qty')
+                    ))
+                    fig.update_layout(height=180, margin=dict(l=10,r=10,t=30,b=10), title='Movement intensity')
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption('Tip: open Inventory → Stock History for the detailed audit trail.')
+                else:
+                    st.caption('Not enough movement data in range.')
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # -----------------------------
+    # 2) PRODUCTION
+    # -----------------------------
+    with tabs[1]:
+        st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+        st.subheader('🏭 Production analytics')
+
+        if batches_df is None or batches_df.empty:
+            st.info('No batches yet. Create a batch in Production to unlock these charts.')
+        else:
+            b = batches_df.copy()
+            dcol = _col(b, 'planned_date', 'created_date')
+            fcol = _col(b, 'finished_date', 'end_date')
+            pvol = _col(b, 'planned_volume_l', 'planned_volume')
+            bvol = _col(b, 'brewed_volume_l')
+            loss = _col(b, 'loss_l')
+            status = _col(b, 'status')
+            stage = _col(b, 'stage')
+            recipe = _col(b, 'recipe_name', 'product_name')
+            vessel = _col(b, 'current_vessel', 'vessel')
+
+            if dcol:
+                b = _apply_date_range(b, dcol)
+
+            # KPIs
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric('Batches (range)', len(b))
+            with c2:
+                if status:
+                    active = int(b[status].astype(str).str.lower().isin(['brewing','fermenting','conditioning','packaging','in progress']).sum())
+                else:
+                    active = 0
+                st.metric('Active / WIP', active)
+            with c3:
+                total_planned = float(pd.to_numeric(b.get(pvol, 0), errors='coerce').fillna(0).sum() or 0) if pvol else 0.0
+                st.metric('Planned volume (L)', f"{total_planned:,.0f}")
+            with c4:
+                total_brewed = float(pd.to_numeric(b.get(bvol, 0), errors='coerce').fillna(0).sum() or 0) if bvol else 0.0
+                st.metric('Brewed volume (L)', f"{total_brewed:,.0f}")
+
+            st.markdown('---')
+            left, right = st.columns(2)
+
+            with left:
+                st.subheader('Volume by month')
+                if dcol and pvol:
+                    tmp = b.copy()
+                    tmp[dcol] = pd.to_datetime(tmp[dcol], errors='coerce')
+                    tmp['Month'] = _month_str(tmp[dcol])
+                    tmp['Planned'] = pd.to_numeric(tmp[pvol], errors='coerce').fillna(0)
+                    if bvol:
+                        tmp['Brewed'] = pd.to_numeric(tmp[bvol], errors='coerce').fillna(0)
+                    else:
+                        tmp['Brewed'] = 0
+
+                    m = tmp.groupby('Month').agg(Planned=('Planned','sum'), Brewed=('Brewed','sum')).reset_index().sort_values('Month')
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(x=m['Month'], y=m['Planned'], name='Planned (L)'))
+                    fig.add_trace(go.Scatter(x=m['Month'], y=m['Brewed'], name='Brewed (L)', yaxis='y2'))
+                    fig.update_layout(height=420, yaxis_title='Planned (L)', yaxis2=dict(title='Brewed (L)', overlaying='y', side='right'), legend=dict(orientation='h'))
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.caption('Need planned_date + planned_volume_l columns.')
+
+            with right:
+                st.subheader('Stage / status mix')
+                if stage and status:
+                    tmp = b.copy()
+                    tmp['Stage'] = tmp[stage].astype(str)
+                    tmp['Status'] = tmp[status].astype(str)
+                    c = tmp.groupby(['Stage','Status']).size().reset_index(name='Count')
+                    if not c.empty:
+                        fig = px.treemap(c, path=['Stage','Status'], values='Count')
+                        fig.update_layout(height=420, margin=dict(l=10,r=10,t=30,b=10))
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.caption('No stage/status data.')
+                else:
+                    st.caption('Need stage + status columns in production_batches.')
+
+            st.markdown('---')
+            st.subheader('Top recipes by brewed volume')
+            if recipe and bvol:
+                tmp = b.copy()
+                tmp['Recipe'] = tmp[recipe].astype(str)
+                tmp['Brewed'] = pd.to_numeric(tmp[bvol], errors='coerce').fillna(0)
+                top = tmp.groupby('Recipe').agg(Brewed=('Brewed','sum')).reset_index().sort_values('Brewed', ascending=False).head(12)
+                if not top.empty:
+                    fig = px.bar(top, x='Recipe', y='Brewed')
+                    fig.update_layout(height=360, xaxis_title='Recipe', yaxis_title='Brewed volume (L)')
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Vessel utilization (simple)
+            st.subheader('Vessel utilization (current)')
+            if vessel:
+                tmp = b.copy()
+                tmp['Vessel'] = tmp[vessel].fillna('Unassigned').astype(str)
+                v = tmp.groupby('Vessel').size().reset_index(name='Batches').sort_values('Batches', ascending=False)
+                fig = px.bar(v.head(20), x='Vessel', y='Batches')
+                fig.update_layout(height=320)
+                st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # -----------------------------
+    # 3) INVENTORY
+    # -----------------------------
+    with tabs[2]:
+        st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+        st.subheader('📦 Inventory analytics')
+
+        subtabs = st.tabs(['Ingredients', 'Finished goods', 'Movement flow'])
+
+        # Ingredients
+        with subtabs[0]:
+            if ingredients_df is None or ingredients_df.empty:
+                st.info('No ingredients yet.')
+            else:
+                df = ingredients_df.copy()
+                try:
+                    if 'effective_unit_cost' not in df.columns:
+                        df['effective_unit_cost'] = df.apply(_ingredient_effective_unit_cost, axis=1)
+                except Exception:
+                    df['effective_unit_cost'] = pd.to_numeric(df.get('unit_cost', 0), errors='coerce').fillna(0)
+                df['stock'] = pd.to_numeric(df.get('stock', 0), errors='coerce').fillna(0)
+                df['value'] = df['stock'] * pd.to_numeric(df.get('effective_unit_cost', 0), errors='coerce').fillna(0)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    by_cat = None
+                    if 'category' in df.columns:
+                        by_cat = df.groupby(df['category'].fillna('Uncategorized')).agg(Value=('value','sum'), Items=('name','count')).reset_index().rename(columns={'category':'Category'})
+                    else:
+                        by_cat = pd.DataFrame({'Category':['All'], 'Value':[df['value'].sum()], 'Items':[len(df)]})
+                    fig = px.pie(by_cat, names='Category', values='Value', hole=0.35)
+                    fig.update_layout(height=360, title='Stock value by category')
+                    st.plotly_chart(fig, use_container_width=True)
+                with c2:
+                    top = df.sort_values('value', ascending=False).head(15)
+                    fig = px.bar(top, x='name', y='value')
+                    fig.update_layout(height=360, title='Top ingredients by stock value', xaxis_title='Ingredient', yaxis_title=f'Value ({currency})')
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown('---')
+                st.subheader('What is tying up cash right now?')
+                show_cols = [c for c in ['name','category','manufacturer','stock','unit','effective_unit_cost','value','low_stock_threshold','expiry_date'] if c in df.columns]
+                st.dataframe(df[show_cols].sort_values('value', ascending=False), use_container_width=True)
+
+        # Finished goods
+        with subtabs[1]:
+            if inv_df is None or inv_df.empty:
+                st.info('No finished goods movements yet. (They are created when you keg + fulfill orders.)')
+            else:
+                cid = _col(inv_df, 'composite_id')
+                cname = _col(inv_df, 'composite_name')
+                wh = _col(inv_df, 'warehouse')
+                q = _col(inv_df, 'quantity_units')
+
+                df = inv_df.copy()
+                if q:
+                    df['Qty'] = pd.to_numeric(df[q], errors='coerce').fillna(0)
+                else:
+                    df['Qty'] = 0
+                if cname:
+                    df['Product'] = df[cname].astype(str)
+                else:
+                    df['Product'] = df.get('composite_name', 'Product').astype(str)
+                df['Warehouse'] = df[wh].fillna('N/A').astype(str) if wh else 'N/A'
+
+                view = df.groupby(['Warehouse','Product']).agg(Units=('Qty','sum')).reset_index()
+                view = view.sort_values('Units', ascending=False)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    fig = px.bar(view.head(25), x='Product', y='Units', color='Warehouse')
+                    fig.update_layout(height=380, title='On-hand units (top products)')
+                    st.plotly_chart(fig, use_container_width=True)
+                with c2:
+                    by_wh = view.groupby('Warehouse').agg(Units=('Units','sum')).reset_index()
+                    fig = px.pie(by_wh, names='Warehouse', values='Units', hole=0.35)
+                    fig.update_layout(height=380, title='Finished goods distribution by warehouse')
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.dataframe(view, use_container_width=True)
+
+        # Movement flow
+        with subtabs[2]:
+            if movements_df is None or movements_df.empty:
+                st.info('No stock movements yet.')
+            else:
+                mv = movements_df.copy()
+                dcol = _col(mv, 'movement_date', 'date', 'created_date')
+                reason = _col(mv, 'reason')
+                src = _col(mv, 'source')
+                dst = _col(mv, 'destination')
+                qty = _col(mv, 'delta_qty', 'quantity', 'qty')
+
+                if dcol:
+                    mv = _apply_date_range(mv, dcol)
+                    mv[dcol] = pd.to_datetime(mv[dcol], errors='coerce')
+
+                mv['Qty'] = pd.to_numeric(mv.get(qty, 0), errors='coerce').fillna(0)
+                mv['Reason'] = mv.get(reason).fillna('N/A').astype(str) if reason else 'N/A'
+                mv['Source'] = mv.get(src).fillna('N/A').astype(str) if src else 'N/A'
+                mv['Destination'] = mv.get(dst).fillna('N/A').astype(str) if dst else 'N/A'
+
+                # Simple sankey: Source -> Reason -> Destination, using abs qty
+                s = mv.groupby(['Source','Reason','Destination']).agg(Flow=('Qty', lambda x: float(np.abs(pd.to_numeric(x, errors='coerce').fillna(0)).sum()))).reset_index()
+                s = s[s['Flow'] > 0].sort_values('Flow', ascending=False).head(60)
+
+                if s.empty:
+                    st.caption('No movement flow in range.')
+                else:
+                    labels = pd.Index(pd.concat([s['Source'], s['Reason'], s['Destination']]).unique()).tolist()
+                    idx = {k:i for i,k in enumerate(labels)}
+
+                    # Source->Reason
+                    src_nodes = s['Source'].map(idx)
+                    mid_nodes = s['Reason'].map(idx)
+                    dst_nodes = s['Destination'].map(idx)
+
+                    fig = go.Figure(data=[go.Sankey(
+                        node=dict(pad=10, thickness=12, label=labels),
+                        link=dict(
+                            source=pd.concat([src_nodes, mid_nodes]).tolist(),
+                            target=pd.concat([mid_nodes, dst_nodes]).tolist(),
+                            value=pd.concat([s['Flow'], s['Flow']]).tolist(),
+                        )
+                    )])
+                    fig.update_layout(height=520, title='Stock flow (abs qty) — Source → Reason → Destination')
+                    st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # -----------------------------
+    # 4) PURCHASES
+    # -----------------------------
+    with tabs[3]:
+        st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+        st.subheader('🛒 Purchases analytics')
+
+        if purchases_df is None or purchases_df.empty:
+            st.info('No purchases yet.')
+        else:
+            p = purchases_df.copy()
+            if 'date' in p.columns:
+                p = _apply_date_range(p, 'date')
+                p['date'] = pd.to_datetime(p['date'], errors='coerce')
+
+            p['total_cost'] = pd.to_numeric(p.get('total_cost', 0), errors='coerce').fillna(0)
+            p['quantity'] = pd.to_numeric(p.get('quantity', 0), errors='coerce').fillna(0)
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric('Transactions', len(p))
+            with c2:
+                st.metric('Total spent', f"{float(p['total_cost'].sum() or 0):,.0f} {currency}")
+            with c3:
+                st.metric('Avg spend / transaction', f"{float(p['total_cost'].mean() or 0):,.0f} {currency}")
+            with c4:
+                top_sup = ''
+                try:
+                    if 'supplier' in p.columns and p['supplier'].notna().any():
+                        top_sup = p.groupby('supplier')['total_cost'].sum().sort_values(ascending=False).index[0]
+                except Exception:
+                    top_sup = ''
+                st.metric('Top supplier', top_sup or '—')
+
+            st.markdown('---')
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader('Spend by month')
+                if 'date' in p.columns and p['date'].notna().any():
+                    p['Month'] = _month_str(p['date'])
+                    m = p.groupby('Month').agg(Spent=('total_cost','sum')).reset_index().sort_values('Month')
+                    fig = px.bar(m, x='Month', y='Spent')
+                    fig.update_layout(height=360, yaxis_title=f'Spent ({currency})')
+                    st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                st.subheader('Top suppliers')
+                if 'supplier' in p.columns and p['supplier'].notna().any():
+                    s = p.groupby('supplier').agg(Spent=('total_cost','sum')).reset_index().sort_values('Spent', ascending=False).head(15)
+                    fig = px.bar(s, x='supplier', y='Spent')
+                    fig.update_layout(height=360, xaxis_title='Supplier', yaxis_title=f'Spent ({currency})')
+                    st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown('---')
+            st.subheader('What are we buying the most? (top ingredients)')
+            if 'ingredient' in p.columns:
+                top = p.groupby('ingredient').agg(Spent=('total_cost','sum'), Qty=('quantity','sum')).reset_index().sort_values('Spent', ascending=False).head(20)
+                fig = px.scatter(top, x='Qty', y='Spent', hover_name='ingredient')
+                fig.update_layout(height=380, xaxis_title='Total quantity', yaxis_title=f'Total spent ({currency})')
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(top, use_container_width=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # -----------------------------
+    # 5) ORDERS & DELIVERIES
+    # -----------------------------
+    with tabs[4]:
+        st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+        st.subheader('🚚 Orders & deliveries analytics')
+
+        if orders_df is None or orders_df.empty:
+            st.info('No sales orders yet.')
+        else:
+            o = orders_df.copy()
+            # Ensure date columns
+            for c in ['order_date','delivery_date','confirmed_date','fulfilled_date','created_date']:
+                if c in o.columns:
+                    o[c] = pd.to_datetime(o[c], errors='coerce')
+
+            if 'order_date' in o.columns:
+                o = _apply_date_range(o, 'order_date')
+
+            if 'status' in o.columns:
+                o['Status'] = o['status'].astype(str)
+            else:
+                o['Status'] = 'N/A'
+
+            o['Total'] = pd.to_numeric(o.get('total', 0), errors='coerce').fillna(0)
+
+            # KPIs
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric('Orders (range)', len(o))
+            with c2:
+                st.metric('Revenue (range)', f"{float(o['Total'].sum() or 0):,.0f} {currency}")
+            with c3:
+                st.metric('Avg order value', f"{float(o['Total'].mean() or 0):,.0f} {currency}")
+            with c4:
+                fulfilled = 0
+                if 'fulfilled_date' in o.columns:
+                    fulfilled = int(o['fulfilled_date'].notna().sum())
+                st.metric('Fulfilled', fulfilled)
+
+            st.markdown('---')
+            c1, c2 = st.columns(2)
+
+            with c1:
+                st.subheader('Status funnel')
+                funnel = o.groupby('Status').size().reset_index(name='Count').sort_values('Count', ascending=False)
+                fig = px.bar(funnel, x='Status', y='Count')
+                fig.update_layout(height=340)
+                st.plotly_chart(fig, use_container_width=True)
+
+            with c2:
+                st.subheader('Revenue by month')
+                if 'order_date' in o.columns and o['order_date'].notna().any():
+                    o['Month'] = _month_str(o['order_date'])
+                    m = o.groupby('Month').agg(Revenue=('Total','sum')).reset_index().sort_values('Month')
+                    fig = px.line(m, x='Month', y='Revenue', markers=True)
+                    fig.update_layout(height=340, yaxis_title=f'Revenue ({currency})')
+                    st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown('---')
+            st.subheader('On-time delivery (Fulfilled vs requested delivery date)')
+            if 'delivery_date' in o.columns and 'fulfilled_date' in o.columns:
+                tmp = o.copy()
+                tmp = tmp[tmp['delivery_date'].notna() & tmp['fulfilled_date'].notna()]
+                if tmp.empty:
+                    st.caption('No fulfilled orders with a delivery date in the selected range.')
+                else:
+                    tmp['LateDays'] = (tmp['fulfilled_date'].dt.date - tmp['delivery_date'].dt.date).apply(lambda x: getattr(x, 'days', 0))
+                    tmp['OnTime'] = tmp['LateDays'] <= 0
+                    on_time_rate = float(tmp['OnTime'].mean() * 100.0)
+
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.metric('On-time %', f"{on_time_rate:.1f}%")
+                    with c2:
+                        st.metric('Avg days late', f"{float(tmp['LateDays'].clip(lower=0).mean() or 0):.1f}")
+                    with c3:
+                        st.metric('Worst delay (days)', f"{int(tmp['LateDays'].max() or 0)}")
+
+                    fig = px.histogram(tmp, x='LateDays', nbins=20)
+                    fig.update_layout(height=360, xaxis_title='Days late (<=0 means on time or early)')
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Breakdown by deposit/warehouse
+                    if 'deposit_name' in tmp.columns:
+                        b = tmp.groupby('deposit_name').agg(OnTime=('OnTime','mean'), Orders=('OnTime','size')).reset_index()
+                        b['OnTime%'] = b['OnTime'] * 100
+                        fig = px.bar(b.sort_values('OnTime%'), x='deposit_name', y='OnTime%')
+                        fig.update_layout(height=320, xaxis_title='Deposit', yaxis_title='On-time %')
+                        st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown('---')
+            st.subheader('Top customers')
+            if 'customer_name' in o.columns:
+                t = o.groupby('customer_name').agg(Revenue=('Total','sum'), Orders=('Total','size')).reset_index().sort_values('Revenue', ascending=False).head(20)
+                fig = px.bar(t, x='customer_name', y='Revenue')
+                fig.update_layout(height=360, xaxis_title='Customer', yaxis_title=f'Revenue ({currency})')
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(t, use_container_width=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # -----------------------------
+    # 6) REPORT BUILDER (generic pivot -> chart)
+    # -----------------------------
+    with tabs[5]:
+        st.markdown("<div class='section-box'>", unsafe_allow_html=True)
+        st.subheader('🧱 Report Builder')
+        st.caption('Build quick charts from any table without writing SQL. Great for ad-hoc questions.')
+
+        datasets = {
+            'Ingredients': ingredients_df,
+            'Stock movements': movements_df,
+            'Purchases (normalized)': purchases_df,
+            'Production batches': batches_df,
+            'Production consumptions': cons_df,
+            'Kegging runs': keg_df,
+            'Sales orders': orders_df,
+            'Sales order items': order_items_df,
+            'Finished goods inventory': inv_df,
+        }
+
+        ds_name = st.selectbox('Dataset', list(datasets.keys()), index=2, key='rb_ds')
+        df = datasets.get(ds_name, pd.DataFrame())
+
+        if df is None or df.empty:
+            st.info('This dataset is empty.')
+        else:
+            cols = df.columns.tolist()
+            # Suggest a date column if present
+            date_candidates = [c for c in cols if 'date' in c.lower() or c.lower().endswith('_at')]
+            num_candidates = [c for c in cols if pd.api.types.is_numeric_dtype(df[c]) or c.lower() in {'total','total_cost','line_total','quantity','delta_qty','planned_volume_l','brewed_volume_l','units_produced','quantity_units'}]
+            cat_candidates = [c for c in cols if c not in num_candidates and c not in date_candidates]
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                xcol = st.selectbox('X (group by)', cols, index=cols.index(date_candidates[0]) if date_candidates else 0, key='rb_x')
+            with c2:
+                ycol = st.selectbox('Y (metric)', num_candidates if num_candidates else cols, index=0, key='rb_y')
+            with c3:
+                agg = st.selectbox('Aggregation', ['sum','mean','count','min','max'], index=0, key='rb_agg')
+            with c4:
+                chart = st.selectbox('Chart', ['bar','line','area','scatter'], index=0, key='rb_chart')
+
+            color_by = st.selectbox('Color (optional)', ['—'] + cols, index=0, key='rb_color')
+
+            view = df.copy()
+            # If x is date-like, bucket by granularity
+            try:
+                if xcol in date_candidates:
+                    view[xcol] = pd.to_datetime(view[xcol], errors='coerce')
+                    view = view[(view[xcol] >= pd.to_datetime(start)) & (view[xcol] <= pd.to_datetime(end))]
+                    if gran == 'Month':
+                        view['__bucket'] = _month_str(view[xcol])
+                    elif gran == 'Week':
+                        view['__bucket'] = view[xcol].dt.to_period('W').astype(str)
+                    else:
+                        view['__bucket'] = view[xcol].dt.date.astype(str)
+                    gcol = '__bucket'
+                else:
+                    gcol = xcol
+            except Exception:
+                gcol = xcol
+
+            # Clean numeric
+            if agg != 'count':
+                view[ycol] = pd.to_numeric(view.get(ycol), errors='coerce')
+
+            group_cols = [gcol]
+            if color_by != '—' and color_by in view.columns:
+                group_cols.append(color_by)
+
+            if agg == 'count':
+                out = view.groupby(group_cols).size().reset_index(name='value')
+            else:
+                out = view.groupby(group_cols).agg(value=(ycol, agg)).reset_index()
+
+            if out.empty:
+                st.warning('No data after filters.')
+            else:
+                # Sort bucketed time
+                if gcol == '__bucket':
+                    out = out.sort_values('__bucket')
+                
+                if chart == 'bar':
+                    fig = px.bar(out, x=gcol, y='value', color=color_by if color_by != '—' else None)
+                elif chart == 'line':
+                    fig = px.line(out, x=gcol, y='value', color=color_by if color_by != '—' else None, markers=True)
+                elif chart == 'area':
+                    fig = px.area(out, x=gcol, y='value', color=color_by if color_by != '—' else None)
+                else:
+                    fig = px.scatter(out, x=gcol, y='value', color=color_by if color_by != '—' else None)
+
+                fig.update_layout(height=420, xaxis_title=xcol)
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(out, use_container_width=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # -----------------------------
 # Breweries Page
