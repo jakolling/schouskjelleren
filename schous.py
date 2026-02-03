@@ -3544,10 +3544,23 @@ def generate_production_report_pdf_bytes(batch_id: int) -> bytes:
     status = _first_nonempty(b.get('status'))
     vessel = _first_nonempty(b.get('current_vessel'), b.get('vessel'), b.get('fermenter'))
 
-    ibu = _first_nonempty(recipe_stats.get('ibu'), recipe_stats.get('IBU'))
+    ibu = _first_nonempty(
+        recipe_stats.get('ibus'),
+        recipe_stats.get('ibu'),
+        recipe_stats.get('IBU'),
+        recipe_stats.get('target_ibu'),
+        recipe_stats.get('ibu_target'),
+    )
     color_val = _first_nonempty(
-        recipe_stats.get('color'), recipe_stats.get('color_ebc'), recipe_stats.get('srm'),
-        recipe_stats.get('colour'), recipe_stats.get('color_srm')
+        recipe_stats.get('ebc'),
+        recipe_stats.get('color_ebc'),
+        recipe_stats.get('colour_ebc'),
+        recipe_stats.get('target_ebc'),
+        recipe_stats.get('ebc_target'),
+        recipe_stats.get('srm'),
+        recipe_stats.get('color'),
+        recipe_stats.get('colour'),
+        recipe_stats.get('color_srm'),
     )
 
     # Sort events by date if possible
@@ -5342,7 +5355,12 @@ elif page == "Analytics":
                         df['effective_unit_cost'] = df.apply(_ingredient_effective_unit_cost, axis=1)
                 except Exception:
                     df['effective_unit_cost'] = pd.to_numeric(df.get('unit_cost', 0), errors='coerce').fillna(0)
-                df['stock'] = pd.to_numeric(df.get('stock', 0), errors='coerce').fillna(0)
+                # Use the actual stock column from the DB schema (supports both 'stock' and 'quantity_in_stock')
+                _stock_col = _col(df, 'stock', 'quantity_in_stock')
+                if _stock_col:
+                    df['stock'] = pd.to_numeric(df[_stock_col], errors='coerce').fillna(0)
+                else:
+                    df['stock'] = 0.0
                 df['value'] = df['stock'] * pd.to_numeric(df.get('effective_unit_cost', 0), errors='coerce').fillna(0)
 
                 c1, c2 = st.columns(2)
