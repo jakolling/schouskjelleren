@@ -11806,18 +11806,37 @@ elif page == "Production":
         return (cap_l <= 0) or (float(volume_l) <= cap_l + 1e-9)
 
     def _recipe_scale_factor(recipe_id: str | None, batch_volume_l: float) -> float:
+        """Return scaling factor for recipe items based on batch volume.
+
+        Treat missing/NaN/invalid recipe batch size as 1.0 to avoid propagating NaNs.
+        """
         if not recipe_id or recipes_df is None or recipes_df.empty or not recipe_batch_col or not recipe_id_col:
             return 1.0
         m = recipes_df[recipes_df[recipe_id_col].astype(str) == str(recipe_id)]
         if m.empty:
             return 1.0
+
         try:
-            base = float(m.iloc[0][recipe_batch_col] or 0)
+            base_raw = m.iloc[0].get(recipe_batch_col)
         except Exception:
-            base = 0
-        if base <= 0:
+            base_raw = None
+
+        try:
+            base_num = float(pd.to_numeric(base_raw, errors='coerce'))
+        except Exception:
+            base_num = float('nan')
+
+        if pd.isna(base_num) or base_num <= 0:
             return 1.0
-        return float(batch_volume_l) / base
+
+        try:
+            vol_num = float(pd.to_numeric(batch_volume_l, errors='coerce'))
+        except Exception:
+            vol_num = float('nan')
+        if pd.isna(vol_num) or vol_num <= 0:
+            return 1.0
+
+        return vol_num / base_num
 
     # Layout
     tab_orders, tab_reports = st.tabs(["Orders & Actions", "Reports"])
@@ -12721,9 +12740,20 @@ elif page == "Production":
                                         if _row_id is None:
                                             _row_id = i
                                         original_ing = str(row.get(ri_ing_col) or '')
-                                        base_qty = float(row.get(ri_qty_col) or 0)
+                                        # Robust numeric conversion: treat NaN/None as 0
+                                        try:
+                                            _qty_raw = row.get(ri_qty_col)
+                                            _qty_num = pd.to_numeric(_qty_raw, errors='coerce')
+                                            base_qty = 0.0 if pd.isna(_qty_num) else float(_qty_num)
+                                        except Exception:
+                                            base_qty = 0.0
                                         unit = str(row.get(ri_unit_col) or '')
-                                        planned_qty = base_qty * float(scale)
+                                        try:
+                                            _scale_num = pd.to_numeric(scale, errors='coerce')
+                                            _scale_num = 1.0 if pd.isna(_scale_num) else float(_scale_num)
+                                        except Exception:
+                                            _scale_num = 1.0
+                                        planned_qty = base_qty * _scale_num
 
                                         # Build options including original even if it's not in the ingredients list
                                         opts = list(all_ing_opts)
@@ -12777,7 +12807,7 @@ elif page == "Production":
                                             actual_qty = st.number_input(
                                                 f"Qty ({unit or 'unit'})",
                                                 min_value=0.0,
-                                                value=float(planned_qty),
+                                                value=float(0.0 if (pd.isna(planned_qty) or not np.isfinite(float(planned_qty))) else planned_qty),
                                                 step=0.1,
                                                 key=f"brew_ing_qty_{batch_id}_{_row_id}",
                                                 help=f"Planned: {planned_qty:g} {unit}",
