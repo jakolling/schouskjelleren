@@ -1702,16 +1702,14 @@ def insert_data(table_name: str, data_dict: dict):
     except Exception:
         actual_cols = list(data_dict.keys())
 
+    cols_set = set(actual_cols)
     # Keep only keys that exist as columns
-    filtered = {k: _to_python_scalar(v) for k, v in data_dict.items() if k in set(actual_cols)}
+    filtered = {k: _to_python_scalar(v) for k, v in data_dict.items() if k in cols_set}
 
     if not filtered:
         raise ValueError(f"No valid columns to insert into '{table_name}'. Check schema vs UI fields.")
 
-    cols = ", ".join(filtered.keys())
-    placeholders = ", ".join([f":{k}" for k in filtered.keys()])
-
-    # Determine PK column for RETURNING
+    # Determine PK column for RETURNING / sequence-fixups
     singular = _singularize_table_name(table_name)
     pk_candidates = ["id", f"id_{singular}"]
     pk_col = pk_candidates[0]
@@ -1731,6 +1729,38 @@ def insert_data(table_name: str, data_dict: dict):
                 pk_col = best[0] if best else id_like[0]
         except Exception:
             pass
+
+    # IMPORTANT: when inserting via the app UI, we should never send explicit IDs.
+    # If an ID slips in (e.g., from an imported sheet/UI state), it can cause PK collisions.
+    for _k in list(filtered.keys()):
+        k = str(_k)
+        if k == "id" or k.startswith("id_"):
+            filtered.pop(_k, None)
+
+    if not filtered:
+        raise ValueError(f"No valid non-empty columns to insert into '{table_name}'.")
+
+    cols = ", ".join(filtered.keys())
+    placeholders = ", ".join([f":{k}" for k in filtered.keys()])
+
+    def _reset_pk_sequence_once(conn, tname: str, id_col: str) -> bool:
+        """Align Postgres sequence for a PK column to MAX(id_col). Returns True if it did something."""
+        try:
+            seq = conn.execute(
+                sql_text("SELECT pg_get_serial_sequence(:t, :c)"),
+                {"t": tname, "c": id_col},
+            ).scalar()
+            if not seq:
+                return False
+            conn.execute(
+                sql_text(
+                    f'SELECT setval(:seq, COALESCE((SELECT MAX("{id_col}") FROM "{tname}"), 1), true)'
+                ),
+                {"seq": seq},
+            )
+            return True
+        except Exception:
+            return False
     if dialect in {"postgresql", "postgres"}:
         sql = f"INSERT INTO {table_name} ({cols}) VALUES ({placeholders}) RETURNING {pk_col}"
         try:
@@ -1757,6 +1787,23 @@ def insert_data(table_name: str, data_dict: dict):
                         msg = str(orig)
                         # Auto-fix missing column if Postgres says UndefinedColumn (SQLSTATE 42703)
                         pgcode = getattr(orig, "pgcode", None)
+                        # Auto-fix sequence drift if we hit duplicate PK (SQLSTATE 23505)
+                        if pgcode == "23505" and "_pkey" in msg:
+                            try:
+                                with engine.begin() as conn:
+                                    did = False
+                                    if pk_col in cols_set:
+                                        did = _reset_pk_sequence_once(conn, table_name, pk_col) or did
+                                    if "id" in cols_set and pk_col != "id":
+                                        did = _reset_pk_sequence_once(conn, table_name, "id") or did
+                                if did:
+                                    # retry once after fixing sequence
+                                    with engine.begin() as conn:
+                                        conn.execute(sql_text(sql2), filtered)
+                                        bump_db_version()
+                                    return None
+                            except Exception:
+                                pass
                         if pgcode == "42703":
                             mcol = re.search(r'column "([^"]+)"', msg)
                             if mcol:
