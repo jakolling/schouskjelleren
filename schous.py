@@ -2040,21 +2040,23 @@ def _reset_serial_sequences(conn, table_name: str, df: pd.DataFrame) -> None:
     if dialect not in {"postgresql", "postgres"}:
         return
 
-    # Try to reset any serial sequence associated with id_* columns present in df
+    # Reset any serial sequence associated with ID columns present in df.
+    # Some tables use a plain "id" primary key, others use "id_*".
     for col in df.columns:
-        if not str(col).startswith("id_"):
+        colname = str(col)
+        if not (colname == "id" or colname.startswith("id_")):
             continue
         # pg_get_serial_sequence returns the sequence name if this column is backed by a sequence
         seq = conn.execute(
             sql_text("SELECT pg_get_serial_sequence(:t, :c)"),
-            {"t": table_name, "c": str(col)},
+            {"t": table_name, "c": colname},
         ).scalar()
         if not seq:
             continue
         conn.execute(
             sql_text(
                 "SELECT setval(:seq, COALESCE((SELECT MAX({col}) FROM \"{t}\"), 1), true)".format(
-                    col=str(col),
+                    col=colname,
                     t=table_name,
                 )
             ),
