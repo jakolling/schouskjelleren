@@ -93,23 +93,6 @@ def _to_python_scalar(value):
     # datetime/date are fine; strings/floats/ints fine
     return value
 
-    # Map common statuses to CSS classes
-    if s_low in {"active", "enabled", "open", "in stock", "available"}:
-        cls = "badge-green"
-    elif s_low in {"inactive", "disabled", "closed", "out of stock", "unavailable"}:
-        cls = "badge-gray"
-    elif s_low in {"planned", "draft"}:
-        cls = "badge-blue"
-    elif s_low in {"in progress", "brewing", "fermenting"}:
-        cls = "badge-orange"
-    elif s_low in {"completed", "done", "finished"}:
-        cls = "badge-green"
-    elif s_low in {"cancelled", "canceled", "error"}:
-        cls = "badge-red"
-    else:
-        cls = "badge-gray"
-
-    return f"<span class='status-badge {cls}'>{s}</span>"
 def _auth_users():
     """Return configured users from Streamlit secrets (optional).
 
@@ -1927,10 +1910,6 @@ def _get_all_data_uncached() -> dict[str, pd.DataFrame]:
     for table in table_names:
         data[table] = get_table_data(table)
     return data
-    data: dict[str, pd.DataFrame] = {}
-    for table in table_names:
-        data[table] = get_table_data(table)
-    return data
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _get_all_data_cached(db_version: int) -> dict[str, pd.DataFrame]:
@@ -2076,7 +2055,7 @@ def _truncate_or_delete_table(conn, table_name: str) -> None:
         raise ValueError(f"Invalid table name: {table_name}")
     dialect = conn.engine.dialect.name.lower()
     if dialect in {"postgresql", "postgres"}:
-        conn.execute(sql_text(f'TRUNCATE TABLE "{table_name}" RESTART IDENTITY CASCADE'))
+        conn.execute(sql_text(f'TRUNCATE TABLE "{safe}" RESTART IDENTITY CASCADE'))
     else:
         conn.execute(sql_text(f'DELETE FROM {table_name}'))
 
@@ -2102,10 +2081,7 @@ def _reset_serial_sequences(conn, table_name: str, df: pd.DataFrame) -> None:
             continue
         conn.execute(
             sql_text(
-                "SELECT setval(:seq, COALESCE((SELECT MAX({col}) FROM \"{t}\"), 1), true)".format(
-                    col=colname,
-                    t=table_name,
-                )
+                f"SELECT setval(:seq, COALESCE((SELECT MAX({colname}) FROM \"{table_name}\"), 1), true)"
             ),
             {"seq": seq},
         )
@@ -4088,6 +4064,34 @@ def check_supplier_usage(supplier_name):
     )
     return (not result.empty) and (result.iloc[0]["count"] > 0)
 
+def release_vessel(vessel_name: str) -> bool:
+    """Manually release a vessel, clearing it from any batch."""
+    require_admin_action()
+    
+    if not vessel_name or batches_df is None or batches_df.empty or not b_id_col or not b_vessel_col:
+        return False
+    
+    vessel_name = str(vessel_name).strip()
+    
+    # Find all batches currently using this vessel
+    affected_batches = []
+    for _, r in batches_df.iterrows():
+        batch_vessel = str(r.get(b_vessel_col) or '').strip()
+        if batch_vessel == vessel_name:
+            batch_status = str(r.get(b_status_col) or '').strip().lower()
+            # Only auto-release if batch is completed/cancelled
+            if batch_status in {'completed', 'cancelled', 'canceled'}:
+                affected_batches.append(int(r.get(b_id_col)))
+    
+    # Clear vessel from affected batches
+    for batch_id in affected_batches:
+        update_data('production_batches', 
+                   {'current_vessel': ''}, 
+                   f"{b_id_col} = :id", 
+                   {'id': batch_id})
+    
+    return True
+
 # -----------------------------
 # UI CONFIG
 # -----------------------------
@@ -5789,6 +5793,14 @@ elif page == "Breweries":
     
     brew_tabs = ["📍 Breweries", "⚙️ Equipment", "📊 Overview"]
     selected_brew_tab = st.radio("", brew_tabs, horizontal=True, key="breweries_tab")
+    
+    # Obter referências para as colunas usadas em toda a página
+    batches_df = data.get('production_batches', pd.DataFrame())
+    b_vessel_col = _col(batches_df, 'current_vessel')
+    b_id_col = _col(batches_df, 'id_batch', 'batch_id', 'id')
+    b_status_col = _col(batches_df, 'status')
+    b_code_col = _col(batches_df, 'batch_code')
+    
     if selected_brew_tab == "📍 Breweries":
         # Add Nova Beerria
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
@@ -5864,7 +5876,7 @@ elif page == "Breweries":
                         "default_batch_size": default_batch_size,
                         "annual_capacity_hl": annual_capacity,
                         "status": status,
-"established_date": established_date,
+                        "established_date": established_date,
                         "has_lab": 1 if has_lab else 0,
                         "description": description
                     }
@@ -6523,6 +6535,20 @@ elif page == "Breweries":
                             }
                             card_color = status_colors.get(eq["status"], "#6b7280")
                             
+                            # Verificar qual batch está ocupando
+                            active_batch_info = ""
+                            if eq.get('active_batches', ''):
+                                active_batch_info = f"Active batch: {eq.get('active_batches')}"
+                            elif eq.get('current_volume', 0) > 0:
+                                # Try to find which batch is in this vessel
+                                for _, br in batches_live.iterrows():
+                                    if str(br.get(vcol) or '').strip() == str(eq.get('name', '')).strip():
+                                        batch_status = str(br.get(scol) or '').strip().lower()
+                                        if batch_status not in {'completed', 'cancelled', 'canceled'}:
+                                            batch_code = br.get(codecol) or br.get('batch_code') or f"Batch #{br.get(b_id_col)}"
+                                            active_batch_info = f"Active: {batch_code}"
+                                            break
+                            
                             with st.container():
                                 st.markdown(f"""
                                 <div style="border: 2px solid {card_color}; border-radius: 10px; padding: 1rem; margin-bottom: 1rem;">
@@ -6531,15 +6557,14 @@ elif page == "Breweries":
                                     <p><strong>Brewery:</strong> {brewery_name}</p>
                                     <p><strong>Capacity:</strong> {eq['capacity_liters']:,}L</p>
                                     <p><strong>Current:</strong> {eq['current_volume']:,}L ({occupancy_pct:.1f}%)</p>
-                                    <p><strong>Active batch(es):</strong> {eq.get('active_batches','') or '—'}</p>
-                                    <p><strong>Status:</strong> {render_status_badge(eq['status'])}</p>
+                                    <p><strong>{active_batch_info if active_batch_info else 'Status:'}</strong> {render_status_badge(eq['status'])}</p>
                                     <p><strong>Manufacturer:</strong> {eq.get('manufacturer', 'N/A')}</p>
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
                                 st.progress(max(0.0, min(1.0, float(occupancy_pct)/100.0)) if occupancy_pct is not None else 0.0)
                                 
-                                col_edit, col_dup, col_transfer = st.columns(3)
+                                col_edit, col_dup, col_transfer, col_release = st.columns(4)
                                 with col_edit:
                                     if st.button("📝 Edit", key=f"edit_eq_{eq['id_equipment']}", use_container_width=True):
                                         st.session_state['edit_equipment'] = eq['id_equipment']
@@ -6558,6 +6583,33 @@ elif page == "Breweries":
                                 with col_transfer:
                                     if st.button("🔄 Transfer", key=f"transfer_eq_{eq['id_equipment']}", use_container_width=True):
                                         st.session_state['transfer_source'] = eq['name']
+                                
+                                # NOVO BOTÃO: Desocupar tanque
+                                if eq.get('current_volume', 0) > 0 or eq.get('active_batches', ''):
+                                    with col_release:
+                                        if st.button("🔄 Release", key=f"release_eq_{eq['id_equipment']}", 
+                                                    use_container_width=True, type="secondary"):
+                                            require_admin_action()
+                                            vessel_name = str(eq.get('name', '')).strip()
+                                            
+                                            # Find and clear the vessel from any batch
+                                            if batches_live is not None and not batches_live.empty and vcol and b_id_col:
+                                                updated = False
+                                                for _, br in batches_live.iterrows():
+                                                    if str(br.get(vcol) or '').strip() == vessel_name:
+                                                        batch_id = br.get(b_id_col)
+                                                        update_data('production_batches', 
+                                                                  {'current_vessel': ''}, 
+                                                                  f"{b_id_col} = :id", 
+                                                                  {'id': batch_id})
+                                                        updated = True
+                                                
+                                                if updated:
+                                                    st.success(f"✅ Vessel '{vessel_name}' released successfully!")
+                                                    data = get_all_data()
+                                                    st.rerun()
+                                                else:
+                                                    st.warning("No active batch found in this vessel.")
                     
                     # Tabela detalhada
                     st.markdown("---")
@@ -11849,13 +11901,35 @@ elif page == "Production":
         return s not in {'completed', 'cancelled', 'canceled'}
 
     def _vessel_is_free(vessel_name: str, current_batch_id: int) -> bool:
+        """Check if vessel is free (not occupied by another active batch).
+        
+        A vessel is considered occupied if:
+        - It has an active batch assigned (status not Completed/Cancelled)
+        - The batch is different from the current one being checked
+        """
         if not vessel_name or batches_df is None or batches_df.empty or not b_id_col or not b_vessel_col:
             return True
+        
+        vessel_name = str(vessel_name).strip()
+        if not vessel_name:
+            return True
+        
         for _, r in batches_df.iterrows():
+            # Skip the current batch we're checking
             if int(r.get(b_id_col)) == int(current_batch_id):
                 continue
-            if str(r.get(b_vessel_col) or '') == str(vessel_name) and _is_active_batch_status(str(r.get(b_status_col) or '')):
+            
+            # Check if this batch has this vessel assigned
+            batch_vessel = str(r.get(b_vessel_col) or '').strip()
+            if batch_vessel != vessel_name:
+                continue
+            
+            # Check if batch is active (not completed/cancelled)
+            batch_status = str(r.get(b_status_col) or '').strip().lower()
+            if batch_status not in {'completed', 'cancelled', 'canceled'}:
+                # Found another active batch using this vessel
                 return False
+        
         return True
 
     def _vessel_capacity_ok(vessel_name: str, volume_l: float) -> bool:
