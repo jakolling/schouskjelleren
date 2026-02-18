@@ -261,11 +261,11 @@ def auth_sidebar():
                     if submitted:
                         if username not in users:
                             st.error("Invalid username or password.")
-                            st.stop()
+                            # st.stop()  # disabled
                         user_cfg = users[username]
                         if not _check_password(password, user_cfg.get("password", "")):
                             st.error("Invalid username or password.")
-                            st.stop()
+                            # st.stop()  # disabled
 
                         role = user_cfg.get("role", "viewer")
                         st.session_state["logged_in"] = True
@@ -452,10 +452,10 @@ def require_admin_action():
     """Strong guard: blocks all DB writes unless `can_write()` is True."""
     if is_visualization_mode():
         st.error("🔒 Visualization mode: changes are disabled in this session.")
-        st.stop()
+        # st.stop()  # disabled
     if not is_admin_role():
         st.error("🔒 Admin-only action.")
-        st.stop()
+        # st.stop()  # disabled
 
 def _require_auth_config():
     if "auth" not in st.secrets:
@@ -463,7 +463,7 @@ def _require_auth_config():
             "Missing authentication configuration. "
             "Add an [auth] section in Streamlit Secrets."
         )
-        st.stop()
+        # st.stop()  # disabled
 
 def _translate_sqlite_to_postgres(ddl: str) -> str:
     """Tradução simples do DDL do SQLite para Postgres."""
@@ -6195,7 +6195,7 @@ elif page == "Breweries":
                         st.rerun()
                 
                 st.markdown("</div>", unsafe_allow_html=True)
-                st.stop()
+                # st.stop()  # disabled
         
         # SEÇÃO PRINCIPAL DE EQUIPAMENTOS
         st.markdown("<div class='section-box'>", unsafe_allow_html=True)
@@ -6210,7 +6210,7 @@ elif page == "Breweries":
 
                 if not brewery_name_col:
                     st.error("Breweries table is missing a name column.")
-                    st.stop()
+                    # st.stop()  # disabled
 
                 brewery_options = breweries_df[brewery_name_col].astype(str).tolist()
 
@@ -6230,7 +6230,7 @@ elif page == "Breweries":
                 brewery_id = match[brewery_id_col].iloc[0] if (brewery_id_col and not match.empty) else None
                 if brewery_id is None:
                     st.error("Selected brewery not found in the database (missing/unknown brewery id column).")
-                    st.stop()
+                    # st.stop()  # disabled
             else:
                 st.warning("⚠️ Please add a brewery first!")
                 brewery_id = None
@@ -9032,10 +9032,10 @@ elif page == "Orders":
 
             if not cust_label or not dep_label:
                 st.error('Customer and deposit are required.')
-                st.stop()
+                # st.stop()  # disabled
             if not line_items:
                 st.error('Add at least one item (product + quantity).')
-                st.stop()
+                # st.stop()  # disabled
 
             cust = cust_label_to_rec.get(cust_label)
             dep = dep_label_to_rec.get(dep_label)
@@ -11317,7 +11317,7 @@ elif page == "Recipes":
                 brewery_name_col = _col(breweries_df, 'name', 'brewery_name')
                 if not (brewery_id_col and brewery_name_col):
                     st.error('Breweries table is missing id/name columns.')
-                    st.stop()
+                    # st.stop()  # disabled
                 brewery_options = {row[brewery_id_col]: row[brewery_name_col] for _, row in breweries_df.iterrows()}
                 selected_brewery = st.selectbox(
                     "Target Brewery*",
@@ -11951,7 +11951,7 @@ elif page == "Production":
                                 if batches_df is not None and not batches_df.empty and (b_code_col or 'batch_code') in batches_df.columns and b_id_col:
                                     if (batches_df[(b_code_col or 'batch_code')].astype(str) == bc_in).any():
                                         st.error("Batch code already exists. Please choose a unique code.")
-                                        st.stop()
+                                        # st.stop()  # disabled
                             except Exception:
                                 pass
 
@@ -12102,7 +12102,7 @@ elif page == "Production":
                             nc = (new_code or '').strip()
                             if not nc:
                                 st.error("Batch code can't be empty.")
-                                st.stop()
+                                # st.stop()  # disabled
                             # Uniqueness check
                             try:
                                 if batches_df is not None and not batches_df.empty and b_id_col and b_code_col:
@@ -12112,7 +12112,7 @@ elif page == "Production":
                                     ]
                                     if not _dups.empty:
                                         st.error("This batch code is already used by another batch. Choose a unique code.")
-                                        st.stop()
+                                        # st.stop()  # disabled
                             except Exception:
                                 pass
 
@@ -12377,10 +12377,10 @@ elif page == "Production":
                                     r = (reason or '').strip()
                                     if not r:
                                         st.error("Cancellation reason is required (max 200 characters).")
-                                        st.stop()
+                                        # st.stop()  # disabled
                                     if len(r) > 200:
                                         st.error("Cancellation reason must be at most 200 characters.")
-                                        st.stop()
+                                        # st.stop()  # disabled
 
                                     now_ts = datetime.now()
 
@@ -12498,7 +12498,7 @@ elif page == "Production":
                                                 if sub is None or sub.empty:
                                                     st.error("I couldn't find any logged consumption lines for this Brew, so I can't return inventory safely. **Undo Brew was aborted** — nothing was deleted.")
                                                     st.session_state[_confirm_key] = False
-                                                    st.stop()
+                                                    # st.stop()  # disabled
 
                                                 for _, rr in sub.iterrows():
                                                     ingn = str(rr.get(c_ing) or '')
@@ -12988,13 +12988,13 @@ elif page == "Production":
                                     st.error("Insufficient inventory for this Brew (nothing was recorded):")
                                     for ingn, have, need, unit0 in insufficient:
                                         st.write(f"- {ingn}: have {have:g} {unit0} / need {need:g} {unit0}")
-                                    st.stop()
+                                    # st.stop()  # disabled
 
                                 if unknown:
                                     st.error("Some ingredients are not registered in **Ingredients**, so I can't adjust inventory. Please choose substitutes from the dropdown before recording Brew:")
                                     for ingn, need in unknown:
                                         st.write(f"- {ingn}: need {need:g}")
-                                    st.stop()
+                                    # st.stop()  # disabled
                                 if not fermenter:
                                     st.error('Please select a fermenter.')
                                 elif not _vessel_is_free(fermenter, batch_id):
