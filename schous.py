@@ -6537,7 +6537,7 @@ elif page == "Breweries":
                                 </div>
                                 """, unsafe_allow_html=True)
                                 
-                                st.progress(occupancy_pct / 100)
+                                st.progress(max(0.0, min(1.0, float(occupancy_pct)/100.0)) if occupancy_pct is not None else 0.0)
                                 
                                 col_edit, col_dup, col_transfer = st.columns(3)
                                 with col_edit:
