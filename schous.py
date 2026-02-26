@@ -8459,7 +8459,7 @@ elif page == "Products":
                     'reason': 'Opening Balance',
                     'notes': 'Initial stock before app',
                 }
-            ])[cols]
+            ))[cols]
             products_list = pd.DataFrame(
                 [{'composite_id': int(r.get(comp_id_col)), 'composite_name': str(r.get(comp_name_col) or '')} for r in (composites_df.to_dict('records') if composites_df is not None and not composites_df.empty and comp_id_col and comp_name_col else [])]
             )
@@ -13778,35 +13778,144 @@ elif page == "Production":
                             remaining = float(remaining_vol)
                             loss_hint = f"{remaining:g} L" if remaining > 0 else "0 L"
                             st.warning(f"Remaining beer in tank: {loss_hint}")
+                            
                             with st.form(f'finish_{batch_id}', clear_on_submit=True):
                                 d = st.date_input('Finish date', date.today())
-                                mark_loss = st.checkbox(f"Finish batch and mark remaining volume as loss ({loss_hint})", value=True)
+                                
+                                # Opção de perdas
+                                loss_option = st.radio(
+                                    "Loss calculation method",
+                                    ["Automatic (mark remaining as loss)", "Manual loss input"],
+                                    horizontal=True,
+                                    key=f"loss_option_{batch_id}"
+                                )
+                                
+                                if loss_option == "Manual loss input":
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        manual_loss = st.number_input(
+                                            "Manual loss (L)", 
+                                            min_value=0.0, 
+                                            max_value=remaining,
+                                            value=0.0,
+                                            step=0.1,
+                                            key=f"manual_loss_{batch_id}"
+                                        )
+                                    with col2:
+                                        remaining_after_loss = remaining - manual_loss
+                                        st.metric("Remaining after loss", f"{remaining_after_loss:g} L")
+                                    
+                                    # Opção para o que fazer com o volume restante
+                                    remaining_action = st.radio(
+                                        "What happens to the remaining volume?",
+                                        ["Mark as loss (add to total loss)", "Keep in tank (don't finish)", "Transfer to serving tank"],
+                                        key=f"remaining_action_{batch_id}"
+                                    )
+                                    
+                                    if remaining_action == "Transfer to serving tank":
+                                        serving_tank = st.text_input("Serving tank name", key=f"serving_tank_{batch_id}")
+                                    else:
+                                        serving_tank = None
+                                else:
+                                    manual_loss = 0.0
+                                    remaining_action = "Mark as loss (add to total loss)"
+                                    serving_tank = None
+                                
                                 notes = st.text_area('Notes', height=80)
                                 submit = st.form_submit_button('Finish batch', type='primary', use_container_width=True)
 
                             if submit:
                                 require_admin_action()
-                                loss_l = remaining if mark_loss else 0.0
+                                
+                                if loss_option == "Manual loss input" and manual_loss > remaining:
+                                    st.error("Manual loss cannot exceed remaining volume!")
+                                    # st.stop()  # disabled
+                                    
+                                if loss_option == "Manual loss input" and manual_loss < 0:
+                                    st.error("Manual loss must be non-negative!")
+                                    # st.stop()  # disabled
+                                
+                                # Calcular perdas baseado na opção escolhida
+                                if loss_option == "Automatic (mark remaining as loss)":
+                                    loss_l = remaining
+                                    new_remaining = 0.0
+                                    final_vessel = ''
+                                    event_meta = {'loss_l': float(loss_l), 'loss_method': 'automatic'}
+                                else:
+                                    # Manual loss input
+                                    loss_l = manual_loss
+                                    new_remaining = remaining - manual_loss
+                                    
+                                    if remaining_action == "Mark as loss (add to total loss)":
+                                        # Add the remaining volume to loss as well
+                                        loss_l = remaining  # total loss = manual loss + remaining
+                                        new_remaining = 0.0
+                                        final_vessel = ''
+                                        event_meta = {
+                                            'loss_l': float(loss_l), 
+                                            'loss_method': 'manual',
+                                            'manual_loss': float(manual_loss),
+                                            'remaining_action': 'marked_as_loss'
+                                        }
+                                    elif remaining_action == "Keep in tank (don't finish)":
+                                        # Don't finish the batch, just record the loss
+                                        st.info("Batch not finished. Only loss recorded.")
+                                        final_vessel = current_vessel
+                                        event_meta = {
+                                            'loss_l': float(loss_l),
+                                            'loss_method': 'manual',
+                                            'manual_loss': float(manual_loss),
+                                            'remaining_action': 'kept_in_tank'
+                                        }
+                                    else:  # Transfer to serving tank
+                                        final_vessel = serving_tank
+                                        event_meta = {
+                                            'loss_l': float(loss_l),
+                                            'loss_method': 'manual',
+                                            'manual_loss': float(manual_loss),
+                                            'remaining_action': 'transferred_to_serving',
+                                            'serving_tank': serving_tank
+                                        }
+                                
+                                # Insert event
                                 insert_data('production_events', {
                                     'batch_id': batch_id,
                                     'event_type': 'Finish Batch',
                                     'event_date': pd.Timestamp(d),
                                     'from_vessel': current_vessel,
-                                    'to_vessel': current_vessel,
+                                    'to_vessel': final_vessel,
                                     'notes': notes,
                                     'created_by': st.session_state.get('auth_user', 'admin'),
-                                    'meta': json.dumps({'loss_l': float(loss_l)}, ensure_ascii=False),
+                                    'meta': json.dumps(event_meta, ensure_ascii=False),
                                 })
-                                # accumulate loss
+                                
+                                # Update batch
                                 prior_loss = float(selected_batch.get(b_loss_col) or 0) if b_loss_col else 0.0
-                                update_data('production_batches', {
+                                
+                                update_dict = {
                                     'loss_l': float(prior_loss) + float(loss_l),
-                                    'volume_remaining_l': 0.0,
-                                    'status': 'Completed',
-                                    'stage': 'Completed',
+                                    'volume_remaining_l': new_remaining,
                                     'finished_date': d,
-                                }, f"{b_id_col} = :id", {'id': batch_id})
-                                st.success('✅ Batch completed.')
+                                }
+                                
+                                # Only mark as completed if we're actually finishing
+                                if remaining_action in ["Mark as loss (add to total loss)", "Transfer to serving tank"]:
+                                    update_dict['status'] = 'Completed'
+                                    update_dict['stage'] = 'Completed'
+                                
+                                if remaining_action == "Transfer to serving tank":
+                                    update_dict['current_vessel'] = serving_tank
+                                
+                                update_data('production_batches', 
+                                           update_dict,
+                                           f"{b_id_col} = :id", 
+                                           {'id': batch_id})
+                                
+                                if remaining_action == "Keep in tank (don't finish)":
+                                    st.success(f'✅ Loss of {loss_l:g} L recorded. Batch remains active in {current_vessel}.')
+                                else:
+                                    st.success(f'✅ Batch completed. Total loss: {loss_l:g} L')
+                                
                                 st.rerun()
 
     with tab_reports:
