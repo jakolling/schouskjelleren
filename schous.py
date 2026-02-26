@@ -8442,34 +8442,58 @@ elif page == "Products":
                 'unit_cost', 'currency',
                 'movement_date', 'reason', 'notes'
             ]
-            example = pd.DataFrame([
-                {
-                    'composite_id': (int(composites_df.iloc[0][comp_id_col]) if (composites_df is not None and not composites_df.empty and comp_id_col) else None),
-                    'composite_name': (str(composites_df.iloc[0][comp_name_col]) if (composites_df is not None and not composites_df.empty and comp_name_col) else ''),
-                    # Optional: "sell price" you want to store manually during opening
+            
+            # Get first composite for example
+            example_data = {}
+            if composites_df is not None and not composites_df.empty and comp_id_col and comp_name_col:
+                example_data = {
+                    'composite_id': int(composites_df.iloc[0][comp_id_col]),
+                    'composite_name': str(composites_df.iloc[0][comp_name_col] or ''),
                     'product_unit_price': 0.0,
                     'product_currency': 'NOK',
-                    # Stock movement
-                    'warehouse': (deposit_names[0] if deposit_names else 'Main'),
+                    'warehouse': deposit_names[0] if deposit_names else 'Main',
                     'quantity_units': 10,
-                    # Optional: cost valuation for this inbound movement
                     'unit_cost': 120.0,
                     'currency': 'NOK',
                     'movement_date': date.today().isoformat(),
                     'reason': 'Opening Balance',
                     'notes': 'Initial stock before app',
                 }
-            ))[cols]
-            products_list = pd.DataFrame(
-                [{'composite_id': int(r.get(comp_id_col)), 'composite_name': str(r.get(comp_name_col) or '')} for r in (composites_df.to_dict('records') if composites_df is not None and not composites_df.empty and comp_id_col and comp_name_col else [])]
-            )
+            else:
+                example_data = {
+                    'composite_id': None,
+                    'composite_name': '',
+                    'product_unit_price': 0.0,
+                    'product_currency': 'NOK',
+                    'warehouse': 'Main',
+                    'quantity_units': 10,
+                    'unit_cost': 120.0,
+                    'currency': 'NOK',
+                    'movement_date': date.today().isoformat(),
+                    'reason': 'Opening Balance',
+                    'notes': 'Initial stock before app',
+                }
+            
+            example = pd.DataFrame([example_data])[cols]
+            
+            # Products lookup sheet
+            products_list = pd.DataFrame()
+            if composites_df is not None and not composites_df.empty and comp_id_col and comp_name_col:
+                products_list = pd.DataFrame([
+                    {'composite_id': int(r.get(comp_id_col)), 'composite_name': str(r.get(comp_name_col) or '')} 
+                    for _, r in composites_df.iterrows()
+                ])
+            
+            # Warehouses lookup sheet
             deposits_list = pd.DataFrame([{'warehouse': str(n)} for n in (deposit_names or [])])
+            
             with pd.ExcelWriter(out, engine='openpyxl') as writer:
                 example.to_excel(writer, sheet_name='FinishedGoods_Import', index=False)
                 if not products_list.empty:
                     products_list.to_excel(writer, sheet_name='Products_Lookup', index=False)
                 if not deposits_list.empty:
                     deposits_list.to_excel(writer, sheet_name='Warehouses_Lookup', index=False)
+            
             out.seek(0)
             return out.read()
 
